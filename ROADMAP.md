@@ -1,0 +1,81 @@
+# b1cc Roadmap
+
+## M0: Prototype
+
+- [x] Create a clean-room compiler repository.
+- [x] Parse `int main(void) { return expression; }`.
+- [x] Support integer literals and `+ - * /` precedence.
+- [x] Emit Darwin ARM64 assembly for host smoke tests.
+- [x] Add a tiny runnable test script.
+
+## M1: C++17 Compiler Core
+
+- [ ] Rewrite the prototype in C++17.
+- [ ] Build with `-std=c++17 -fno-exceptions -fno-rtti`.
+- [ ] Keep one binary: `b1cc`.
+- [ ] Add lexer, parser, AST, diagnostics, IR, and backend as small modules.
+- [ ] Preserve the current expression-return tests.
+
+## M2: Minimal Internal IR
+
+- [ ] Define a small b1cc IR independent of LLVM/QBE.
+- [ ] Support functions, constants, arithmetic, and return.
+- [ ] Keep backend selection behind a tiny interface.
+- [ ] Emit Darwin ARM64 assembly from IR.
+
+## M3: C Subset 0
+
+- [ ] Parse simple C functions.
+- [ ] Support `int`, `char`, `long`, `void`, pointers, and string literals.
+- [ ] Support local variables, assignment, blocks, `if`, `while`, and `for`.
+- [ ] Support function calls with fixed arguments.
+- [ ] Add tests for every new syntax feature.
+
+## M4: B1NIX Backend 0
+
+- [ ] Emit x86_64 B1NIX assembly.
+- [ ] Produce code compatible with the B1NIX C ABI.
+- [ ] Compile and run `return 42` inside B1NIX.
+- [ ] Add i386 only after x86_64 works.
+
+## M5: M25-Level C
+
+- [ ] Compile hello output.
+- [ ] Compile argv/file-write checks.
+- [ ] Compile stderr and exit-status checks.
+- [ ] Support enough libc calls for the full M25 smoke shape.
+- [ ] Keep TCC as fallback until b1cc passes equivalent tests.
+
+## M6: Object and ELF Output
+
+- [ ] Emit relocatable objects or final static ELF.
+- [ ] Add symbols, relocations, sections, and simple debug dumps.
+- [ ] Stop relying on host `cc` for normal B1NIX output.
+
+## M7: Better C
+
+- [ ] Add structs, enums, typedefs, casts, initializers, and arrays.
+- [ ] Add a small preprocessor path for includes/comments.
+- [ ] Add object-like macros when a real test needs them.
+- [ ] Support varargs calls well enough for `printf`-style declarations.
+- [ ] Expand tests from B1NIX userspace sources, not random internet code.
+
+## M8: Self-Hosting Track
+
+- [ ] Compile selected b1cc source files with b1cc.
+- [ ] Compile all b1cc C support code, if any.
+- [ ] Keep the C++ core host-built until b1cxx exists.
+
+## M9: Optional External Backend
+
+- [ ] Evaluate QBE after the internal IR is stable.
+- [ ] Add QBE only if it reduces backend work for real tests.
+- [ ] Do not expose QBE details to the frontend.
+- [ ] Defer LLVM until optimizer/debug-info/many-target needs are concrete.
+
+## M10: C++ Frontend
+
+- [ ] Start `b1cxx` as a separate frontend using the same IR/backend.
+- [ ] Add namespaces, references, classes, methods, constructors, and mangling.
+- [ ] Add overloads before templates.
+- [ ] Add templates, exceptions, and RTTI only when B1NIX needs them.
