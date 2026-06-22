@@ -10,18 +10,18 @@
 
 ## M1: C++17 Compiler Core
 
-- [ ] Rewrite the prototype in C++17.
-- [ ] Build with `-std=c++17 -fno-exceptions -fno-rtti`.
-- [ ] Keep one binary: `b1cc`.
+- [x] Rewrite the prototype in C++17.
+- [x] Build with `-std=c++17 -fno-exceptions -fno-rtti`.
+- [x] Keep one binary: `b1cc`.
 - [ ] Add lexer, parser, AST, diagnostics, IR, and backend as small modules.
-- [ ] Preserve the current expression-return tests.
+- [x] Preserve the current expression-return tests.
 
 ## M2: Minimal Internal IR
 
-- [ ] Define a small b1cc IR independent of LLVM/QBE.
-- [ ] Support functions, constants, arithmetic, and return.
-- [ ] Keep backend selection behind a tiny interface.
-- [ ] Emit Darwin ARM64 assembly from IR.
+- [x] Define a small b1cc IR independent of LLVM/QBE.
+- [x] Support functions, constants, arithmetic, and return.
+- [x] Keep backend selection behind a tiny interface.
+- [x] Emit Darwin ARM64 assembly from IR.
 
 ## M3: C Subset 0
 
