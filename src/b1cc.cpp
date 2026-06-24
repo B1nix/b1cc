@@ -3,6 +3,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <map>
 #include <sstream>
 #include <string>
 #include <unistd.h>
@@ -19,16 +20,21 @@ struct Node {
   std::unique_ptr<Node> lhs;
   std::unique_ptr<Node> rhs;
   std::vector<std::unique_ptr<Node>> body;
+  std::vector<std::string> params;
 };
 
 struct IrInst {
   std::string op;
+  std::string arg;
   long value = 0;
 };
 
 struct IrFunction {
   std::string name;
+  std::vector<std::string> params;
   std::vector<IrInst> code;
+  std::map<std::string, int> locals;
+  bool has_call = false;
 };
 
 [[noreturn]] static void die(const std::string &msg) {
@@ -42,6 +48,17 @@ static std::vector<Token> lex(const std::string &src) {
     unsigned char c = static_cast<unsigned char>(src[i]);
     if (std::isspace(c)) {
       ++i;
+    } else if (i + 1 < src.size() && src.substr(i, 2) == "//") {
+      i += 2;
+      while (i < src.size() && src[i] != '\n')
+        ++i;
+    } else if (i + 1 < src.size() && src.substr(i, 2) == "/*") {
+      i += 2;
+      while (i + 1 < src.size() && src.substr(i, 2) != "*/")
+        ++i;
+      if (i + 1 == src.size())
+        die("unterminated block comment");
+      i += 2;
     } else if (std::isdigit(c)) {
       size_t start = i++;
       while (i < src.size() && std::isdigit(static_cast<unsigned char>(src[i]))) {
@@ -57,7 +74,12 @@ static std::vector<Token> lex(const std::string &src) {
         ++i;
       }
       out.push_back({src.substr(start, i - start)});
-    } else if (std::string("{}();+-*/").find(src[i]) != std::string::npos) {
+    } else if (i + 1 < src.size() &&
+               (src.substr(i, 2) == "==" || src.substr(i, 2) == "!=" ||
+                src.substr(i, 2) == "<=" || src.substr(i, 2) == ">=")) {
+      out.push_back({src.substr(i, 2)});
+      i += 2;
+    } else if (std::string("{}()[],;=+-*/<>").find(src[i]) != std::string::npos) {
       out.push_back({src.substr(i++, 1)});
     } else {
       die("unexpected character");
@@ -84,20 +106,25 @@ private:
   size_t pos_ = 0;
 
   std::unique_ptr<Node> function() {
-    take("int");
+    type();
     auto node = std::make_unique<Node>();
     node->op = "func";
     node->name = take();
     take("(");
-    if (peek() == "void")
+    if (peek() == "void" && tokens_[pos_ + 1].text == ")") {
       take("void");
+    } else if (peek() != ")") {
+      while (true) {
+        type();
+        node->params.push_back(take());
+        if (peek() != ",")
+          break;
+        take(",");
+      }
+    }
     take(")");
-    take("{");
-    take("return");
-    auto expr_node = expr();
-    take(";");
-    take("}");
-    node->body.push_back(std::move(expr_node));
+    auto block = block_stmt();
+    node->body = std::move(block->body);
     return node;
   }
 
@@ -111,7 +138,138 @@ private:
     return got;
   }
 
+  void type() {
+    if (peek() != "int" && peek() != "char" && peek() != "long" &&
+        peek() != "void")
+      die("expected type, got '" + peek() + "'");
+    take();
+    while (peek() == "*")
+      take("*");
+  }
+
+  std::unique_ptr<Node> block_stmt() {
+    take("{");
+    auto node = std::make_unique<Node>();
+    node->op = "block";
+    while (peek() != "}")
+      node->body.push_back(stmt());
+    take("}");
+    return node;
+  }
+
+  std::unique_ptr<Node> stmt() {
+    if (peek() == "{") {
+      return block_stmt();
+    }
+    if (peek() == "int" || peek() == "char" || peek() == "long" ||
+        peek() == "void") {
+      type();
+      auto node = std::make_unique<Node>();
+      node->op = "decl";
+      node->name = take();
+      if (peek() == "=") {
+        take("=");
+        node->lhs = expr();
+      }
+      take(";");
+      return node;
+    }
+    if (peek() == "return") {
+      take("return");
+      auto node = std::make_unique<Node>();
+      node->op = "return";
+      node->lhs = expr();
+      take(";");
+      return node;
+    }
+    if (peek() == "if") {
+      take("if");
+      auto node = std::make_unique<Node>();
+      node->op = "if";
+      take("(");
+      node->lhs = expr();
+      take(")");
+      node->body.push_back(stmt());
+      if (peek() == "else") {
+        take("else");
+        node->body.push_back(stmt());
+      }
+      return node;
+    }
+    if (peek() == "while") {
+      take("while");
+      auto node = std::make_unique<Node>();
+      node->op = "while";
+      take("(");
+      node->lhs = expr();
+      take(")");
+      node->body.push_back(stmt());
+      return node;
+    }
+    if (peek() == "for") {
+      take("for");
+      auto node = std::make_unique<Node>();
+      node->op = "for";
+      take("(");
+      node->body.push_back(assign_stmt(false));
+      take(";");
+      node->lhs = expr();
+      take(";");
+      node->body.push_back(assign_stmt(false));
+      take(")");
+      node->body.push_back(stmt());
+      return node;
+    }
+    if (pos_ + 1 < tokens_.size() && tokens_[pos_ + 1].text == "=") {
+      return assign_stmt(true);
+    }
+    auto node = std::make_unique<Node>();
+    node->op = "expr";
+    node->lhs = expr();
+    take(";");
+    return node;
+  }
+
+  std::unique_ptr<Node> assign_stmt(bool semicolon) {
+    auto node = std::make_unique<Node>();
+    node->op = "assign";
+    node->name = take();
+    take("=");
+    node->lhs = expr();
+    if (semicolon)
+      take(";");
+    return node;
+  }
+
   std::unique_ptr<Node> expr() {
+    return equality();
+  }
+
+  std::unique_ptr<Node> equality() {
+    auto node = relational();
+    while (peek() == "==" || peek() == "!=") {
+      auto parent = std::make_unique<Node>();
+      parent->op = take();
+      parent->lhs = std::move(node);
+      parent->rhs = relational();
+      node = std::move(parent);
+    }
+    return node;
+  }
+
+  std::unique_ptr<Node> relational() {
+    auto node = add();
+    while (peek() == "<" || peek() == ">" || peek() == "<=" || peek() == ">=") {
+      auto parent = std::make_unique<Node>();
+      parent->op = take();
+      parent->lhs = std::move(node);
+      parent->rhs = add();
+      node = std::move(parent);
+    }
+    return node;
+  }
+
+  std::unique_ptr<Node> add() {
     auto node = term();
     while (peek() == "+" || peek() == "-") {
       auto parent = std::make_unique<Node>();
@@ -136,6 +294,10 @@ private:
   }
 
   std::unique_ptr<Node> factor() {
+    return primary();
+  }
+
+  std::unique_ptr<Node> primary() {
     if (peek() == "(") {
       take("(");
       auto node = expr();
@@ -149,25 +311,134 @@ private:
         node->value = node->value * 10 + (c - '0');
       return node;
     }
+    if (std::isalpha(static_cast<unsigned char>(peek()[0])) || peek()[0] == '_') {
+      std::string ident = take();
+      if (peek() == "(") {
+        auto node = std::make_unique<Node>();
+        node->op = "call";
+        node->name = ident;
+        take("(");
+        if (peek() != ")") {
+          while (true) {
+            node->body.push_back(expr());
+            if (peek() != ",")
+              break;
+            take(",");
+          }
+        }
+        take(")");
+        return node;
+      }
+      auto node = std::make_unique<Node>();
+      node->op = "var";
+      node->name = ident;
+      return node;
+    }
     die("expected expression, got '" + peek() + "'");
   }
 };
 
 static void lower_expr(const Node &node, IrFunction &fn) {
   if (node.op == "num") {
-    fn.code.push_back({"const", node.value});
+    fn.code.push_back({"const", "", node.value});
+    return;
+  }
+  if (node.op == "var") {
+    if (!fn.locals.count(node.name))
+      die("unknown local " + node.name);
+    fn.code.push_back({"load", "", fn.locals[node.name]});
+    return;
+  }
+  if (node.op == "call") {
+    if (node.body.size() > 8)
+      die("calls with more than 8 arguments are not supported");
+    for (const auto &arg : node.body)
+      lower_expr(*arg, fn);
+    fn.has_call = true;
+    fn.code.push_back({"call", node.name, static_cast<long>(node.body.size())});
     return;
   }
   lower_expr(*node.lhs, fn);
   lower_expr(*node.rhs, fn);
-  fn.code.push_back({node.op, 0});
+  fn.code.push_back({node.op, "", 0});
+}
+
+static void lower_stmt(const Node &stmt, IrFunction &fn, int &label_id);
+
+static void lower_block(const Node &block, IrFunction &fn, int &label_id) {
+  for (const auto &stmt : block.body)
+    lower_stmt(*stmt, fn, label_id);
+}
+
+static void lower_stmt(const Node &stmt, IrFunction &fn, int &label_id) {
+  if (stmt.op == "block") {
+    lower_block(stmt, fn, label_id);
+  } else if (stmt.op == "decl") {
+    if (fn.locals.count(stmt.name))
+      die("duplicate local " + stmt.name);
+    fn.locals[stmt.name] = static_cast<int>(fn.locals.size());
+    if (stmt.lhs) {
+      lower_expr(*stmt.lhs, fn);
+      fn.code.push_back({"store", "", fn.locals[stmt.name]});
+    }
+  } else if (stmt.op == "assign") {
+    if (!fn.locals.count(stmt.name))
+      die("unknown local " + stmt.name);
+    lower_expr(*stmt.lhs, fn);
+    fn.code.push_back({"store", "", fn.locals[stmt.name]});
+  } else if (stmt.op == "return") {
+    lower_expr(*stmt.lhs, fn);
+    fn.code.push_back({"ret", "", 0});
+  } else if (stmt.op == "expr") {
+    lower_expr(*stmt.lhs, fn);
+    fn.code.push_back({"pop", "", 0});
+  } else if (stmt.op == "if") {
+    std::string else_label = ".Lelse" + std::to_string(label_id++);
+    std::string end_label = ".Lendif" + std::to_string(label_id++);
+    lower_expr(*stmt.lhs, fn);
+    fn.code.push_back({"jz", else_label, 0});
+    lower_stmt(*stmt.body[0], fn, label_id);
+    fn.code.push_back({"jmp", end_label, 0});
+    fn.code.push_back({"label", else_label, 0});
+    if (stmt.body.size() > 1)
+      lower_stmt(*stmt.body[1], fn, label_id);
+    fn.code.push_back({"label", end_label, 0});
+  } else if (stmt.op == "while") {
+    std::string start_label = ".Lwhile" + std::to_string(label_id++);
+    std::string end_label = ".Lendwhile" + std::to_string(label_id++);
+    fn.code.push_back({"label", start_label, 0});
+    lower_expr(*stmt.lhs, fn);
+    fn.code.push_back({"jz", end_label, 0});
+    lower_stmt(*stmt.body[0], fn, label_id);
+    fn.code.push_back({"jmp", start_label, 0});
+    fn.code.push_back({"label", end_label, 0});
+  } else if (stmt.op == "for") {
+    std::string start_label = ".Lfor" + std::to_string(label_id++);
+    std::string end_label = ".Lendfor" + std::to_string(label_id++);
+    lower_stmt(*stmt.body[0], fn, label_id);
+    fn.code.push_back({"label", start_label, 0});
+    lower_expr(*stmt.lhs, fn);
+    fn.code.push_back({"jz", end_label, 0});
+    lower_stmt(*stmt.body[2], fn, label_id);
+    lower_stmt(*stmt.body[1], fn, label_id);
+    fn.code.push_back({"jmp", start_label, 0});
+    fn.code.push_back({"label", end_label, 0});
+  } else {
+    die("unknown AST statement " + stmt.op);
+  }
 }
 
 static IrFunction lower_func(const Node &ast) {
   IrFunction fn;
   fn.name = ast.name;
-  lower_expr(*ast.body[0], fn);
-  fn.code.push_back({"ret", 0});
+  fn.params = ast.params;
+  for (const std::string &param : fn.params) {
+    if (fn.locals.count(param))
+      die("duplicate parameter " + param);
+    fn.locals[param] = static_cast<int>(fn.locals.size());
+  }
+  int label_id = 0;
+  lower_block(ast, fn, label_id);
   return fn;
 }
 
@@ -181,11 +452,31 @@ static std::vector<IrFunction> lower_program(std::vector<std::unique_ptr<Node>> 
 static std::string emit_arm64_darwin(const IrFunction &fn) {
   std::ostringstream out;
   out << ".globl _" << fn.name << "\n.p2align 2\n_" << fn.name << ":\n";
+  const bool frame = fn.has_call || !fn.locals.empty();
+  if (frame) {
+    out << "    stp x29, x30, [sp, #-16]!\n";
+    out << "    mov x29, sp\n";
+    if (!fn.locals.empty())
+      out << "    sub sp, sp, #" << (fn.locals.size() * 16) << "\n";
+    for (size_t i = 0; i < fn.params.size(); ++i)
+      out << "    str x" << i << ", [x29, #-" << ((i + 1) * 16) << "]\n";
+  }
   for (const IrInst &inst : fn.code) {
     if (inst.op == "const") {
       out << "    mov x0, #" << inst.value << "\n";
       out << "    str x0, [sp, #-16]!\n";
-    } else if (inst.op == "+" || inst.op == "-" || inst.op == "*" || inst.op == "/") {
+    } else if (inst.op == "load") {
+      out << "    ldr x0, [x29, #-" << ((inst.value + 1) * 16) << "]\n";
+      out << "    str x0, [sp, #-16]!\n";
+    } else if (inst.op == "store") {
+      out << "    ldr x0, [sp], #16\n";
+      out << "    str x0, [x29, #-" << ((inst.value + 1) * 16) << "]\n";
+    } else if (inst.op == "pop") {
+      out << "    add sp, sp, #16\n";
+    } else if (inst.op == "+" || inst.op == "-" || inst.op == "*" ||
+               inst.op == "/" || inst.op == "==" || inst.op == "!=" ||
+               inst.op == "<" || inst.op == ">" || inst.op == "<=" ||
+               inst.op == ">=") {
       out << "    ldr x0, [sp], #16\n";
       out << "    ldr x1, [sp], #16\n";
       if (inst.op == "+")
@@ -196,9 +487,41 @@ static std::string emit_arm64_darwin(const IrFunction &fn) {
         out << "    mul x0, x1, x0\n";
       else if (inst.op == "/")
         out << "    sdiv x0, x1, x0\n";
+      else {
+        out << "    cmp x1, x0\n";
+        if (inst.op == "==")
+          out << "    cset x0, eq\n";
+        else if (inst.op == "!=")
+          out << "    cset x0, ne\n";
+        else if (inst.op == "<")
+          out << "    cset x0, lt\n";
+        else if (inst.op == ">")
+          out << "    cset x0, gt\n";
+        else if (inst.op == "<=")
+          out << "    cset x0, le\n";
+        else
+          out << "    cset x0, ge\n";
+      }
+      out << "    str x0, [sp, #-16]!\n";
+    } else if (inst.op == "jz") {
+      out << "    ldr x0, [sp], #16\n";
+      out << "    cmp x0, #0\n";
+      out << "    b.eq " << inst.arg << "\n";
+    } else if (inst.op == "jmp") {
+      out << "    b " << inst.arg << "\n";
+    } else if (inst.op == "label") {
+      out << inst.arg << ":\n";
+    } else if (inst.op == "call") {
+      for (long i = inst.value - 1; i >= 0; --i)
+        out << "    ldr x" << i << ", [sp], #16\n";
+      out << "    bl _" << inst.arg << "\n";
       out << "    str x0, [sp, #-16]!\n";
     } else if (inst.op == "ret") {
       out << "    ldr x0, [sp], #16\n";
+      if (frame) {
+        out << "    mov sp, x29\n";
+        out << "    ldp x29, x30, [sp], #16\n";
+      }
       out << "    ret\n";
     } else {
       die("unknown IR op " + inst.op);

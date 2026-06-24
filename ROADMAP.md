@@ -25,11 +25,11 @@
 
 ## M3: C Subset 0
 
-- [ ] Parse simple C functions.
-- [ ] Support `int`, `char`, `long`, `void`, pointers, and string literals.
-- [ ] Support local variables, assignment, blocks, `if`, `while`, and `for`.
-- [ ] Support function calls with fixed arguments.
-- [ ] Add tests for every new syntax feature.
+- [x] Parse simple C functions.
+- [x] Support `int`, `char`, `long`, `void`, pointers, and string literals.
+- [x] Support local variables, assignment, blocks, `if`, `while`, and `for`.
+- [x] Support function calls with fixed arguments.
+- [x] Add tests for every new syntax feature.
 
 ## M4: B1NIX Backend 0
 
