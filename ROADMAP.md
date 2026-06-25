@@ -33,8 +33,8 @@
 
 ## M4: B1NIX Backend 0
 
-- [ ] Emit x86_64 B1NIX assembly.
-- [ ] Produce code compatible with the B1NIX C ABI.
+- [x] Emit x86_64 B1NIX assembly.
+- [x] Produce code compatible with the B1NIX C ABI.
 - [ ] Compile and run `return 42` inside B1NIX.
 - [ ] Add i386 only after x86_64 works.
 

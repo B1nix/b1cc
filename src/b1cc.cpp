@@ -530,10 +530,101 @@ static std::string emit_arm64_darwin(const IrFunction &fn) {
   return out.str();
 }
 
-static std::string compile_asm(const std::string &src) {
+static std::string emit_x86_64_b1nix(const IrFunction &fn) {
+  static const char *regs[] = {"%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"};
+  std::ostringstream out;
+  out << ".globl " << fn.name << "\n" << fn.name << ":\n";
+  const bool frame = fn.has_call || !fn.locals.empty();
+  if (frame) {
+    out << "    pushq %rbp\n";
+    out << "    movq %rsp, %rbp\n";
+    if (!fn.locals.empty())
+      out << "    subq $" << (fn.locals.size() * 16) << ", %rsp\n";
+    static const char *arg_regs[] = {"%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"};
+    for (size_t i = 0; i < fn.params.size(); ++i)
+      out << "    movq " << arg_regs[i] << ", -" << ((i + 1) * 16)
+          << "(%rbp)\n";
+  }
+  for (const IrInst &inst : fn.code) {
+    if (inst.op == "const") {
+      out << "    movq $" << inst.value << ", %rax\n";
+      out << "    pushq %rax\n";
+    } else if (inst.op == "load") {
+      out << "    movq -" << ((inst.value + 1) * 16) << "(%rbp), %rax\n";
+      out << "    pushq %rax\n";
+    } else if (inst.op == "store") {
+      out << "    popq %rax\n";
+      out << "    movq %rax, -" << ((inst.value + 1) * 16) << "(%rbp)\n";
+    } else if (inst.op == "pop") {
+      out << "    addq $8, %rsp\n";
+    } else if (inst.op == "+" || inst.op == "-" || inst.op == "*" ||
+               inst.op == "/" || inst.op == "==" || inst.op == "!=" ||
+               inst.op == "<" || inst.op == ">" || inst.op == "<=" ||
+               inst.op == ">=") {
+      out << "    popq %rcx\n";
+      out << "    popq %rax\n";
+      if (inst.op == "+")
+        out << "    addq %rcx, %rax\n";
+      else if (inst.op == "-")
+        out << "    subq %rcx, %rax\n";
+      else if (inst.op == "*")
+        out << "    imulq %rcx, %rax\n";
+      else if (inst.op == "/") {
+        out << "    cqto\n";
+        out << "    idivq %rcx\n";
+      } else {
+        out << "    cmpq %rcx, %rax\n";
+        if (inst.op == "==")
+          out << "    sete %al\n";
+        else if (inst.op == "!=")
+          out << "    setne %al\n";
+        else if (inst.op == "<")
+          out << "    setl %al\n";
+        else if (inst.op == ">")
+          out << "    setg %al\n";
+        else if (inst.op == "<=")
+          out << "    setle %al\n";
+        else
+          out << "    setge %al\n";
+        out << "    movzbq %al, %rax\n";
+      }
+      out << "    pushq %rax\n";
+    } else if (inst.op == "jz") {
+      out << "    popq %rax\n";
+      out << "    cmpq $0, %rax\n";
+      out << "    je " << inst.arg << "\n";
+    } else if (inst.op == "jmp") {
+      out << "    jmp " << inst.arg << "\n";
+    } else if (inst.op == "label") {
+      out << inst.arg << ":\n";
+    } else if (inst.op == "call") {
+      if (inst.value > 6)
+        die("x86_64 calls with more than 6 arguments are not supported");
+      for (long i = inst.value - 1; i >= 0; --i)
+        out << "    popq " << regs[i] << "\n";
+      out << "    call " << inst.arg << "\n";
+      out << "    pushq %rax\n";
+    } else if (inst.op == "ret") {
+      out << "    popq %rax\n";
+      if (frame)
+        out << "    leave\n";
+      out << "    ret\n";
+    } else {
+      die("unknown IR op " + inst.op);
+    }
+  }
+  return out.str();
+}
+
+static std::string compile_asm(const std::string &src, const std::string &target) {
   std::ostringstream out;
   for (const IrFunction &fn : lower_program(Parser(lex(src)).parse())) {
-    out << emit_arm64_darwin(fn);
+    if (target == "arm64-darwin")
+      out << emit_arm64_darwin(fn);
+    else if (target == "x86_64-b1nix")
+      out << emit_x86_64_b1nix(fn);
+    else
+      die("unknown target " + target);
   }
   return out.str();
 }
@@ -554,6 +645,11 @@ static void write_file(const std::string &path, const std::string &data) {
   out << data;
 }
 
+static bool exists(const std::string &path) {
+  std::ifstream in(path);
+  return static_cast<bool>(in);
+}
+
 static std::string shell_quote(const std::string &s) {
   std::string out = "'";
   for (char c : s)
@@ -565,11 +661,14 @@ int main(int argc, char **argv) {
   bool emit_asm = false;
   std::string input;
   std::string output = "a.out";
+  std::string target = "arm64-darwin";
 
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
     if (arg == "-S") {
       emit_asm = true;
+    } else if (arg.rfind("--target=", 0) == 0) {
+      target = arg.substr(9);
     } else if (arg == "-o") {
       if (++i == argc)
         die("-o needs a path");
@@ -586,7 +685,7 @@ int main(int argc, char **argv) {
   if (input.empty())
     die("usage: b1cc [-S] input.c [-o output]");
 
-  const std::string asm_text = compile_asm(read_file(input));
+  const std::string asm_text = compile_asm(read_file(input), target);
   if (emit_asm) {
     write_file(output, asm_text);
     return 0;
@@ -600,8 +699,19 @@ int main(int argc, char **argv) {
   write_file(tmp, asm_text);
 
   std::string cc = "cc";
+  std::string prefix;
+  if (target == "x86_64-b1nix") {
+    const char *env_cc = std::getenv("B1NIX_CC");
+    cc = env_cc ? env_cc : "../b1nix/tools/toolchain/bin/b1nix-cc";
+    if (!exists(cc))
+      die("set B1NIX_CC or run from next to ../b1nix");
+    prefix = "B1NIX_ARCH=x86_64 ";
+  } else if (target != "arm64-darwin") {
+    die("linking is not supported for target " + target);
+  }
+
   const std::string cmd =
-      shell_quote(cc) + " " + shell_quote(tmp) + " -o " + shell_quote(output);
+      prefix + shell_quote(cc) + " " + shell_quote(tmp) + " -o " + shell_quote(output);
   int rc = std::system(cmd.c_str());
   unlink(tmp);
   return rc == 0 ? 0 : 1;

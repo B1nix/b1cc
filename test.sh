@@ -69,3 +69,14 @@ set -e
 
 test "$rc" = 42
 echo "ok function"
+
+./build/b1cc --target=x86_64-b1nix tests/return_42.c -S -o "$tmp/return_42_x86_64.s"
+grep -q '^main:' "$tmp/return_42_x86_64.s"
+grep -q 'ret' "$tmp/return_42_x86_64.s"
+echo "ok x86_64_b1nix_asm"
+
+if [ -x ../b1nix/tools/toolchain/bin/b1nix-cc ]; then
+  ./build/b1cc --target=x86_64-b1nix tests/return_42.c -o "$tmp/return_42.b1nix"
+  test -s "$tmp/return_42.b1nix"
+  echo "ok x86_64_b1nix_elf"
+fi
