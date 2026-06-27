@@ -125,6 +125,38 @@ set -e
 test "$rc" = 11
 echo "ok include_initializer"
 
+./build/b1cc tests/m7_enum_typedef.c -o "$tmp/m7_enum_typedef"
+set +e
+"$tmp/m7_enum_typedef"
+rc=$?
+set -e
+test "$rc" = 3
+echo "ok m7_enum_typedef"
+
+./build/b1cc tests/m7_cast.c -o "$tmp/m7_cast"
+set +e
+"$tmp/m7_cast"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m7_cast"
+
+./build/b1cc tests/m7_struct.c -o "$tmp/m7_struct"
+set +e
+"$tmp/m7_struct"
+rc=$?
+set -e
+test "$rc" = 30
+echo "ok m7_struct"
+
+./build/b1cc tests/m7_array.c -o "$tmp/m7_array"
+set +e
+"$tmp/m7_array"
+rc=$?
+set -e
+test "$rc" = 80
+echo "ok m7_array"
+
 ./build/b1cc --target=x86_64-b1nix tests/return_42.c -S -o "$tmp/return_42_x86_64.s"
 grep -q '^main:' "$tmp/return_42_x86_64.s"
 grep -q 'ret' "$tmp/return_42_x86_64.s"

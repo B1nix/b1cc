@@ -4,6 +4,7 @@
 #include <iostream>
 #include <memory>
 #include <map>
+#include <set>
 #include <sstream>
 #include <string>
 #include <unistd.h>
@@ -121,11 +122,12 @@ namespace Lexer {
         out.push_back({src.substr(start, i - start), tok_line, tok_col});
       } else if (i + 1 < src.size() &&
                  (src.substr(i, 2) == "==" || src.substr(i, 2) == "!=" ||
-                  src.substr(i, 2) == "<=" || src.substr(i, 2) == ">=")) {
+                  src.substr(i, 2) == "<=" || src.substr(i, 2) == ">=" ||
+                  src.substr(i, 2) == "->")) {
         std::string text = src.substr(i, 2);
         consume(2);
         out.push_back({text, tok_line, tok_col});
-      } else if (std::string("{}[](),;=+-*/<>").find(src[i]) != std::string::npos) {
+      } else if (std::string("{}[](),;=+-*/<>.").find(src[i]) != std::string::npos) {
         std::string text = src.substr(i, 1);
         consume(1);
         out.push_back({text, tok_line, tok_col});
@@ -148,8 +150,71 @@ namespace Parser {
 
     std::vector<std::unique_ptr<Node>> parse() {
       std::vector<std::unique_ptr<Node>> funcs;
-      while (peek() != "EOF")
-        funcs.push_back(function());
+      while (peek() != "EOF") {
+        if (peek() == "typedef") {
+          take("typedef");
+          type();
+          std::string alias = take();
+          take(";");
+          global_typedefs.insert(alias);
+        } else if (peek() == "enum" && tokens_[pos_ + 1].text == "{") {
+          take("enum");
+          take("{");
+          int val = 0;
+          while (true) {
+            std::string name = take();
+            if (peek() == "=") {
+              take("=");
+              val = std::stoi(take());
+            }
+            global_enums[name] = val++;
+            if (peek() == ",")
+              take(",");
+            else
+              break;
+          }
+          take("}");
+          take(";");
+        } else if (peek() == "enum" && tokens_[pos_ + 2].text == "{") {
+          take("enum");
+          take();
+          take("{");
+          int val = 0;
+          while (true) {
+            std::string name = take();
+            if (peek() == "=") {
+              take("=");
+              val = std::stoi(take());
+            }
+            global_enums[name] = val++;
+            if (peek() == ",")
+              take(",");
+            else
+              break;
+          }
+          take("}");
+          take(";");
+        } else if (peek() == "struct" && tokens_[pos_ + 2].text == "{") {
+          take("struct");
+          std::string tag = take();
+          take("{");
+          int offset = 0;
+          std::map<std::string, int> fields;
+          while (peek() != "}") {
+            type();
+            std::string field_name = take();
+            take(";");
+            fields[field_name] = offset;
+            global_field_offsets[field_name] = offset;
+            offset++;
+          }
+          take("}");
+          take(";");
+          global_structs[tag] = fields;
+        } else {
+          funcs.push_back(function());
+        }
+      }
       take("EOF");
       return funcs;
     }
@@ -158,6 +223,13 @@ namespace Parser {
     std::vector<Token> tokens_;
     size_t pos_ = 0;
 
+  public:
+    std::set<std::string> global_typedefs;
+    std::map<std::string, int> global_enums;
+    std::map<std::string, std::map<std::string, int>> global_structs;
+    std::map<std::string, int> global_field_offsets;
+
+  private:
     [[noreturn]] void error(const std::string &msg) {
       const Token &tok = tokens_[pos_];
       Diagnostics::error(tok.line, tok.col, msg);
@@ -174,10 +246,17 @@ namespace Parser {
     }
 
     void type() {
-      if (peek() != "int" && peek() != "char" && peek() != "long" &&
-          peek() != "void")
+      if (peek() == "struct" || peek() == "enum") {
+        take();
+        if (peek() != "*") {
+          take();
+        }
+      } else if (peek() != "int" && peek() != "char" && peek() != "long" &&
+                 peek() != "void" && !global_typedefs.count(peek())) {
         error("expected type, got '" + peek() + "'");
-      take();
+      } else {
+        take();
+      }
       while (peek() == "*")
         take("*");
     }
@@ -232,11 +311,99 @@ namespace Parser {
       int line = tokens_[pos_].line;
       int col = tokens_[pos_].col;
 
+      if (peek() == "typedef") {
+        take("typedef");
+        type();
+        std::string alias = take();
+        take(";");
+        global_typedefs.insert(alias);
+        return create_node("block", line, col);
+      }
+      if (peek() == "enum") {
+        take("enum");
+        if (peek() != "{") {
+          take();
+        }
+        take("{");
+        int val = 0;
+        while (true) {
+          std::string name = take();
+          if (peek() == "=") {
+            take("=");
+            val = std::stoi(take());
+          }
+          global_enums[name] = val++;
+          if (peek() == ",")
+            take(",");
+          else
+            break;
+        }
+        take("}");
+        take(";");
+        return create_node("block", line, col);
+      }
+      if (peek() == "struct" && tokens_[pos_ + 2].text == "{") {
+        take("struct");
+        std::string tag = take();
+        take("{");
+        int offset = 0;
+        std::map<std::string, int> fields;
+        while (peek() != "}") {
+          type();
+          std::string field_name = take();
+          take(";");
+          fields[field_name] = offset;
+          global_field_offsets[field_name] = offset;
+          offset++;
+        }
+        take("}");
+        take(";");
+        global_structs[tag] = fields;
+        return create_node("block", line, col);
+      }
+      if (peek() == "struct" && tokens_[pos_ + 2].text != "{") {
+        take("struct");
+        std::string tag = take();
+        std::string name = take();
+        long struct_size = 1;
+        if (global_structs.count(tag)) {
+          struct_size = global_structs[tag].size();
+        }
+        take(";");
+        auto node = create_node("array_decl", line, col);
+        node->name = name;
+        node->value = struct_size;
+        return node;
+      }
       if (peek() == "int" || peek() == "char" || peek() == "long" ||
-          peek() == "void") {
+          peek() == "void" || global_typedefs.count(peek())) {
         type();
         auto node = create_node("decl", line, col);
         node->name = take();
+        if (peek() == "[") {
+          take("[");
+          long array_size = 1;
+          if (peek() != "]") {
+            array_size = std::stol(take());
+          }
+          take("]");
+          node->op = "array_decl";
+          node->value = array_size;
+          if (peek() == "=") {
+            take("=");
+            take("{");
+            while (true) {
+              node->body.push_back(expr());
+              if (peek() == ",")
+                take(",");
+              else
+                break;
+            }
+            take("}");
+          }
+          take(";");
+          return node;
+        }
         if (peek() == "=") {
           take("=");
           node->lhs = expr();
@@ -285,6 +452,46 @@ namespace Parser {
         take(")");
         node->body.push_back(stmt());
         return node;
+      }
+      if (peek() != "EOF" && (std::isalpha(static_cast<unsigned char>(peek()[0])) || peek()[0] == '_') &&
+          (tokens_[pos_ + 1].text == "[" || tokens_[pos_ + 1].text == "." || tokens_[pos_ + 1].text == "->")) {
+        size_t p = pos_ + 2;
+        int brackets = 0;
+        if (tokens_[pos_ + 1].text == "[") {
+          brackets = 1;
+          while (p < tokens_.size() && brackets > 0) {
+            if (tokens_[p].text == "[") brackets++;
+            if (tokens_[p].text == "]") brackets--;
+            p++;
+          }
+        } else {
+          p++;
+        }
+        if (p < tokens_.size() && tokens_[p].text == "=") {
+          std::string name = take();
+          std::string op = take();
+          std::unique_ptr<Node> index_node;
+          if (op == "[") {
+            index_node = expr();
+            take("]");
+          } else {
+            std::string field_name = take();
+            int offset = 0;
+            if (global_field_offsets.count(field_name)) {
+              offset = global_field_offsets[field_name];
+            }
+            index_node = create_node("num", line, col);
+            index_node->value = offset;
+          }
+          take("=");
+          auto val_node = expr();
+          take(";");
+          auto node = create_node("store_index", line, col);
+          node->name = name;
+          node->lhs = std::move(index_node);
+          node->rhs = std::move(val_node);
+          return node;
+        }
       }
       if (pos_ + 1 < tokens_.size() && tokens_[pos_ + 1].text == "=") {
         return assign_stmt(true);
@@ -365,15 +572,29 @@ namespace Parser {
 
     std::unique_ptr<Node> factor() {
       auto node = primary();
-      while (peek() == "[") {
+      while (peek() == "[" || peek() == "." || peek() == "->") {
         int line = tokens_[pos_].line;
         int col = tokens_[pos_].col;
-        take("[");
-        auto parent = create_node("index", line, col);
-        parent->lhs = std::move(node);
-        parent->rhs = expr();
-        take("]");
-        node = std::move(parent);
+        std::string op = take();
+        if (op == "[") {
+          auto parent = create_node("index", line, col);
+          parent->lhs = std::move(node);
+          parent->rhs = expr();
+          take("]");
+          node = std::move(parent);
+        } else {
+          std::string field_name = take();
+          auto parent = create_node("index", line, col);
+          parent->lhs = std::move(node);
+          int offset = 0;
+          if (global_field_offsets.count(field_name)) {
+            offset = global_field_offsets[field_name];
+          }
+          auto index_val = create_node("num", line, col);
+          index_val->value = offset;
+          parent->rhs = std::move(index_val);
+          node = std::move(parent);
+        }
       }
       return node;
     }
@@ -382,6 +603,23 @@ namespace Parser {
       int line = tokens_[pos_].line;
       int col = tokens_[pos_].col;
       if (peek() == "(") {
+        bool is_cast = false;
+        std::string next_tok = tokens_[pos_ + 1].text;
+        if (next_tok == "int" || next_tok == "char" || next_tok == "long" || next_tok == "void" || global_typedefs.count(next_tok)) {
+          is_cast = true;
+        } else if (next_tok == "struct" || next_tok == "enum") {
+          is_cast = true;
+        }
+        
+        if (is_cast) {
+          take("(");
+          type();
+          take(")");
+          auto node = create_node("cast", line, col);
+          node->lhs = primary();
+          return node;
+        }
+        
         take("(");
         auto node = expr();
         take(")");
@@ -400,6 +638,11 @@ namespace Parser {
       }
       if (std::isalpha(static_cast<unsigned char>(peek()[0])) || peek()[0] == '_') {
         std::string ident = take();
+        if (global_enums.count(ident)) {
+          auto node = create_node("num", line, col);
+          node->value = global_enums[ident];
+          return node;
+        }
         if (peek() == "(") {
           auto node = create_node("call", line, col);
           node->name = ident;
@@ -447,6 +690,10 @@ namespace IR {
       fn.code.push_back({"const", "", node.value});
       return;
     }
+    if (node.op == "cast") {
+      lower_expr(*node.lhs, fn);
+      return;
+    }
     if (node.op == "var") {
       if (!fn.locals.count(node.name))
         Diagnostics::error(node.line, node.col, "unknown local " + node.name);
@@ -479,16 +726,16 @@ namespace IR {
     fn.code.push_back({node.op, "", 0});
   }
 
-  static void lower_stmt(const Node &stmt, IrFunction &fn, int &label_id);
+  static void lower_stmt(const Node &stmt, IrFunction &fn, int &label_id, int target_scale);
 
-  static void lower_block(const Node &block, IrFunction &fn, int &label_id) {
+  static void lower_block(const Node &block, IrFunction &fn, int &label_id, int target_scale) {
     for (const auto &stmt : block.body)
-      lower_stmt(*stmt, fn, label_id);
+      lower_stmt(*stmt, fn, label_id, target_scale);
   }
 
-  static void lower_stmt(const Node &stmt, IrFunction &fn, int &label_id) {
+  static void lower_stmt(const Node &stmt, IrFunction &fn, int &label_id, int target_scale) {
     if (stmt.op == "block") {
-      lower_block(stmt, fn, label_id);
+      lower_block(stmt, fn, label_id, target_scale);
     } else if (stmt.op == "decl") {
       if (fn.locals.count(stmt.name))
         Diagnostics::error(stmt.line, stmt.col, "duplicate local " + stmt.name);
@@ -513,11 +760,11 @@ namespace IR {
       std::string end_label = ".Lendif" + std::to_string(label_id++);
       lower_expr(*stmt.lhs, fn);
       fn.code.push_back({"jz", else_label, 0});
-      lower_stmt(*stmt.body[0], fn, label_id);
+      lower_stmt(*stmt.body[0], fn, label_id, target_scale);
       fn.code.push_back({"jmp", end_label, 0});
       fn.code.push_back({"label", else_label, 0});
       if (stmt.body.size() > 1)
-        lower_stmt(*stmt.body[1], fn, label_id);
+        lower_stmt(*stmt.body[1], fn, label_id, target_scale);
       fn.code.push_back({"label", end_label, 0});
     } else if (stmt.op == "while") {
       std::string start_label = ".Lwhile" + std::to_string(label_id++);
@@ -525,26 +772,52 @@ namespace IR {
       fn.code.push_back({"label", start_label, 0});
       lower_expr(*stmt.lhs, fn);
       fn.code.push_back({"jz", end_label, 0});
-      lower_stmt(*stmt.body[0], fn, label_id);
+      lower_stmt(*stmt.body[0], fn, label_id, target_scale);
       fn.code.push_back({"jmp", start_label, 0});
       fn.code.push_back({"label", end_label, 0});
     } else if (stmt.op == "for") {
       std::string start_label = ".Lfor" + std::to_string(label_id++);
       std::string end_label = ".Lendfor" + std::to_string(label_id++);
-      lower_stmt(*stmt.body[0], fn, label_id);
+      lower_stmt(*stmt.body[0], fn, label_id, target_scale);
       fn.code.push_back({"label", start_label, 0});
       lower_expr(*stmt.lhs, fn);
       fn.code.push_back({"jz", end_label, 0});
-      lower_stmt(*stmt.body[2], fn, label_id);
-      lower_stmt(*stmt.body[1], fn, label_id);
+      lower_stmt(*stmt.body[2], fn, label_id, target_scale);
+      lower_stmt(*stmt.body[1], fn, label_id, target_scale);
       fn.code.push_back({"jmp", start_label, 0});
       fn.code.push_back({"label", end_label, 0});
+    } else if (stmt.op == "array_decl") {
+      if (fn.locals.count(stmt.name))
+        Diagnostics::error(stmt.line, stmt.col, "duplicate local " + stmt.name);
+      int base_slot = static_cast<int>(fn.locals.size());
+      fn.locals[stmt.name] = base_slot;
+      long buf_size = stmt.value * target_scale;
+      long num_slots = (buf_size + 15) / 16;
+      int buf_start_slot = static_cast<int>(fn.locals.size());
+      for (long i = 0; i < num_slots; ++i) {
+        fn.locals[stmt.name + "$buf" + std::to_string(i)] = buf_start_slot + static_cast<int>(i);
+      }
+      fn.code.push_back({"addr", "", buf_start_slot + static_cast<int>(num_slots - 1)});
+      fn.code.push_back({"store", "", base_slot});
+      for (size_t i = 0; i < stmt.body.size(); ++i) {
+        lower_expr(*stmt.body[i], fn);
+        fn.code.push_back({"const", "", static_cast<long>(i)});
+        fn.code.push_back({"load", "", base_slot});
+        fn.code.push_back({"store_index", "", 0});
+      }
+    } else if (stmt.op == "store_index") {
+      if (!fn.locals.count(stmt.name))
+        Diagnostics::error(stmt.line, stmt.col, "unknown local " + stmt.name);
+      lower_expr(*stmt.rhs, fn);
+      lower_expr(*stmt.lhs, fn);
+      fn.code.push_back({"load", "", fn.locals[stmt.name]});
+      fn.code.push_back({"store_index", "", 0});
     } else {
       Diagnostics::error(stmt.line, stmt.col, "unknown AST statement " + stmt.op);
     }
   }
 
-  static IrFunction lower_func(const Node &ast) {
+  static IrFunction lower_func(const Node &ast, int target_scale) {
     IrFunction fn;
     fn.name = ast.name;
     fn.params = ast.params;
@@ -554,14 +827,15 @@ namespace IR {
       fn.locals[param] = static_cast<int>(fn.locals.size());
     }
     int label_id = 0;
-    lower_block(ast, fn, label_id);
+    lower_block(ast, fn, label_id, target_scale);
     return fn;
   }
 
-  static std::vector<IrFunction> lower_program(std::vector<std::unique_ptr<Node>> ast) {
+  static std::vector<IrFunction> lower_program(std::vector<std::unique_ptr<Node>> ast, const std::string &target) {
     std::vector<IrFunction> out;
+    int target_scale = (target == "i386-b1nix" || target == "x86-b1nix") ? 4 : 8;
     for (const auto &func : ast)
-      out.push_back(lower_func(*func));
+      out.push_back(lower_func(*func, target_scale));
     return out;
   }
 }
@@ -648,6 +922,14 @@ namespace Backend {
           out << "    ldr x" << i << ", [sp], #16\n";
         out << "    bl _" << inst.arg << "\n";
         out << "    str x0, [sp, #-16]!\n";
+      } else if (inst.op == "addr") {
+        out << "    sub x0, x29, #" << ((inst.value + 1) * 16) << "\n";
+        out << "    str x0, [sp, #-16]!\n";
+      } else if (inst.op == "store_index") {
+        out << "    ldr x1, [sp], #16\n";
+        out << "    ldr x2, [sp], #16\n";
+        out << "    ldr x0, [sp], #16\n";
+        out << "    str x0, [x1, x2, lsl #3]\n";
       } else if (inst.op == "ret") {
         out << "    ldr x0, [sp], #16\n";
         if (frame) {
@@ -747,6 +1029,14 @@ namespace Backend {
           out << "    popq " << regs[i] << "\n";
         out << "    call " << inst.arg << "\n";
         out << "    pushq %rax\n";
+      } else if (inst.op == "addr") {
+        out << "    leaq -" << ((inst.value + 1) * 16) << "(%rbp), %rax\n";
+        out << "    pushq %rax\n";
+      } else if (inst.op == "store_index") {
+        out << "    popq %rax\n";
+        out << "    popq %rcx\n";
+        out << "    popq %rdx\n";
+        out << "    movq %rdx, (%rax,%rcx,8)\n";
       } else if (inst.op == "ret") {
         out << "    popq %rax\n";
         if (frame)
@@ -847,6 +1137,14 @@ namespace Backend {
         out << "    call " << inst.arg << "\n";
         out << "    addl $" << (inst.value * 4) << ", %esp\n";
         out << "    pushl %eax\n";
+      } else if (inst.op == "addr") {
+        out << "    leal -" << ((inst.value + 1) * 16) << "(%ebp), %eax\n";
+        out << "    pushl %eax\n";
+      } else if (inst.op == "store_index") {
+        out << "    popl %eax\n";
+        out << "    popl %ecx\n";
+        out << "    popl %edx\n";
+        out << "    movl %edx, (%eax,%ecx,4)\n";
       } else if (inst.op == "ret") {
         out << "    popl %eax\n";
         if (frame)
@@ -864,7 +1162,7 @@ namespace Backend {
     auto tokens = Lexer::lex(src);
     Parser::Parser parser(std::move(tokens));
     auto ast = parser.parse();
-    auto ir_functions = lower_program(std::move(ast));
+    auto ir_functions = lower_program(std::move(ast), target);
 
     for (const IrFunction &fn : ir_functions) {
       if (target == "arm64-darwin")
