@@ -165,6 +165,14 @@ set -e
 test "$rc" = 42
 echo "ok m7_macro"
 
+./build/b1cc tests/m10_logical.c -o "$tmp/m10_logical"
+set +e
+"$tmp/m10_logical"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m10_logical"
+
 ./build/b1cc src/b1cc_token_lexer.c -o "$tmp/b1cc_token_lexer"
 "$tmp/b1cc_token_lexer" < tests/local.c > "$tmp/lexer_output.txt"
 grep -q "IDENT: int" "$tmp/lexer_output.txt"

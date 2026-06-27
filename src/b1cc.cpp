@@ -168,11 +168,12 @@ namespace Lexer {
       } else if (i + 1 < src.size() &&
                  (src.substr(i, 2) == "==" || src.substr(i, 2) == "!=" ||
                   src.substr(i, 2) == "<=" || src.substr(i, 2) == ">=" ||
-                  src.substr(i, 2) == "->")) {
+                  src.substr(i, 2) == "->" || src.substr(i, 2) == "&&" ||
+                  src.substr(i, 2) == "||")) {
         std::string text = src.substr(i, 2);
         consume(2);
         out.push_back({text, tok_line, tok_col});
-      } else if (std::string("{}[](),;=+-*/<>.").find(src[i]) != std::string::npos) {
+      } else if (std::string("{}[](),;=+-*/<>.&!").find(src[i]) != std::string::npos) {
         std::string text = src.substr(i, 1);
         consume(1);
         out.push_back({text, tok_line, tok_col});
@@ -560,7 +561,33 @@ namespace Parser {
     }
 
     std::unique_ptr<Node> expr() {
-      return equality();
+      return logical_or();
+    }
+
+    std::unique_ptr<Node> logical_or() {
+      auto node = logical_and();
+      while (peek() == "||") {
+        int line = tokens_[pos_].line;
+        int col = tokens_[pos_].col;
+        auto parent = create_node(take(), line, col);
+        parent->lhs = std::move(node);
+        parent->rhs = logical_and();
+        node = std::move(parent);
+      }
+      return node;
+    }
+
+    std::unique_ptr<Node> logical_and() {
+      auto node = equality();
+      while (peek() == "&&") {
+        int line = tokens_[pos_].line;
+        int col = tokens_[pos_].col;
+        auto parent = create_node(take(), line, col);
+        parent->lhs = std::move(node);
+        parent->rhs = equality();
+        node = std::move(parent);
+      }
+      return node;
     }
 
     std::unique_ptr<Node> equality() {
@@ -728,6 +755,7 @@ namespace IR {
     std::map<std::string, int> locals;
     std::vector<std::pair<std::string, std::string>> strings;
     bool has_call = false;
+    int label_id = 0;
   };
 
   static void lower_expr(const Node &node, IrFunction &fn) {
@@ -760,6 +788,38 @@ namespace IR {
       fn.code.push_back({"call", node.name, static_cast<long>(node.body.size())});
       return;
     }
+    if (node.op == "&&") {
+      std::string false_label = ".L" + fn.name + "_and_false" + std::to_string(fn.label_id++);
+      std::string end_label = ".L" + fn.name + "_and_end" + std::to_string(fn.label_id++);
+      lower_expr(*node.lhs, fn);
+      fn.code.push_back({"jz", false_label, 0});
+      lower_expr(*node.rhs, fn);
+      fn.code.push_back({"jz", false_label, 0});
+      fn.code.push_back({"const", "", 1});
+      fn.code.push_back({"jmp", end_label, 0});
+      fn.code.push_back({"label", false_label, 0});
+      fn.code.push_back({"const", "", 0});
+      fn.code.push_back({"label", end_label, 0});
+      return;
+    }
+    if (node.op == "||") {
+      std::string false_label_or = ".L" + fn.name + "_or_false_or" + std::to_string(fn.label_id++);
+      std::string false_label = ".L" + fn.name + "_or_false" + std::to_string(fn.label_id++);
+      std::string end_label = ".L" + fn.name + "_or_end" + std::to_string(fn.label_id++);
+      lower_expr(*node.lhs, fn);
+      fn.code.push_back({"jz", false_label_or, 0});
+      fn.code.push_back({"const", "", 1});
+      fn.code.push_back({"jmp", end_label, 0});
+      fn.code.push_back({"label", false_label_or, 0});
+      lower_expr(*node.rhs, fn);
+      fn.code.push_back({"jz", false_label, 0});
+      fn.code.push_back({"const", "", 1});
+      fn.code.push_back({"jmp", end_label, 0});
+      fn.code.push_back({"label", false_label, 0});
+      fn.code.push_back({"const", "", 0});
+      fn.code.push_back({"label", end_label, 0});
+      return;
+    }
     if (node.op == "index") {
       lower_expr(*node.lhs, fn);
       lower_expr(*node.rhs, fn);
@@ -771,16 +831,16 @@ namespace IR {
     fn.code.push_back({node.op, "", 0});
   }
 
-  static void lower_stmt(const Node &stmt, IrFunction &fn, int &label_id, int target_scale);
+  static void lower_stmt(const Node &stmt, IrFunction &fn, int target_scale);
 
-  static void lower_block(const Node &block, IrFunction &fn, int &label_id, int target_scale) {
+  static void lower_block(const Node &block, IrFunction &fn, int target_scale) {
     for (const auto &stmt : block.body)
-      lower_stmt(*stmt, fn, label_id, target_scale);
+      lower_stmt(*stmt, fn, target_scale);
   }
 
-  static void lower_stmt(const Node &stmt, IrFunction &fn, int &label_id, int target_scale) {
+  static void lower_stmt(const Node &stmt, IrFunction &fn, int target_scale) {
     if (stmt.op == "block") {
-      lower_block(stmt, fn, label_id, target_scale);
+      lower_block(stmt, fn, target_scale);
     } else if (stmt.op == "decl") {
       if (fn.locals.count(stmt.name))
         Diagnostics::error(stmt.line, stmt.col, "duplicate local " + stmt.name);
@@ -801,34 +861,34 @@ namespace IR {
       lower_expr(*stmt.lhs, fn);
       fn.code.push_back({"pop", "", 0});
     } else if (stmt.op == "if") {
-      std::string else_label = ".L" + fn.name + "_else" + std::to_string(label_id++);
-      std::string end_label = ".L" + fn.name + "_endif" + std::to_string(label_id++);
+      std::string else_label = ".L" + fn.name + "_else" + std::to_string(fn.label_id++);
+      std::string end_label = ".L" + fn.name + "_endif" + std::to_string(fn.label_id++);
       lower_expr(*stmt.lhs, fn);
       fn.code.push_back({"jz", else_label, 0});
-      lower_stmt(*stmt.body[0], fn, label_id, target_scale);
+      lower_stmt(*stmt.body[0], fn, target_scale);
       fn.code.push_back({"jmp", end_label, 0});
       fn.code.push_back({"label", else_label, 0});
       if (stmt.body.size() > 1)
-        lower_stmt(*stmt.body[1], fn, label_id, target_scale);
+        lower_stmt(*stmt.body[1], fn, target_scale);
       fn.code.push_back({"label", end_label, 0});
     } else if (stmt.op == "while") {
-      std::string start_label = ".L" + fn.name + "_while" + std::to_string(label_id++);
-      std::string end_label = ".L" + fn.name + "_endwhile" + std::to_string(label_id++);
+      std::string start_label = ".L" + fn.name + "_while" + std::to_string(fn.label_id++);
+      std::string end_label = ".L" + fn.name + "_endwhile" + std::to_string(fn.label_id++);
       fn.code.push_back({"label", start_label, 0});
       lower_expr(*stmt.lhs, fn);
       fn.code.push_back({"jz", end_label, 0});
-      lower_stmt(*stmt.body[0], fn, label_id, target_scale);
+      lower_stmt(*stmt.body[0], fn, target_scale);
       fn.code.push_back({"jmp", start_label, 0});
       fn.code.push_back({"label", end_label, 0});
     } else if (stmt.op == "for") {
-      std::string start_label = ".L" + fn.name + "_for" + std::to_string(label_id++);
-      std::string end_label = ".L" + fn.name + "_endfor" + std::to_string(label_id++);
-      lower_stmt(*stmt.body[0], fn, label_id, target_scale);
+      std::string start_label = ".L" + fn.name + "_for" + std::to_string(fn.label_id++);
+      std::string end_label = ".L" + fn.name + "_endfor" + std::to_string(fn.label_id++);
+      lower_stmt(*stmt.body[0], fn, target_scale);
       fn.code.push_back({"label", start_label, 0});
       lower_expr(*stmt.lhs, fn);
       fn.code.push_back({"jz", end_label, 0});
-      lower_stmt(*stmt.body[2], fn, label_id, target_scale);
-      lower_stmt(*stmt.body[1], fn, label_id, target_scale);
+      lower_stmt(*stmt.body[2], fn, target_scale);
+      lower_stmt(*stmt.body[1], fn, target_scale);
       fn.code.push_back({"jmp", start_label, 0});
       fn.code.push_back({"label", end_label, 0});
     } else if (stmt.op == "array_decl") {
@@ -871,8 +931,7 @@ namespace IR {
         Diagnostics::error(ast.line, ast.col, "duplicate parameter " + param);
       fn.locals[param] = static_cast<int>(fn.locals.size());
     }
-    int label_id = 0;
-    lower_block(ast, fn, label_id, target_scale);
+    lower_block(ast, fn, target_scale);
     return fn;
   }
 
