@@ -190,6 +190,18 @@ namespace Lexer {
   }
 }
 
+namespace IR {
+  struct IrGlobalVar {
+    std::string name;
+    bool is_array;
+    long size;
+    std::vector<long> initializers;
+  };
+  extern thread_local std::vector<IrGlobalVar> global_decls;
+  extern thread_local std::set<std::string> global_vars;
+  extern thread_local std::set<std::string> global_arrays;
+}
+
 namespace Parser {
   using namespace AST;
   using namespace Lexer;
@@ -261,8 +273,10 @@ namespace Parser {
           take("}");
           take(";");
           global_structs[tag] = fields;
-        } else {
+        } else if (is_function_decl()) {
           funcs.push_back(function());
+        } else {
+          global_decl();
         }
       }
       take("EOF");
@@ -280,6 +294,105 @@ namespace Parser {
     std::map<std::string, int> global_field_offsets;
 
   private:
+    bool is_function_decl() {
+      size_t p = pos_;
+      while (p < tokens_.size()) {
+        std::string t = tokens_[p].text;
+        if (t == "struct" || t == "enum") {
+          p++;
+          if (p < tokens_.size()) p++;
+        } else if (t == "int" || t == "char" || t == "long" || t == "void" || global_typedefs.count(t)) {
+          p++;
+        } else if (t == "*") {
+          p++;
+        } else {
+          break;
+        }
+      }
+      p++;
+      if (p < tokens_.size() && tokens_[p].text == "(") {
+        return true;
+      }
+      return false;
+    }
+
+    void global_decl() {
+      type();
+      while (true) {
+        while (peek() == "*") take();
+        std::string name = take();
+        if (peek() == "[") {
+          take("[");
+          long size = 0;
+          if (peek() != "]") {
+            size = std::stol(take());
+          }
+          take("]");
+          std::vector<long> inits;
+          if (peek() == "=") {
+            take("=");
+            take("{");
+            while (true) {
+              inits.push_back(eval_const(*expr()));
+              if (peek() == ",")
+                take(",");
+              else
+                break;
+            }
+            take("}");
+          }
+          if (size == 0) size = inits.size();
+          IR::IrGlobalVar g = {name, true, size, inits};
+          IR::global_decls.push_back(g);
+          IR::global_arrays.insert(name);
+        } else {
+          std::vector<long> inits;
+          if (peek() == "=") {
+            take("=");
+            inits.push_back(eval_const(*expr()));
+          }
+          IR::IrGlobalVar g = {name, false, 1, inits};
+          IR::global_decls.push_back(g);
+          IR::global_vars.insert(name);
+        }
+        if (peek() == ",") {
+          take(",");
+        } else {
+          break;
+        }
+      }
+      take(";");
+    }
+
+    long eval_const(const Node &node) {
+      if (node.op == "num") return node.value;
+      if (node.op == "cast") return eval_const(*node.lhs);
+      if (node.op == "unary_-") return -eval_const(*node.lhs);
+      if (node.op == "unary_~") return ~eval_const(*node.lhs);
+      if (node.op == "unary_!") return !eval_const(*node.lhs);
+      if (node.op == "+") return eval_const(*node.lhs) + eval_const(*node.rhs);
+      if (node.op == "-") return eval_const(*node.lhs) - eval_const(*node.rhs);
+      if (node.op == "*") return eval_const(*node.lhs) * eval_const(*node.rhs);
+      if (node.op == "/") {
+        long divisor = eval_const(*node.rhs);
+        if (divisor == 0) return 0;
+        return eval_const(*node.lhs) / divisor;
+      }
+      if (node.op == "&") return eval_const(*node.lhs) & eval_const(*node.rhs);
+      if (node.op == "|") return eval_const(*node.lhs) | eval_const(*node.rhs);
+      if (node.op == "^") return eval_const(*node.lhs) ^ eval_const(*node.rhs);
+      if (node.op == "<<") return eval_const(*node.lhs) << eval_const(*node.rhs);
+      if (node.op == ">>") return eval_const(*node.lhs) >> eval_const(*node.rhs);
+      if (node.op == "==") return eval_const(*node.lhs) == eval_const(*node.rhs);
+      if (node.op == "!=") return eval_const(*node.lhs) != eval_const(*node.rhs);
+      if (node.op == "<") return eval_const(*node.lhs) < eval_const(*node.rhs);
+      if (node.op == ">") return eval_const(*node.lhs) > eval_const(*node.rhs);
+      if (node.op == "<=") return eval_const(*node.lhs) <= eval_const(*node.rhs);
+      if (node.op == ">=") return eval_const(*node.lhs) >= eval_const(*node.rhs);
+      Diagnostics::error(node.line, node.col, "compile-time constant expression required");
+      return 0;
+    }
+
     [[noreturn]] void error(const std::string &msg) {
       const Token &tok = tokens_[pos_];
       Diagnostics::error(tok.line, tok.col, msg);
@@ -925,6 +1038,10 @@ namespace IR {
   };
   static thread_local std::vector<LoopContext> loop_contexts;
 
+  thread_local std::vector<IrGlobalVar> global_decls;
+  thread_local std::set<std::string> global_vars;
+  thread_local std::set<std::string> global_arrays;
+
   static void lower_expr(const Node &node, IrFunction &fn) {
     if (node.op == "num") {
       fn.code.push_back({"const", "", node.value});
@@ -972,9 +1089,15 @@ namespace IR {
       return;
     }
     if (node.op == "var") {
-      if (!fn.locals.count(node.name))
-        Diagnostics::error(node.line, node.col, "unknown local " + node.name);
-      fn.code.push_back({"load", "", fn.locals[node.name]});
+      if (fn.locals.count(node.name)) {
+        fn.code.push_back({"load", "", fn.locals[node.name]});
+      } else if (global_vars.count(node.name)) {
+        fn.code.push_back({"gload", node.name, 0});
+      } else if (global_arrays.count(node.name)) {
+        fn.code.push_back({"gaddr", node.name, 0});
+      } else {
+        Diagnostics::error(node.line, node.col, "unknown variable " + node.name);
+      }
       return;
     }
     if (node.op == "str") {
@@ -1071,10 +1194,14 @@ namespace IR {
         fn.code.push_back({"store", "", fn.locals[stmt.name]});
       }
     } else if (stmt.op == "assign") {
-      if (!fn.locals.count(stmt.name))
-        Diagnostics::error(stmt.line, stmt.col, "unknown local " + stmt.name);
       lower_expr(*stmt.lhs, fn);
-      fn.code.push_back({"store", "", fn.locals[stmt.name]});
+      if (fn.locals.count(stmt.name)) {
+        fn.code.push_back({"store", "", fn.locals[stmt.name]});
+      } else if (global_vars.count(stmt.name)) {
+        fn.code.push_back({"gstore", stmt.name, 0});
+      } else {
+        Diagnostics::error(stmt.line, stmt.col, "unknown variable " + stmt.name);
+      }
     } else if (stmt.op == "return") {
       lower_expr(*stmt.lhs, fn);
       fn.code.push_back({"ret", "", 0});
@@ -1186,11 +1313,15 @@ namespace IR {
         fn.code.push_back({"store_index", "", 0});
       }
     } else if (stmt.op == "store_index") {
-      if (!fn.locals.count(stmt.name))
-        Diagnostics::error(stmt.line, stmt.col, "unknown local " + stmt.name);
       lower_expr(*stmt.rhs, fn);
       lower_expr(*stmt.lhs, fn);
-      fn.code.push_back({"load", "", fn.locals[stmt.name]});
+      if (fn.locals.count(stmt.name)) {
+        fn.code.push_back({"load", "", fn.locals[stmt.name]});
+      } else if (global_arrays.count(stmt.name)) {
+        fn.code.push_back({"gaddr", stmt.name, 0});
+      } else {
+        Diagnostics::error(stmt.line, stmt.col, "unknown array " + stmt.name);
+      }
       fn.code.push_back({"store_index", "", 0});
     } else {
       Diagnostics::error(stmt.line, stmt.col, "unknown AST statement " + stmt.op);
@@ -1222,14 +1353,58 @@ namespace IR {
 namespace Backend {
   using namespace IR;
 
+  static std::string emit_globals(const std::string &target) {
+    std::ostringstream out;
+    if (global_decls.empty())
+      return "";
+    out << ".data\n";
+    for (const auto &g : global_decls) {
+      out << ".globl " << (target == "arm64-darwin" ? "_" : "") << g.name << "\n";
+      if (target == "arm64-darwin") {
+        out << ".p2align 3\n";
+        out << "_" << g.name << ":\n";
+      } else if (target == "x86_64-b1nix") {
+        out << ".p2align 3\n";
+        out << g.name << ":\n";
+      } else {
+        out << ".p2align 2\n";
+        out << g.name << ":\n";
+      }
+      long scale = (target == "i386-b1nix" || target == "x86-b1nix") ? 4 : 8;
+      if (g.is_array) {
+        for (long val : g.initializers) {
+          if (scale == 8)
+            out << "    .quad " << val << "\n";
+          else
+            out << "    .long " << val << "\n";
+        }
+        long remaining = g.size - g.initializers.size();
+        if (remaining > 0) {
+          if (scale == 8)
+            out << "    .zero " << (remaining * 8) << "\n";
+          else
+            out << "    .zero " << (remaining * 4) << "\n";
+        }
+      } else {
+        long val = g.initializers.empty() ? 0 : g.initializers[0];
+        if (scale == 8)
+          out << "    .quad " << val << "\n";
+        else
+          out << "    .long " << val << "\n";
+      }
+    }
+    out << "\n";
+    return out.str();
+  }
+
   static std::string emit_arm64_darwin(const IrFunction &fn) {
     std::ostringstream out;
     if (!fn.strings.empty()) {
       out << ".cstring\n";
       for (const auto &s : fn.strings)
         out << s.first << ":\n    .asciz " << s.second << "\n";
-      out << ".text\n";
     }
+    out << ".text\n";
     out << ".globl _" << fn.name << "\n.p2align 2\n_" << fn.name << ":\n";
     const bool frame = fn.has_call || !fn.locals.empty();
     if (frame) {
@@ -1327,6 +1502,18 @@ namespace Backend {
       } else if (inst.op == "addr") {
         out << "    sub x0, x29, #" << ((inst.value + 1) * 16) << "\n";
         out << "    str x0, [sp, #-16]!\n";
+      } else if (inst.op == "gload") {
+        out << "    adrp x0, _" << inst.arg << "@PAGE\n";
+        out << "    ldr x0, [x0, _" << inst.arg << "@PAGEOFF]\n";
+        out << "    str x0, [sp, #-16]!\n";
+      } else if (inst.op == "gstore") {
+        out << "    ldr x0, [sp], #16\n";
+        out << "    adrp x1, _" << inst.arg << "@PAGE\n";
+        out << "    str x0, [x1, _" << inst.arg << "@PAGEOFF]\n";
+      } else if (inst.op == "gaddr") {
+        out << "    adrp x0, _" << inst.arg << "@PAGE\n";
+        out << "    add x0, x0, _" << inst.arg << "@PAGEOFF\n";
+        out << "    str x0, [sp, #-16]!\n";
       } else if (inst.op == "store_index") {
         out << "    ldr x1, [sp], #16\n";
         out << "    ldr x2, [sp], #16\n";
@@ -1353,8 +1540,8 @@ namespace Backend {
       out << ".section .rodata\n";
       for (const auto &s : fn.strings)
         out << s.first << ":\n    .asciz " << s.second << "\n";
-      out << ".text\n";
     }
+    out << ".text\n";
     out << ".globl " << fn.name << "\n" << fn.name << ":\n";
     const bool frame = fn.has_call || !fn.locals.empty();
     if (frame) {
@@ -1459,6 +1646,15 @@ namespace Backend {
       } else if (inst.op == "addr") {
         out << "    leaq -" << ((inst.value + 1) * 16) << "(%rbp), %rax\n";
         out << "    pushq %rax\n";
+      } else if (inst.op == "gload") {
+        out << "    movq " << inst.arg << "(%rip), %rax\n";
+        out << "    pushq %rax\n";
+      } else if (inst.op == "gstore") {
+        out << "    popq %rax\n";
+        out << "    movq %rax, " << inst.arg << "(%rip)\n";
+      } else if (inst.op == "gaddr") {
+        out << "    leaq " << inst.arg << "(%rip), %rax\n";
+        out << "    pushq %rax\n";
       } else if (inst.op == "store_index") {
         out << "    popq %rax\n";
         out << "    popq %rcx\n";
@@ -1483,8 +1679,8 @@ namespace Backend {
       out << ".section .rodata\n";
       for (const auto &s : fn.strings)
         out << s.first << ":\n    .asciz " << s.second << "\n";
-      out << ".text\n";
     }
+    out << ".text\n";
     out << ".globl " << fn.name << "\n" << fn.name << ":\n";
     const bool frame = fn.has_call || !fn.locals.empty();
     if (frame) {
@@ -1592,6 +1788,15 @@ namespace Backend {
       } else if (inst.op == "addr") {
         out << "    leal -" << ((inst.value + 1) * 16) << "(%ebp), %eax\n";
         out << "    pushl %eax\n";
+      } else if (inst.op == "gload") {
+        out << "    movl " << inst.arg << ", %eax\n";
+        out << "    pushl %eax\n";
+      } else if (inst.op == "gstore") {
+        out << "    popl %eax\n";
+        out << "    movl %eax, " << inst.arg << "\n";
+      } else if (inst.op == "gaddr") {
+        out << "    movl $" << inst.arg << ", %eax\n";
+        out << "    pushl %eax\n";
       } else if (inst.op == "store_index") {
         out << "    popl %eax\n";
         out << "    popl %ecx\n";
@@ -1610,11 +1815,16 @@ namespace Backend {
   }
 
   static std::string compile_asm(const std::string &src, const std::string &target) {
+    global_decls.clear();
+    global_vars.clear();
+    global_arrays.clear();
     std::ostringstream out;
     auto tokens = Lexer::lex(src);
     Parser::Parser parser(std::move(tokens));
     auto ast = parser.parse();
     auto ir_functions = lower_program(std::move(ast), target);
+
+    out << emit_globals(target);
 
     for (const IrFunction &fn : ir_functions) {
       if (target == "arm64-darwin")
