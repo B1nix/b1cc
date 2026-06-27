@@ -67,7 +67,7 @@ namespace Parser {
       } else if (t == "struct" || t == "enum") {
         p++;
         if (p < tokens_.size()) p++;
-      } else if (t == "int" || t == "char" || t == "long" || t == "void" || t == "unsigned" || t == "signed" || t == "float" || t == "double" || global_typedefs.count(t)) {
+      } else if (t == "int" || t == "char" || t == "short" || t == "long" || t == "void" || t == "unsigned" || t == "signed" || t == "float" || t == "double" || global_typedefs.count(t)) {
         p++;
       } else if (t == "*") {
         p++;
@@ -290,8 +290,9 @@ namespace Parser {
           take("}");
         }
         if (total_size == 0) total_size = inits.size();
+        int elem_size = (stars > 0) ? target_scale_ : base_size;
         if (!is_extern) {
-          IR::IrGlobalVar g = {name, true, total_size, inits, is_static};
+          IR::IrGlobalVar g = {name, true, total_size, inits, is_static, elem_size};
           IR::global_decls.push_back(g);
         }
         IR::global_arrays.insert(name);
@@ -303,8 +304,9 @@ namespace Parser {
           take("=");
           inits.push_back(eval_const(*expr()));
         }
+        int elem_size = (stars > 0) ? target_scale_ : base_size;
         if (!is_extern) {
-          IR::IrGlobalVar g = {name, false, 1, inits, is_static};
+          IR::IrGlobalVar g = {name, false, 1, inits, is_static, elem_size};
           IR::global_decls.push_back(g);
         }
         IR::global_vars.insert(name);
@@ -602,7 +604,7 @@ namespace Parser {
         return node;
       }
     }
-    if (peek() == "int" || peek() == "char" || peek() == "long" ||
+    if (peek() == "int" || peek() == "char" || peek() == "short" || peek() == "long" ||
         peek() == "void" || peek() == "unsigned" || peek() == "signed" ||
         peek() == "const" || peek() == "volatile" || peek() == "register" ||
         peek() == "float" || peek() == "double" ||
@@ -857,7 +859,7 @@ namespace Parser {
       auto node = create_node("for", line, col);
       take("(");
       
-      if (peek() == "int" || peek() == "char" || peek() == "long" ||
+      if (peek() == "int" || peek() == "char" || peek() == "short" || peek() == "long" ||
           peek() == "void" || peek() == "unsigned" || peek() == "signed" ||
           peek() == "const" || peek() == "volatile" || peek() == "register" ||
           peek() == "float" || peek() == "double" ||
@@ -1209,7 +1211,7 @@ namespace Parser {
     if (peek() == "(") {
       bool is_cast = false;
       std::string next_tok = tokens_[pos_ + 1].text;
-      if (next_tok == "int" || next_tok == "char" || next_tok == "long" || next_tok == "void" ||
+      if (next_tok == "int" || next_tok == "char" || next_tok == "short" || next_tok == "long" || next_tok == "void" ||
           next_tok == "unsigned" || next_tok == "signed" ||
           next_tok == "const" || next_tok == "volatile" ||
           next_tok == "float" || next_tok == "double" ||

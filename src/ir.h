@@ -14,6 +14,7 @@ namespace IR {
     long size;
     std::vector<long> initializers;
     bool is_static = false;
+    int elem_size = 8;
   };
 
   struct IrInst {

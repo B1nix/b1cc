@@ -78,8 +78,6 @@ namespace IR {
     if (node.op == "index") {
       std::vector<long> dims = get_node_dims(node, fn);
       if (!dims.empty()) {
-        long mult = 1;
-        for (size_t i = 1; i < dims.size(); ++i) mult *= dims[i];
         std::string base_name = get_base_var_name(node);
         std::string local_key = fn.name + "$" + base_name;
         int base_size = 8;
@@ -87,9 +85,16 @@ namespace IR {
           base_size = local_array_base_sizes[local_key];
         } else if (global_array_base_sizes.count(base_name)) {
           base_size = global_array_base_sizes[base_name];
+        } else if (local_var_elem_scales.count(local_key)) {
+          base_size = local_var_elem_scales[local_key];
+        } else if (global_var_elem_scales.count(base_name)) {
+          base_size = global_var_elem_scales[base_name];
         }
+        long mult = 1;
+        for (size_t i = 1; i < dims.size(); ++i) mult *= dims[i];
         return mult * base_size;
       }
+      return 0;
     }
     if (node.op == "cast") {
       if (node.name.rfind("ptr:", 0) == 0) {
@@ -251,7 +256,9 @@ namespace IR {
     if (node.op == "unary_*") {
       lower_expr(*node.lhs, fn);
       fn.code.push_back({"const", "", 0});
-      fn.code.push_back({"index", "", 0});
+      int scale = get_expr_pointer_scale(*node.lhs, fn);
+      if (scale == 0) scale = current_target_scale;
+      fn.code.push_back({"index", "", static_cast<long>(scale)});
       return;
     }
     if (node.op == "unary_&") {
@@ -272,14 +279,25 @@ namespace IR {
         fn.code.push_back({"const", "", mult});
         fn.code.push_back({"*", "", 0});
       }
-      fn.code.push_back({"const", "", static_cast<long>(current_target_scale)});
+      std::string base_name = get_base_var_name(node);
+      std::string local_key = fn.name + "$" + base_name;
+      int base_size = current_target_scale;
+      if (local_array_base_sizes.count(local_key)) {
+        base_size = local_array_base_sizes[local_key];
+      } else if (global_array_base_sizes.count(base_name)) {
+        base_size = global_array_base_sizes[base_name];
+      } else {
+        int scale = get_expr_pointer_scale(*node.lhs, fn);
+        if (scale > 0) base_size = scale;
+      }
+      fn.code.push_back({"const", "", static_cast<long>(base_size)});
       fn.code.push_back({"*", "", 0});
       fn.code.push_back({"+", "", 0});
 
       std::vector<long> current_dims = get_node_dims(node, fn);
       if (current_dims.empty()) {
         fn.code.push_back({"const", "", 0});
-        fn.code.push_back({"index", "", 0});
+        fn.code.push_back({"index", "", static_cast<long>(base_size)});
       }
       return;
     }
@@ -365,7 +383,18 @@ namespace IR {
         fn.code.push_back({"const", "", mult});
         fn.code.push_back({"*", "", 0});
       }
-      fn.code.push_back({"const", "", static_cast<long>(target_scale)});
+      std::string base_name = get_base_var_name(node);
+      std::string local_key = fn.name + "$" + base_name;
+      int base_size = target_scale;
+      if (local_array_base_sizes.count(local_key)) {
+        base_size = local_array_base_sizes[local_key];
+      } else if (global_array_base_sizes.count(base_name)) {
+        base_size = global_array_base_sizes[base_name];
+      } else {
+        int scale = get_expr_pointer_scale(*node.lhs, fn);
+        if (scale > 0) base_size = scale;
+      }
+      fn.code.push_back({"const", "", static_cast<long>(base_size)});
       fn.code.push_back({"*", "", 0});
       fn.code.push_back({"+", "", 0});
     } else if (node.op == "var") {
@@ -497,7 +526,12 @@ namespace IR {
         Diagnostics::error(stmt.line, stmt.col, "duplicate local " + stmt.name);
       int base_slot = static_cast<int>(fn.locals.size());
       fn.locals[stmt.name] = base_slot;
-      long buf_size = stmt.value * target_scale;
+      std::string local_key = fn.name + "$" + stmt.name;
+      int base_size = target_scale;
+      if (local_array_base_sizes.count(local_key)) {
+        base_size = local_array_base_sizes[local_key];
+      }
+      long buf_size = stmt.value * base_size;
       long num_slots = (buf_size + 15) / 16;
       int buf_start_slot = static_cast<int>(fn.locals.size());
       for (long i = 0; i < num_slots; ++i) {
@@ -509,13 +543,20 @@ namespace IR {
         lower_expr(*stmt.body[i], fn);
         fn.code.push_back({"const", "", static_cast<long>(i)});
         fn.code.push_back({"load", "", base_slot});
-        fn.code.push_back({"store_index", "", 0});
+        fn.code.push_back({"store_index", "", static_cast<long>(base_size)});
       }
     } else if (stmt.op == "store_index") {
       lower_expr(*stmt.rhs, fn);
       fn.code.push_back({"const", "", 0});
       lower_addr(*stmt.lhs, fn, target_scale);
-      fn.code.push_back({"store_index", "", 0});
+      int scale = get_expr_pointer_scale(*stmt.lhs, fn);
+      if (scale == 0) {
+        if (stmt.lhs->op == "index" || stmt.lhs->op == "unary_*") {
+          scale = get_expr_pointer_scale(*stmt.lhs->lhs, fn);
+        }
+      }
+      if (scale == 0) scale = target_scale;
+      fn.code.push_back({"store_index", "", static_cast<long>(scale)});
     } else {
       Diagnostics::error(stmt.line, stmt.col, "unknown AST statement " + stmt.op);
     }

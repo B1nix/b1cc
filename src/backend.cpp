@@ -25,37 +25,43 @@ namespace Backend {
       if (!g.is_static) {
         out << ".globl " << (target == "arm64-darwin" ? "_" : "") << g.name << "\n";
       }
+      int align = (g.elem_size == 8) ? 3 : (g.elem_size == 4) ? 2 : (g.elem_size == 2) ? 1 : 0;
       if (target == "arm64-darwin") {
-        out << ".p2align 3\n";
+        out << ".p2align " << align << "\n";
         out << "_" << g.name << ":\n";
       } else if (target == "x86_64-b1nix") {
-        out << ".p2align 3\n";
+        out << ".p2align " << align << "\n";
         out << g.name << ":\n";
       } else {
-        out << ".p2align 2\n";
+        int i386_align = (g.elem_size >= 4) ? 2 : (g.elem_size == 2) ? 1 : 0;
+        out << ".p2align " << i386_align << "\n";
         out << g.name << ":\n";
       }
-      long scale = (target == "i386-b1nix" || target == "x86-b1nix") ? 4 : 8;
       if (g.is_array) {
         for (long val : g.initializers) {
-          if (scale == 8)
-            out << "    .quad " << val << "\n";
-          else
+          if (g.elem_size == 1)
+            out << "    .byte " << (val & 0xff) << "\n";
+          else if (g.elem_size == 2)
+            out << "    .short " << (val & 0xffff) << "\n";
+          else if (g.elem_size == 4)
             out << "    .long " << val << "\n";
+          else
+            out << "    .quad " << val << "\n";
         }
         long remaining = g.size - g.initializers.size();
         if (remaining > 0) {
-          if (scale == 8)
-            out << "    .zero " << (remaining * 8) << "\n";
-          else
-            out << "    .zero " << (remaining * 4) << "\n";
+          out << "    .zero " << (remaining * g.elem_size) << "\n";
         }
       } else {
         long val = g.initializers.empty() ? 0 : g.initializers[0];
-        if (scale == 8)
-          out << "    .quad " << val << "\n";
-        else
+        if (g.elem_size == 1)
+          out << "    .byte " << (val & 0xff) << "\n";
+        else if (g.elem_size == 2)
+          out << "    .short " << (val & 0xffff) << "\n";
+        else if (g.elem_size == 4)
           out << "    .long " << val << "\n";
+        else
+          out << "    .quad " << val << "\n";
       }
     }
     out << "\n";
@@ -108,7 +114,15 @@ namespace Backend {
         out << "    ldr x0, [sp], #16\n";
         out << "    ldr x1, [sp], #16\n";
         if (inst.op == "index") {
-          out << "    ldr x0, [x1, x0, lsl #3]\n";
+          if (inst.value == 1) {
+            out << "    ldrsb x0, [x1, x0]\n";
+          } else if (inst.value == 2) {
+            out << "    ldrsh x0, [x1, x0, lsl #1]\n";
+          } else if (inst.value == 4) {
+            out << "    ldrsw x0, [x1, x0, lsl #2]\n";
+          } else {
+            out << "    ldr x0, [x1, x0, lsl #3]\n";
+          }
         } else if (inst.op == "+")
           out << "    add x0, x1, x0\n";
         else if (inst.op == "-")
@@ -181,24 +195,64 @@ namespace Backend {
         out << "    sub x0, x29, #" << ((inst.value + 1) * 16) << "\n";
         out << "    str x0, [sp, #-16]!\n";
       } else if (inst.op == "gload") {
+        int gsize = 8;
+        if (IR::global_var_elem_scales.count(inst.arg)) {
+          gsize = IR::global_var_elem_scales[inst.arg];
+        }
         if (is_defined_global(inst.arg)) {
           out << "    adrp x0, _" << inst.arg << "@PAGE\n";
-          out << "    ldr x0, [x0, _" << inst.arg << "@PAGEOFF]\n";
+          if (gsize == 1) {
+            out << "    ldrsb x0, [x0, _" << inst.arg << "@PAGEOFF]\n";
+          } else if (gsize == 2) {
+            out << "    ldrsh x0, [x0, _" << inst.arg << "@PAGEOFF]\n";
+          } else if (gsize == 4) {
+            out << "    ldrsw x0, [x0, _" << inst.arg << "@PAGEOFF]\n";
+          } else {
+            out << "    ldr x0, [x0, _" << inst.arg << "@PAGEOFF]\n";
+          }
         } else {
           out << "    adrp x0, _" << inst.arg << "@GOTPAGE\n";
           out << "    ldr x0, [x0, _" << inst.arg << "@GOTPAGEOFF]\n";
-          out << "    ldr x0, [x0]\n";
+          if (gsize == 1) {
+            out << "    ldrsb x0, [x0]\n";
+          } else if (gsize == 2) {
+            out << "    ldrsh x0, [x0]\n";
+          } else if (gsize == 4) {
+            out << "    ldrsw x0, [x0]\n";
+          } else {
+            out << "    ldr x0, [x0]\n";
+          }
         }
         out << "    str x0, [sp, #-16]!\n";
       } else if (inst.op == "gstore") {
         out << "    ldr x0, [sp], #16\n";
+        int gsize = 8;
+        if (IR::global_var_elem_scales.count(inst.arg)) {
+          gsize = IR::global_var_elem_scales[inst.arg];
+        }
         if (is_defined_global(inst.arg)) {
           out << "    adrp x1, _" << inst.arg << "@PAGE\n";
-          out << "    str x0, [x1, _" << inst.arg << "@PAGEOFF]\n";
+          if (gsize == 1) {
+            out << "    strb w0, [x1, _" << inst.arg << "@PAGEOFF]\n";
+          } else if (gsize == 2) {
+            out << "    strh w0, [x1, _" << inst.arg << "@PAGEOFF]\n";
+          } else if (gsize == 4) {
+            out << "    str w0, [x1, _" << inst.arg << "@PAGEOFF]\n";
+          } else {
+            out << "    str x0, [x1, _" << inst.arg << "@PAGEOFF]\n";
+          }
         } else {
           out << "    adrp x1, _" << inst.arg << "@GOTPAGE\n";
           out << "    ldr x1, [x1, _" << inst.arg << "@GOTPAGEOFF]\n";
-          out << "    str x0, [x1]\n";
+          if (gsize == 1) {
+            out << "    strb w0, [x1]\n";
+          } else if (gsize == 2) {
+            out << "    strh w0, [x1]\n";
+          } else if (gsize == 4) {
+            out << "    str w0, [x1]\n";
+          } else {
+            out << "    str x0, [x1]\n";
+          }
         }
       } else if (inst.op == "gaddr") {
         if (is_defined_global(inst.arg)) {
@@ -213,7 +267,15 @@ namespace Backend {
         out << "    ldr x1, [sp], #16\n";
         out << "    ldr x2, [sp], #16\n";
         out << "    ldr x0, [sp], #16\n";
-        out << "    str x0, [x1, x2, lsl #3]\n";
+        if (inst.value == 1) {
+          out << "    strb w0, [x1, x2]\n";
+        } else if (inst.value == 2) {
+          out << "    strh w0, [x1, x2, lsl #1]\n";
+        } else if (inst.value == 4) {
+          out << "    str w0, [x1, x2, lsl #2]\n";
+        } else {
+          out << "    str x0, [x1, x2, lsl #3]\n";
+        }
       } else if (inst.op == "ret") {
         out << "    ldr x0, [sp], #16\n";
         if (frame) {
@@ -276,7 +338,15 @@ namespace Backend {
         out << "    popq %rcx\n";
         out << "    popq %rax\n";
         if (inst.op == "index") {
-          out << "    movq (%rax,%rcx,8), %rax\n";
+          if (inst.value == 1) {
+            out << "    movsbq (%rax,%rcx,1), %rax\n";
+          } else if (inst.value == 2) {
+            out << "    movswq (%rax,%rcx,2), %rax\n";
+          } else if (inst.value == 4) {
+            out << "    movslq (%rax,%rcx,4), %rax\n";
+          } else {
+            out << "    movq (%rax,%rcx,8), %rax\n";
+          }
         } else if (inst.op == "+")
           out << "    addq %rcx, %rax\n";
         else if (inst.op == "-")
@@ -357,11 +427,31 @@ namespace Backend {
         out << "    leaq -" << ((inst.value + 1) * 16) << "(%rbp), %rax\n";
         out << "    pushq %rax\n";
       } else if (inst.op == "gload") {
-        out << "    movq " << inst.arg << "(%rip), %rax\n";
+        int gsize = 8;
+        if (IR::global_var_elem_scales.count(inst.arg))
+          gsize = IR::global_var_elem_scales[inst.arg];
+        if (gsize == 1)
+          out << "    movsbl " << inst.arg << "(%rip), %eax\n";
+        else if (gsize == 2)
+          out << "    movswq " << inst.arg << "(%rip), %rax\n";
+        else if (gsize == 4)
+          out << "    movslq " << inst.arg << "(%rip), %rax\n";
+        else
+          out << "    movq " << inst.arg << "(%rip), %rax\n";
         out << "    pushq %rax\n";
       } else if (inst.op == "gstore") {
         out << "    popq %rax\n";
-        out << "    movq %rax, " << inst.arg << "(%rip)\n";
+        int gsize = 8;
+        if (IR::global_var_elem_scales.count(inst.arg))
+          gsize = IR::global_var_elem_scales[inst.arg];
+        if (gsize == 1)
+          out << "    movb %al, " << inst.arg << "(%rip)\n";
+        else if (gsize == 2)
+          out << "    movw %ax, " << inst.arg << "(%rip)\n";
+        else if (gsize == 4)
+          out << "    movl %eax, " << inst.arg << "(%rip)\n";
+        else
+          out << "    movq %rax, " << inst.arg << "(%rip)\n";
       } else if (inst.op == "gaddr") {
         out << "    leaq " << inst.arg << "(%rip), %rax\n";
         out << "    pushq %rax\n";
@@ -369,7 +459,15 @@ namespace Backend {
         out << "    popq %rax\n";
         out << "    popq %rcx\n";
         out << "    popq %rdx\n";
-        out << "    movq %rdx, (%rax,%rcx,8)\n";
+        if (inst.value == 1) {
+          out << "    movb %dl, (%rax,%rcx,1)\n";
+        } else if (inst.value == 2) {
+          out << "    movw %dx, (%rax,%rcx,2)\n";
+        } else if (inst.value == 4) {
+          out << "    movl %edx, (%rax,%rcx,4)\n";
+        } else {
+          out << "    movq %rdx, (%rax,%rcx,8)\n";
+        }
       } else if (inst.op == "ret") {
         out << "    popq %rax\n";
         if (frame)
@@ -430,7 +528,15 @@ namespace Backend {
         out << "    popl %ecx\n";
         out << "    popl %eax\n";
         if (inst.op == "index") {
-          out << "    movl (%eax,%ecx,4), %eax\n";
+          if (inst.value == 1) {
+            out << "    movsbl (%eax,%ecx,1), %eax\n";
+          } else if (inst.value == 2) {
+            out << "    movswl (%eax,%ecx,2), %eax\n";
+          } else if (inst.value == 4) {
+            out << "    movl (%eax,%ecx,4), %eax\n";
+          } else {
+            out << "    movl (%eax,%ecx,8), %eax\n";
+          }
         } else if (inst.op == "+")
           out << "    addl %ecx, %eax\n";
         else if (inst.op == "-")
@@ -517,11 +623,27 @@ namespace Backend {
         out << "    leal -" << ((inst.value + 1) * 16) << "(%ebp), %eax\n";
         out << "    pushl %eax\n";
       } else if (inst.op == "gload") {
-        out << "    movl " << inst.arg << ", %eax\n";
+        int gsize = 4;
+        if (IR::global_var_elem_scales.count(inst.arg))
+          gsize = IR::global_var_elem_scales[inst.arg];
+        if (gsize == 1)
+          out << "    movsbl " << inst.arg << ", %eax\n";
+        else if (gsize == 2)
+          out << "    movswl " << inst.arg << ", %eax\n";
+        else
+          out << "    movl " << inst.arg << ", %eax\n";
         out << "    pushl %eax\n";
       } else if (inst.op == "gstore") {
         out << "    popl %eax\n";
-        out << "    movl %eax, " << inst.arg << "\n";
+        int gsize = 4;
+        if (IR::global_var_elem_scales.count(inst.arg))
+          gsize = IR::global_var_elem_scales[inst.arg];
+        if (gsize == 1)
+          out << "    movb %al, " << inst.arg << "\n";
+        else if (gsize == 2)
+          out << "    movw %ax, " << inst.arg << "\n";
+        else
+          out << "    movl %eax, " << inst.arg << "\n";
       } else if (inst.op == "gaddr") {
         out << "    movl $" << inst.arg << ", %eax\n";
         out << "    pushl %eax\n";
@@ -529,7 +651,15 @@ namespace Backend {
         out << "    popl %eax\n";
         out << "    popl %ecx\n";
         out << "    popl %edx\n";
-        out << "    movl %edx, (%eax,%ecx,4)\n";
+        if (inst.value == 1) {
+          out << "    movb %dl, (%eax,%ecx,1)\n";
+        } else if (inst.value == 2) {
+          out << "    movw %dx, (%eax,%ecx,2)\n";
+        } else if (inst.value == 4) {
+          out << "    movl %edx, (%eax,%ecx,4)\n";
+        } else {
+          out << "    movl %edx, (%eax,%ecx,8)\n";
+        }
       } else if (inst.op == "ret") {
         out << "    popl %eax\n";
         if (frame)
