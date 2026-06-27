@@ -177,7 +177,7 @@ namespace Lexer {
         std::string text = src.substr(i, 2);
         consume(2);
         out.push_back({text, tok_line, tok_col});
-      } else if (std::string("{}[](),;=+-*/<>.&!|^~").find(src[i]) != std::string::npos) {
+      } else if (std::string("{}[](),;=+-*/<>.&!|^~:").find(src[i]) != std::string::npos) {
         std::string text = src.substr(i, 1);
         consume(1);
         out.push_back({text, tok_line, tok_col});
@@ -466,6 +466,46 @@ namespace Parser {
         auto node = create_node("return", line, col);
         node->lhs = expr();
         take(";");
+        return node;
+      }
+      if (peek() == "break") {
+        take("break");
+        auto node = create_node("break", line, col);
+        take(";");
+        return node;
+      }
+      if (peek() == "continue") {
+        take("continue");
+        auto node = create_node("continue", line, col);
+        take(";");
+        return node;
+      }
+      if (peek() == "switch") {
+        take("switch");
+        auto node = create_node("switch", line, col);
+        take("(");
+        node->lhs = expr();
+        take(")");
+        node->body.push_back(stmt());
+        return node;
+      }
+      if (peek() == "case") {
+        take("case");
+        auto node = create_node("case", line, col);
+        bool neg = false;
+        if (peek() == "-") {
+          take("-");
+          neg = true;
+        }
+        node->value = std::stol(take());
+        if (neg) node->value = -node->value;
+        take(":");
+        return node;
+      }
+      if (peek() == "default") {
+        take("default");
+        auto node = create_node("default", line, col);
+        take(":");
         return node;
       }
       if (peek() == "if") {
@@ -879,6 +919,12 @@ namespace IR {
     int label_id = 0;
   };
 
+  struct LoopContext {
+    std::string break_label;
+    std::string continue_label;
+  };
+  static thread_local std::vector<LoopContext> loop_contexts;
+
   static void lower_expr(const Node &node, IrFunction &fn) {
     if (node.op == "num") {
       fn.code.push_back({"const", "", node.value});
@@ -989,6 +1035,23 @@ namespace IR {
     fn.code.push_back({node.op, "", 0});
   }
 
+  static void collect_cases(const Node &node, std::vector<std::pair<long, std::string>> &cases, std::string &default_label, IrFunction &fn) {
+    if (node.op == "case") {
+      std::string label = ".Lcase_" + fn.name + "_" + std::to_string(fn.label_id++);
+      const_cast<Node&>(node).name = label;
+      cases.push_back({node.value, label});
+    } else if (node.op == "default") {
+      std::string label = ".Ldefault_" + fn.name + "_" + std::to_string(fn.label_id++);
+      const_cast<Node&>(node).name = label;
+      default_label = label;
+    }
+    for (const auto &child : node.body) {
+      if (child) collect_cases(*child, cases, default_label, fn);
+    }
+    if (node.lhs) collect_cases(*node.lhs, cases, default_label, fn);
+    if (node.rhs) collect_cases(*node.rhs, cases, default_label, fn);
+  }
+
   static void lower_stmt(const Node &stmt, IrFunction &fn, int target_scale);
 
   static void lower_block(const Node &block, IrFunction &fn, int target_scale) {
@@ -1035,20 +1098,74 @@ namespace IR {
       fn.code.push_back({"label", start_label, 0});
       lower_expr(*stmt.lhs, fn);
       fn.code.push_back({"jz", end_label, 0});
+      loop_contexts.push_back({end_label, start_label});
       lower_stmt(*stmt.body[0], fn, target_scale);
+      loop_contexts.pop_back();
       fn.code.push_back({"jmp", start_label, 0});
       fn.code.push_back({"label", end_label, 0});
     } else if (stmt.op == "for") {
       std::string start_label = ".L" + fn.name + "_for" + std::to_string(fn.label_id++);
+      std::string step_label = ".L" + fn.name + "_forstep" + std::to_string(fn.label_id++);
       std::string end_label = ".L" + fn.name + "_endfor" + std::to_string(fn.label_id++);
       lower_stmt(*stmt.body[0], fn, target_scale);
       fn.code.push_back({"label", start_label, 0});
       lower_expr(*stmt.lhs, fn);
       fn.code.push_back({"jz", end_label, 0});
+      loop_contexts.push_back({end_label, step_label});
       lower_stmt(*stmt.body[2], fn, target_scale);
+      loop_contexts.pop_back();
+      fn.code.push_back({"label", step_label, 0});
       lower_stmt(*stmt.body[1], fn, target_scale);
       fn.code.push_back({"jmp", start_label, 0});
       fn.code.push_back({"label", end_label, 0});
+    } else if (stmt.op == "break") {
+      if (loop_contexts.empty())
+        Diagnostics::error(stmt.line, stmt.col, "break statement not within loop or switch");
+      fn.code.push_back({"jmp", loop_contexts.back().break_label, 0});
+    } else if (stmt.op == "continue") {
+      std::string cont_label = "";
+      for (auto it = loop_contexts.rbegin(); it != loop_contexts.rend(); ++it) {
+        if (!it->continue_label.empty()) {
+          cont_label = it->continue_label;
+          break;
+        }
+      }
+      if (cont_label.empty())
+        Diagnostics::error(stmt.line, stmt.col, "continue statement not within loop");
+      fn.code.push_back({"jmp", cont_label, 0});
+    } else if (stmt.op == "switch") {
+      std::string end_label = ".L" + fn.name + "_endswitch" + std::to_string(fn.label_id++);
+      std::vector<std::pair<long, std::string>> cases;
+      std::string default_label = "";
+      collect_cases(stmt, cases, default_label, fn);
+      
+      int temp_slot = static_cast<int>(fn.locals.size());
+      std::string temp_name = ".Lswitch_temp_" + std::to_string(temp_slot);
+      fn.locals[temp_name] = temp_slot;
+      
+      lower_expr(*stmt.lhs, fn);
+      fn.code.push_back({"store", "", temp_slot});
+      
+      for (const auto &c : cases) {
+        fn.code.push_back({"load", "", temp_slot});
+        fn.code.push_back({"const", "", c.first});
+        fn.code.push_back({"==", "", 0});
+        fn.code.push_back({"!", "", 0});
+        fn.code.push_back({"jz", c.second, 0});
+      }
+      if (!default_label.empty()) {
+        fn.code.push_back({"jmp", default_label, 0});
+      } else {
+        fn.code.push_back({"jmp", end_label, 0});
+      }
+      
+      loop_contexts.push_back({end_label, ""});
+      lower_stmt(*stmt.body[0], fn, target_scale);
+      loop_contexts.pop_back();
+      
+      fn.code.push_back({"label", end_label, 0});
+    } else if (stmt.op == "case" || stmt.op == "default") {
+      fn.code.push_back({"label", stmt.name, 0});
     } else if (stmt.op == "array_decl") {
       if (fn.locals.count(stmt.name))
         Diagnostics::error(stmt.line, stmt.col, "duplicate local " + stmt.name);
