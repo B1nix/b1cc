@@ -54,7 +54,7 @@
 
 ## M7: Better C
 
-- [ ] Add structs, enums, typedefs, casts, initializers, and arrays.
+- [x] Add structs, enums, typedefs, casts, initializers, and arrays.
 - [x] Add a small preprocessor path for includes/comments.
 - [ ] Add object-like macros when a real test needs them.
 - [x] Support varargs calls well enough for `printf`-style declarations.
