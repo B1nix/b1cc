@@ -58,7 +58,7 @@
 - [x] Add a small preprocessor path for includes/comments.
 - [x] Add object-like macros when a real test needs them.
 - [x] Support varargs calls well enough for `printf`-style declarations.
-- [ ] Expand tests from B1NIX userspace sources, not random internet code.
+- [x] Expand tests from B1NIX userspace sources, not random internet code.
 
 ## M8: Self-Hosting Track
 
