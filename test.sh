@@ -181,6 +181,14 @@ set -e
 test "$rc" = 42
 echo "ok m10_bitwise"
 
+./build/b1cc tests/m10_compound.c -o "$tmp/m10_compound"
+set +e
+"$tmp/m10_compound"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m10_compound"
+
 ./build/b1cc src/b1cc_token_lexer.c -o "$tmp/b1cc_token_lexer"
 "$tmp/b1cc_token_lexer" < tests/local.c > "$tmp/lexer_output.txt"
 grep -q "IDENT: int" "$tmp/lexer_output.txt"

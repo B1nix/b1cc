@@ -170,7 +170,10 @@ namespace Lexer {
                   src.substr(i, 2) == "<=" || src.substr(i, 2) == ">=" ||
                   src.substr(i, 2) == "->" || src.substr(i, 2) == "&&" ||
                   src.substr(i, 2) == "||" || src.substr(i, 2) == "<<" ||
-                  src.substr(i, 2) == ">>")) {
+                  src.substr(i, 2) == ">>" || src.substr(i, 2) == "++" ||
+                  src.substr(i, 2) == "--" || src.substr(i, 2) == "+=" ||
+                  src.substr(i, 2) == "-=" || src.substr(i, 2) == "*=" ||
+                  src.substr(i, 2) == "/=")) {
         std::string text = src.substr(i, 2);
         consume(2);
         out.push_back({text, tok_line, tok_col});
@@ -491,11 +494,34 @@ namespace Parser {
         take("for");
         auto node = create_node("for", line, col);
         take("(");
-        node->body.push_back(assign_stmt(false));
+        
+        bool init_assign = pos_ + 1 < tokens_.size() && 
+          (tokens_[pos_ + 1].text == "=" || tokens_[pos_ + 1].text == "+=" || 
+           tokens_[pos_ + 1].text == "-=" || tokens_[pos_ + 1].text == "*=" || 
+           tokens_[pos_ + 1].text == "/=");
+        if (init_assign) {
+          node->body.push_back(assign_stmt(false));
+        } else {
+          auto init_expr = create_node("expr", line, col);
+          init_expr->lhs = expr();
+          node->body.push_back(std::move(init_expr));
+        }
         take(";");
+        
         node->lhs = expr();
         take(";");
-        node->body.push_back(assign_stmt(false));
+        
+        bool step_assign = pos_ + 1 < tokens_.size() && 
+          (tokens_[pos_ + 1].text == "=" || tokens_[pos_ + 1].text == "+=" || 
+           tokens_[pos_ + 1].text == "-=" || tokens_[pos_ + 1].text == "*=" || 
+           tokens_[pos_ + 1].text == "/=");
+        if (step_assign) {
+          node->body.push_back(assign_stmt(false));
+        } else {
+          auto step_expr = create_node("expr", line, col);
+          step_expr->lhs = expr();
+          node->body.push_back(std::move(step_expr));
+        }
         take(")");
         node->body.push_back(stmt());
         return node;
@@ -540,7 +566,11 @@ namespace Parser {
           return node;
         }
       }
-      if (pos_ + 1 < tokens_.size() && tokens_[pos_ + 1].text == "=") {
+      if (pos_ + 1 < tokens_.size() && (tokens_[pos_ + 1].text == "=" ||
+                                       tokens_[pos_ + 1].text == "+=" ||
+                                       tokens_[pos_ + 1].text == "-=" ||
+                                       tokens_[pos_ + 1].text == "*=" ||
+                                       tokens_[pos_ + 1].text == "/=")) {
         return assign_stmt(true);
       }
       auto node = create_node("expr", line, col);
@@ -552,10 +582,21 @@ namespace Parser {
     std::unique_ptr<Node> assign_stmt(bool semicolon) {
       int line = tokens_[pos_].line;
       int col = tokens_[pos_].col;
+      std::string name = take();
+      std::string op = take();
       auto node = create_node("assign", line, col);
-      node->name = take();
-      take("=");
-      node->lhs = expr();
+      node->name = name;
+      if (op == "=") {
+        node->lhs = expr();
+      } else {
+        std::string bin_op = op.substr(0, 1);
+        auto bin_node = create_node(bin_op, line, col);
+        auto var_node = create_node("var", line, col);
+        var_node->name = name;
+        bin_node->lhs = std::move(var_node);
+        bin_node->rhs = expr();
+        node->lhs = std::move(bin_node);
+      }
       if (semicolon)
         take(";");
       return node;
@@ -697,11 +738,17 @@ namespace Parser {
 
     std::unique_ptr<Node> factor() {
       auto node = unary();
-      while (peek() == "[" || peek() == "." || peek() == "->") {
+      while (peek() == "[" || peek() == "." || peek() == "->" || peek() == "++" || peek() == "--") {
         int line = tokens_[pos_].line;
         int col = tokens_[pos_].col;
         std::string op = take();
-        if (op == "[") {
+        if (op == "++" || op == "--") {
+          if (node->op != "var")
+            Diagnostics::error(line, col, "lvalue required as increment operand");
+          auto parent = create_node("postfix_" + op, line, col);
+          parent->name = node->name;
+          node = std::move(parent);
+        } else if (op == "[") {
           auto parent = create_node("index", line, col);
           parent->lhs = std::move(node);
           parent->rhs = expr();
@@ -725,6 +772,16 @@ namespace Parser {
     }
 
     std::unique_ptr<Node> unary() {
+      if (peek() == "++" || peek() == "--") {
+        int line = tokens_[pos_].line;
+        int col = tokens_[pos_].col;
+        std::string op = take();
+        if (peek()[0] != '_' && !std::isalpha(static_cast<unsigned char>(peek()[0])))
+          Diagnostics::error(line, col, "lvalue required as increment operand");
+        auto node = create_node("prefix_" + op, line, col);
+        node->name = take();
+        return node;
+      }
       if (peek() == "~" || peek() == "!" || peek() == "-") {
         int line = tokens_[pos_].line;
         int col = tokens_[pos_].col;
@@ -829,6 +886,28 @@ namespace IR {
     }
     if (node.op == "cast") {
       lower_expr(*node.lhs, fn);
+      return;
+    }
+    if (node.op == "prefix_++" || node.op == "prefix_--") {
+      if (!fn.locals.count(node.name))
+        Diagnostics::error(node.line, node.col, "unknown local " + node.name);
+      int slot = fn.locals[node.name];
+      fn.code.push_back({"load", "", slot});
+      fn.code.push_back({"const", "", 1});
+      fn.code.push_back({(node.op == "prefix_++") ? "+" : "-", "", 0});
+      fn.code.push_back({"store", "", slot});
+      fn.code.push_back({"load", "", slot});
+      return;
+    }
+    if (node.op == "postfix_++" || node.op == "postfix_--") {
+      if (!fn.locals.count(node.name))
+        Diagnostics::error(node.line, node.col, "unknown local " + node.name);
+      int slot = fn.locals[node.name];
+      fn.code.push_back({"load", "", slot});
+      fn.code.push_back({"load", "", slot});
+      fn.code.push_back({"const", "", 1});
+      fn.code.push_back({(node.op == "postfix_++") ? "+" : "-", "", 0});
+      fn.code.push_back({"store", "", slot});
       return;
     }
     if (node.op == "unary_~") {
