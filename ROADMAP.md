@@ -43,8 +43,8 @@
 - [x] Compile hello output.
 - [x] Compile argv/file-write checks.
 - [x] Compile stderr and exit-status checks.
-- [ ] Support enough libc calls for the full M25 smoke shape.
-- [ ] Keep TCC as fallback until b1cc passes equivalent tests.
+- [x] Support enough libc calls for the full M25 smoke shape.
+- [x] Keep TCC as fallback until b1cc passes equivalent tests.
 
 ## M6: Object and ELF Output
 
