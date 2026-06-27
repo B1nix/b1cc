@@ -77,7 +77,7 @@
 
 - [x] Support logical OR/AND operators (`||` and `&&`) with short-circuit evaluation.
 - [x] Support bitwise operators (`&`, `|`, `^`, `~`, `<<`, `>>`).
-- [ ] Support `switch-case` statements with `break`/`continue` loop control.
+- [x] Support `switch-case` statements with `break`/`continue` loop control.
 - [x] Support increment/decrement operators (prefix/postfix `++` and `--`).
 - [x] Support compound assignment operators (`+=`, `-=`, `*=`, `/=`).
 
