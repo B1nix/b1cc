@@ -76,7 +76,7 @@
 ## M10: Production-Grade Expressions & Control Flow
 
 - [x] Support logical OR/AND operators (`||` and `&&`) with short-circuit evaluation.
-- [ ] Support bitwise operators (`&`, `|`, `^`, `~`, `<<`, `>>`).
+- [x] Support bitwise operators (`&`, `|`, `^`, `~`, `<<`, `>>`).
 - [ ] Support `switch-case` statements with `break`/`continue` loop control.
 - [ ] Support increment/decrement operators (prefix/postfix `++` and `--`).
 - [ ] Support compound assignment operators (`+=`, `-=`, `*=`, `/=`).
