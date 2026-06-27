@@ -801,8 +801,8 @@ namespace IR {
       lower_expr(*stmt.lhs, fn);
       fn.code.push_back({"pop", "", 0});
     } else if (stmt.op == "if") {
-      std::string else_label = ".Lelse" + std::to_string(label_id++);
-      std::string end_label = ".Lendif" + std::to_string(label_id++);
+      std::string else_label = ".L" + fn.name + "_else" + std::to_string(label_id++);
+      std::string end_label = ".L" + fn.name + "_endif" + std::to_string(label_id++);
       lower_expr(*stmt.lhs, fn);
       fn.code.push_back({"jz", else_label, 0});
       lower_stmt(*stmt.body[0], fn, label_id, target_scale);
@@ -812,8 +812,8 @@ namespace IR {
         lower_stmt(*stmt.body[1], fn, label_id, target_scale);
       fn.code.push_back({"label", end_label, 0});
     } else if (stmt.op == "while") {
-      std::string start_label = ".Lwhile" + std::to_string(label_id++);
-      std::string end_label = ".Lendwhile" + std::to_string(label_id++);
+      std::string start_label = ".L" + fn.name + "_while" + std::to_string(label_id++);
+      std::string end_label = ".L" + fn.name + "_endwhile" + std::to_string(label_id++);
       fn.code.push_back({"label", start_label, 0});
       lower_expr(*stmt.lhs, fn);
       fn.code.push_back({"jz", end_label, 0});
@@ -821,8 +821,8 @@ namespace IR {
       fn.code.push_back({"jmp", start_label, 0});
       fn.code.push_back({"label", end_label, 0});
     } else if (stmt.op == "for") {
-      std::string start_label = ".Lfor" + std::to_string(label_id++);
-      std::string end_label = ".Lendfor" + std::to_string(label_id++);
+      std::string start_label = ".L" + fn.name + "_for" + std::to_string(label_id++);
+      std::string end_label = ".L" + fn.name + "_endfor" + std::to_string(label_id++);
       lower_stmt(*stmt.body[0], fn, label_id, target_scale);
       fn.code.push_back({"label", start_label, 0});
       lower_expr(*stmt.lhs, fn);

@@ -165,6 +165,13 @@ set -e
 test "$rc" = 42
 echo "ok m7_macro"
 
+./build/b1cc src/b1cc_token_lexer.c -o "$tmp/b1cc_token_lexer"
+"$tmp/b1cc_token_lexer" < tests/local.c > "$tmp/lexer_output.txt"
+grep -q "IDENT: int" "$tmp/lexer_output.txt"
+grep -q "NUM: 9" "$tmp/lexer_output.txt"
+grep -q "EOF" "$tmp/lexer_output.txt"
+echo "ok self_hosting_lexer"
+
 ./build/b1cc --target=x86_64-b1nix tests/return_42.c -S -o "$tmp/return_42_x86_64.s"
 grep -q '^main:' "$tmp/return_42_x86_64.s"
 grep -q 'ret' "$tmp/return_42_x86_64.s"
