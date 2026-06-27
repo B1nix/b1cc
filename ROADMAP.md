@@ -40,24 +40,24 @@
 
 ## M5: M25-Level C
 
-- [ ] Compile hello output.
-- [ ] Compile argv/file-write checks.
-- [ ] Compile stderr and exit-status checks.
+- [x] Compile hello output.
+- [x] Compile argv/file-write checks.
+- [x] Compile stderr and exit-status checks.
 - [ ] Support enough libc calls for the full M25 smoke shape.
 - [ ] Keep TCC as fallback until b1cc passes equivalent tests.
 
 ## M6: Object and ELF Output
 
-- [ ] Emit relocatable objects or final static ELF.
+- [x] Emit relocatable objects or final static ELF.
 - [ ] Add symbols, relocations, sections, and simple debug dumps.
-- [ ] Stop relying on host `cc` for normal B1NIX output.
+- [x] Stop relying on host `cc` for normal B1NIX output.
 
 ## M7: Better C
 
 - [ ] Add structs, enums, typedefs, casts, initializers, and arrays.
-- [ ] Add a small preprocessor path for includes/comments.
+- [x] Add a small preprocessor path for includes/comments.
 - [ ] Add object-like macros when a real test needs them.
-- [ ] Support varargs calls well enough for `printf`-style declarations.
+- [x] Support varargs calls well enough for `printf`-style declarations.
 - [ ] Expand tests from B1NIX userspace sources, not random internet code.
 
 ## M8: Self-Hosting Track
@@ -79,3 +79,5 @@
 - [ ] Add namespaces, references, classes, methods, constructors, and mangling.
 - [ ] Add overloads before templates.
 - [ ] Add templates, exceptions, and RTTI only when B1NIX needs them.
+
+Skipped: full C/C++ upfront. Add features only when a test or B1NIX source needs them.

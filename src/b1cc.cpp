@@ -34,6 +34,7 @@ struct IrFunction {
   std::vector<std::string> params;
   std::vector<IrInst> code;
   std::map<std::string, int> locals;
+  std::vector<std::pair<std::string, std::string>> strings;
   bool has_call = false;
 };
 
@@ -48,6 +49,9 @@ static std::vector<Token> lex(const std::string &src) {
     unsigned char c = static_cast<unsigned char>(src[i]);
     if (std::isspace(c)) {
       ++i;
+    } else if (src[i] == '#') {
+      while (i < src.size() && src[i] != '\n')
+        ++i;
     } else if (i + 1 < src.size() && src.substr(i, 2) == "//") {
       i += 2;
       while (i < src.size() && src[i] != '\n')
@@ -61,7 +65,8 @@ static std::vector<Token> lex(const std::string &src) {
       i += 2;
     } else if (std::isdigit(c)) {
       size_t start = i++;
-      while (i < src.size() && std::isdigit(static_cast<unsigned char>(src[i]))) {
+      while (i < src.size() &&
+             std::isdigit(static_cast<unsigned char>(src[i]))) {
         ++i;
       }
       out.push_back({src.substr(start, i - start)});
@@ -74,12 +79,24 @@ static std::vector<Token> lex(const std::string &src) {
         ++i;
       }
       out.push_back({src.substr(start, i - start)});
+    } else if (src[i] == '"') {
+      size_t start = i++;
+      while (i < src.size() && src[i] != '"') {
+        if (src[i] == '\\' && i + 1 < src.size())
+          i += 2;
+        else
+          ++i;
+      }
+      if (i == src.size())
+        die("unterminated string literal");
+      ++i;
+      out.push_back({src.substr(start, i - start)});
     } else if (i + 1 < src.size() &&
                (src.substr(i, 2) == "==" || src.substr(i, 2) == "!=" ||
                 src.substr(i, 2) == "<=" || src.substr(i, 2) == ">=")) {
       out.push_back({src.substr(i, 2)});
       i += 2;
-    } else if (std::string("{}()[],;=+-*/<>").find(src[i]) != std::string::npos) {
+    } else if (std::string("{}[](),;=+-*/<>").find(src[i]) != std::string::npos) {
       out.push_back({src.substr(i++, 1)});
     } else {
       die("unexpected character");
@@ -242,7 +259,8 @@ private:
   }
 
   std::unique_ptr<Node> expr() {
-    return equality();
+    auto node = equality();
+    return node;
   }
 
   std::unique_ptr<Node> equality() {
@@ -294,7 +312,17 @@ private:
   }
 
   std::unique_ptr<Node> factor() {
-    return primary();
+    auto node = primary();
+    while (peek() == "[") {
+      take("[");
+      auto parent = std::make_unique<Node>();
+      parent->op = "index";
+      parent->lhs = std::move(node);
+      parent->rhs = expr();
+      take("]");
+      node = std::move(parent);
+    }
+    return node;
   }
 
   std::unique_ptr<Node> primary() {
@@ -309,6 +337,12 @@ private:
       node->op = "num";
       for (char c : take())
         node->value = node->value * 10 + (c - '0');
+      return node;
+    }
+    if (peek()[0] == '"') {
+      auto node = std::make_unique<Node>();
+      node->op = "str";
+      node->name = take();
       return node;
     }
     if (std::isalpha(static_cast<unsigned char>(peek()[0])) || peek()[0] == '_') {
@@ -349,6 +383,12 @@ static void lower_expr(const Node &node, IrFunction &fn) {
     fn.code.push_back({"load", "", fn.locals[node.name]});
     return;
   }
+  if (node.op == "str") {
+    std::string label = ".Lstr" + std::to_string(fn.strings.size());
+    fn.strings.push_back({label, node.name});
+    fn.code.push_back({"str", label, 0});
+    return;
+  }
   if (node.op == "call") {
     if (node.body.size() > 8)
       die("calls with more than 8 arguments are not supported");
@@ -356,6 +396,12 @@ static void lower_expr(const Node &node, IrFunction &fn) {
       lower_expr(*arg, fn);
     fn.has_call = true;
     fn.code.push_back({"call", node.name, static_cast<long>(node.body.size())});
+    return;
+  }
+  if (node.op == "index") {
+    lower_expr(*node.lhs, fn);
+    lower_expr(*node.rhs, fn);
+    fn.code.push_back({"index", "", 0});
     return;
   }
   lower_expr(*node.lhs, fn);
@@ -451,6 +497,12 @@ static std::vector<IrFunction> lower_program(std::vector<std::unique_ptr<Node>> 
 
 static std::string emit_arm64_darwin(const IrFunction &fn) {
   std::ostringstream out;
+  if (!fn.strings.empty()) {
+    out << ".cstring\n";
+    for (const auto &s : fn.strings)
+      out << s.first << ":\n    .asciz " << s.second << "\n";
+    out << ".text\n";
+  }
   out << ".globl _" << fn.name << "\n.p2align 2\n_" << fn.name << ":\n";
   const bool frame = fn.has_call || !fn.locals.empty();
   if (frame) {
@@ -468,6 +520,10 @@ static std::string emit_arm64_darwin(const IrFunction &fn) {
     } else if (inst.op == "load") {
       out << "    ldr x0, [x29, #-" << ((inst.value + 1) * 16) << "]\n";
       out << "    str x0, [sp, #-16]!\n";
+    } else if (inst.op == "str") {
+      out << "    adrp x0, " << inst.arg << "@PAGE\n";
+      out << "    add x0, x0, " << inst.arg << "@PAGEOFF\n";
+      out << "    str x0, [sp, #-16]!\n";
     } else if (inst.op == "store") {
       out << "    ldr x0, [sp], #16\n";
       out << "    str x0, [x29, #-" << ((inst.value + 1) * 16) << "]\n";
@@ -476,10 +532,12 @@ static std::string emit_arm64_darwin(const IrFunction &fn) {
     } else if (inst.op == "+" || inst.op == "-" || inst.op == "*" ||
                inst.op == "/" || inst.op == "==" || inst.op == "!=" ||
                inst.op == "<" || inst.op == ">" || inst.op == "<=" ||
-               inst.op == ">=") {
+               inst.op == ">=" || inst.op == "index") {
       out << "    ldr x0, [sp], #16\n";
       out << "    ldr x1, [sp], #16\n";
-      if (inst.op == "+")
+      if (inst.op == "index") {
+        out << "    ldr x0, [x1, x0, lsl #3]\n";
+      } else if (inst.op == "+")
         out << "    add x0, x1, x0\n";
       else if (inst.op == "-")
         out << "    sub x0, x1, x0\n";
@@ -533,6 +591,12 @@ static std::string emit_arm64_darwin(const IrFunction &fn) {
 static std::string emit_x86_64_b1nix(const IrFunction &fn) {
   static const char *regs[] = {"%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"};
   std::ostringstream out;
+  if (!fn.strings.empty()) {
+    out << ".section .rodata\n";
+    for (const auto &s : fn.strings)
+      out << s.first << ":\n    .asciz " << s.second << "\n";
+    out << ".text\n";
+  }
   out << ".globl " << fn.name << "\n" << fn.name << ":\n";
   const bool frame = fn.has_call || !fn.locals.empty();
   if (frame) {
@@ -552,6 +616,9 @@ static std::string emit_x86_64_b1nix(const IrFunction &fn) {
     } else if (inst.op == "load") {
       out << "    movq -" << ((inst.value + 1) * 16) << "(%rbp), %rax\n";
       out << "    pushq %rax\n";
+    } else if (inst.op == "str") {
+      out << "    leaq " << inst.arg << "(%rip), %rax\n";
+      out << "    pushq %rax\n";
     } else if (inst.op == "store") {
       out << "    popq %rax\n";
       out << "    movq %rax, -" << ((inst.value + 1) * 16) << "(%rbp)\n";
@@ -560,10 +627,12 @@ static std::string emit_x86_64_b1nix(const IrFunction &fn) {
     } else if (inst.op == "+" || inst.op == "-" || inst.op == "*" ||
                inst.op == "/" || inst.op == "==" || inst.op == "!=" ||
                inst.op == "<" || inst.op == ">" || inst.op == "<=" ||
-               inst.op == ">=") {
+               inst.op == ">=" || inst.op == "index") {
       out << "    popq %rcx\n";
       out << "    popq %rax\n";
-      if (inst.op == "+")
+      if (inst.op == "index") {
+        out << "    movq (%rax,%rcx,8), %rax\n";
+      } else if (inst.op == "+")
         out << "    addq %rcx, %rax\n";
       else if (inst.op == "-")
         out << "    subq %rcx, %rax\n";
