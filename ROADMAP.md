@@ -62,9 +62,9 @@
 
 ## M8: Self-Hosting Track
 
-- [ ] Compile selected b1cc source files with b1cc.
-- [ ] Compile all b1cc C support code, if any.
-- [ ] Keep the C++ core host-built until b1cxx exists.
+- [x] Compile selected b1cc source files with b1cc.
+- [x] Compile all b1cc C support code, if any.
+- [x] Keep the C++ core host-built until b1cxx exists.
 
 ## M9: Optional External Backend
 
