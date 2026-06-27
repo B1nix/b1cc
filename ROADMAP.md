@@ -73,7 +73,28 @@
 - [ ] Do not expose QBE details to the frontend.
 - [ ] Defer LLVM until optimizer/debug-info/many-target needs are concrete.
 
-## M10: C++ Frontend
+## M10: Production-Grade Expressions & Control Flow
+
+- [ ] Support logical OR/AND operators (`||` and `&&`) with short-circuit evaluation.
+- [ ] Support bitwise operators (`&`, `|`, `^`, `~`, `<<`, `>>`).
+- [ ] Support `switch-case` statements with `break`/`continue` loop control.
+- [ ] Support increment/decrement operators (prefix/postfix `++` and `--`).
+- [ ] Support compound assignment operators (`+=`, `-=`, `*=`, `/=`).
+
+## M11: Global Variables & Memory Model
+
+- [ ] Support global variable declarations with compile-time constant initializers.
+- [ ] Support static local and global variables.
+- [ ] Support multidimensional arrays (e.g., `arr[i][j]`).
+- [ ] Support scale-aware pointer arithmetic (e.g., `ptr + offset` scales by element size).
+
+## M12: Full Preprocessor
+
+- [ ] Support conditional preprocessor directives (`#ifdef`, `#ifndef`, `#else`, `#endif`, `#if`).
+- [ ] Support function-like macros (`#define MACRO(a,b) ...`).
+- [ ] Support standard include directories search paths.
+
+## M13: C++ Frontend
 
 - [ ] Start `b1cxx` as a separate frontend using the same IR/backend.
 - [ ] Add namespaces, references, classes, methods, constructors, and mangling.
