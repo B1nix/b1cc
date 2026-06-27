@@ -78,8 +78,8 @@
 - [x] Support logical OR/AND operators (`||` and `&&`) with short-circuit evaluation.
 - [x] Support bitwise operators (`&`, `|`, `^`, `~`, `<<`, `>>`).
 - [ ] Support `switch-case` statements with `break`/`continue` loop control.
-- [ ] Support increment/decrement operators (prefix/postfix `++` and `--`).
-- [ ] Support compound assignment operators (`+=`, `-=`, `*=`, `/=`).
+- [x] Support increment/decrement operators (prefix/postfix `++` and `--`).
+- [x] Support compound assignment operators (`+=`, `-=`, `*=`, `/=`).
 
 ## M11: Global Variables & Memory Model
 
