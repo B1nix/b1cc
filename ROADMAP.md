@@ -13,7 +13,7 @@
 - [x] Rewrite the prototype in C++17.
 - [x] Build with `-std=c++17 -fno-exceptions -fno-rtti`.
 - [x] Keep one binary: `b1cc`.
-- [ ] Add lexer, parser, AST, diagnostics, IR, and backend as small modules.
+- [x] Add lexer, parser, AST, diagnostics, IR, and backend as small modules.
 - [x] Preserve the current expression-return tests.
 
 ## M2: Minimal Internal IR
@@ -35,8 +35,8 @@
 
 - [x] Emit x86_64 B1NIX assembly.
 - [x] Produce code compatible with the B1NIX C ABI.
-- [ ] Compile and run `return 42` inside B1NIX.
-- [ ] Add i386 only after x86_64 works.
+- [x] Compile and run `return 42` inside B1NIX.
+- [x] Add i386 only after x86_64 works.
 
 ## M5: M25-Level C
 
