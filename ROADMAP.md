@@ -56,7 +56,7 @@
 
 - [x] Add structs, enums, typedefs, casts, initializers, and arrays.
 - [x] Add a small preprocessor path for includes/comments.
-- [ ] Add object-like macros when a real test needs them.
+- [x] Add object-like macros when a real test needs them.
 - [x] Support varargs calls well enough for `printf`-style declarations.
 - [ ] Expand tests from B1NIX userspace sources, not random internet code.
 

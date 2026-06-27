@@ -157,6 +157,14 @@ set -e
 test "$rc" = 80
 echo "ok m7_array"
 
+./build/b1cc tests/m7_macro.c -o "$tmp/m7_macro"
+set +e
+"$tmp/m7_macro"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m7_macro"
+
 ./build/b1cc --target=x86_64-b1nix tests/return_42.c -S -o "$tmp/return_42_x86_64.s"
 grep -q '^main:' "$tmp/return_42_x86_64.s"
 grep -q 'ret' "$tmp/return_42_x86_64.s"

@@ -63,6 +63,39 @@ namespace Lexer {
       }
     };
 
+    std::map<std::string, std::string> macros;
+    {
+      size_t j = 0;
+      while (j < src.size()) {
+        while (j < src.size() && (src[j] == ' ' || src[j] == '\t')) j++;
+        if (j < src.size() && src[j] == '#') {
+          j++;
+          while (j < src.size() && (src[j] == ' ' || src[j] == '\t')) j++;
+          if (j + 6 <= src.size() && src.substr(j, 6) == "define") {
+            j += 6;
+            while (j < src.size() && (src[j] == ' ' || src[j] == '\t')) j++;
+            size_t name_start = j;
+            while (j < src.size() && (std::isalnum(static_cast<unsigned char>(src[j])) || src[j] == '_')) j++;
+            std::string name = src.substr(name_start, j - name_start);
+            while (j < src.size() && (src[j] == ' ' || src[j] == '\t')) j++;
+            size_t val_start = j;
+            while (j < src.size() && src[j] != '\n') j++;
+            std::string val = src.substr(val_start, j - val_start);
+            while (!val.empty() && (val.back() == ' ' || val.back() == '\t' || val.back() == '\r')) {
+              val.pop_back();
+            }
+            if (!name.empty()) {
+              macros[name] = val;
+            }
+          }
+          while (j < src.size() && src[j] != '\n') j++;
+        } else {
+          while (j < src.size() && src[j] != '\n') j++;
+          if (j < src.size()) j++;
+        }
+      }
+    }
+
     while (i < src.size()) {
       unsigned char c = static_cast<unsigned char>(src[i]);
       int tok_line = current_line;
@@ -104,7 +137,19 @@ namespace Lexer {
             break;
           consume(1);
         }
-        out.push_back({src.substr(start, i - start), tok_line, tok_col});
+        std::string ident = src.substr(start, i - start);
+        if (macros.count(ident)) {
+          auto macro_tokens = lex(macros[ident]);
+          for (auto &tok : macro_tokens) {
+            if (tok.text != "EOF") {
+              tok.line = tok_line;
+              tok.col = tok_col;
+              out.push_back(tok);
+            }
+          }
+        } else {
+          out.push_back({ident, tok_line, tok_col});
+        }
       } else if (src[i] == '"') {
         size_t start = i;
         consume(1);
