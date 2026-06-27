@@ -83,7 +83,7 @@
 
 ## M11: Global Variables & Memory Model
 
-- [ ] Support global variable declarations with compile-time constant initializers.
+- [x] Support global variable declarations with compile-time constant initializers.
 - [ ] Support static local and global variables.
 - [ ] Support multidimensional arrays (e.g., `arr[i][j]`).
 - [ ] Support scale-aware pointer arithmetic (e.g., `ptr + offset` scales by element size).
