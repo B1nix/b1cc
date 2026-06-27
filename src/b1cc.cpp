@@ -169,11 +169,12 @@ namespace Lexer {
                  (src.substr(i, 2) == "==" || src.substr(i, 2) == "!=" ||
                   src.substr(i, 2) == "<=" || src.substr(i, 2) == ">=" ||
                   src.substr(i, 2) == "->" || src.substr(i, 2) == "&&" ||
-                  src.substr(i, 2) == "||")) {
+                  src.substr(i, 2) == "||" || src.substr(i, 2) == "<<" ||
+                  src.substr(i, 2) == ">>")) {
         std::string text = src.substr(i, 2);
         consume(2);
         out.push_back({text, tok_line, tok_col});
-      } else if (std::string("{}[](),;=+-*/<>.&!").find(src[i]) != std::string::npos) {
+      } else if (std::string("{}[](),;=+-*/<>.&!|^~").find(src[i]) != std::string::npos) {
         std::string text = src.substr(i, 1);
         consume(1);
         out.push_back({text, tok_line, tok_col});
@@ -578,8 +579,47 @@ namespace Parser {
     }
 
     std::unique_ptr<Node> logical_and() {
-      auto node = equality();
+      auto node = bitwise_or();
       while (peek() == "&&") {
+        int line = tokens_[pos_].line;
+        int col = tokens_[pos_].col;
+        auto parent = create_node(take(), line, col);
+        parent->lhs = std::move(node);
+        parent->rhs = bitwise_or();
+        node = std::move(parent);
+      }
+      return node;
+    }
+
+    std::unique_ptr<Node> bitwise_or() {
+      auto node = bitwise_xor();
+      while (peek() == "|") {
+        int line = tokens_[pos_].line;
+        int col = tokens_[pos_].col;
+        auto parent = create_node(take(), line, col);
+        parent->lhs = std::move(node);
+        parent->rhs = bitwise_xor();
+        node = std::move(parent);
+      }
+      return node;
+    }
+
+    std::unique_ptr<Node> bitwise_xor() {
+      auto node = bitwise_and();
+      while (peek() == "^") {
+        int line = tokens_[pos_].line;
+        int col = tokens_[pos_].col;
+        auto parent = create_node(take(), line, col);
+        parent->lhs = std::move(node);
+        parent->rhs = bitwise_and();
+        node = std::move(parent);
+      }
+      return node;
+    }
+
+    std::unique_ptr<Node> bitwise_and() {
+      auto node = equality();
+      while (peek() == "&") {
         int line = tokens_[pos_].line;
         int col = tokens_[pos_].col;
         auto parent = create_node(take(), line, col);
@@ -604,8 +644,21 @@ namespace Parser {
     }
 
     std::unique_ptr<Node> relational() {
-      auto node = add();
+      auto node = shift();
       while (peek() == "<" || peek() == ">" || peek() == "<=" || peek() == ">=") {
+        int line = tokens_[pos_].line;
+        int col = tokens_[pos_].col;
+        auto parent = create_node(take(), line, col);
+        parent->lhs = std::move(node);
+        parent->rhs = shift();
+        node = std::move(parent);
+      }
+      return node;
+    }
+
+    std::unique_ptr<Node> shift() {
+      auto node = add();
+      while (peek() == "<<" || peek() == ">>") {
         int line = tokens_[pos_].line;
         int col = tokens_[pos_].col;
         auto parent = create_node(take(), line, col);
@@ -643,7 +696,7 @@ namespace Parser {
     }
 
     std::unique_ptr<Node> factor() {
-      auto node = primary();
+      auto node = unary();
       while (peek() == "[" || peek() == "." || peek() == "->") {
         int line = tokens_[pos_].line;
         int col = tokens_[pos_].col;
@@ -669,6 +722,17 @@ namespace Parser {
         }
       }
       return node;
+    }
+
+    std::unique_ptr<Node> unary() {
+      if (peek() == "~" || peek() == "!" || peek() == "-") {
+        int line = tokens_[pos_].line;
+        int col = tokens_[pos_].col;
+        auto node = create_node("unary_" + take(), line, col);
+        node->lhs = unary();
+        return node;
+      }
+      return primary();
     }
 
     std::unique_ptr<Node> primary() {
@@ -765,6 +829,21 @@ namespace IR {
     }
     if (node.op == "cast") {
       lower_expr(*node.lhs, fn);
+      return;
+    }
+    if (node.op == "unary_~") {
+      lower_expr(*node.lhs, fn);
+      fn.code.push_back({"~", "", 0});
+      return;
+    }
+    if (node.op == "unary_!") {
+      lower_expr(*node.lhs, fn);
+      fn.code.push_back({"!", "", 0});
+      return;
+    }
+    if (node.op == "unary_-") {
+      lower_expr(*node.lhs, fn);
+      fn.code.push_back({"neg", "", 0});
       return;
     }
     if (node.op == "var") {
@@ -984,7 +1063,9 @@ namespace Backend {
       } else if (inst.op == "+" || inst.op == "-" || inst.op == "*" ||
                  inst.op == "/" || inst.op == "==" || inst.op == "!=" ||
                  inst.op == "<" || inst.op == ">" || inst.op == "<=" ||
-                 inst.op == ">=" || inst.op == "index") {
+                 inst.op == ">=" || inst.op == "index" ||
+                 inst.op == "&" || inst.op == "|" || inst.op == "^" ||
+                 inst.op == "<<" || inst.op == ">>") {
         out << "    ldr x0, [sp], #16\n";
         out << "    ldr x1, [sp], #16\n";
         if (inst.op == "index") {
@@ -997,6 +1078,16 @@ namespace Backend {
           out << "    mul x0, x1, x0\n";
         else if (inst.op == "/")
           out << "    sdiv x0, x1, x0\n";
+        else if (inst.op == "&")
+          out << "    and x0, x1, x0\n";
+        else if (inst.op == "|")
+          out << "    orr x0, x1, x0\n";
+        else if (inst.op == "^")
+          out << "    eor x0, x1, x0\n";
+        else if (inst.op == "<<")
+          out << "    lsl x0, x1, x0\n";
+        else if (inst.op == ">>")
+          out << "    asr x0, x1, x0\n";
         else {
           out << "    cmp x1, x0\n";
           if (inst.op == "==")
@@ -1011,6 +1102,17 @@ namespace Backend {
             out << "    cset x0, le\n";
           else
             out << "    cset x0, ge\n";
+        }
+        out << "    str x0, [sp, #-16]!\n";
+      } else if (inst.op == "~" || inst.op == "!" || inst.op == "neg") {
+        out << "    ldr x0, [sp], #16\n";
+        if (inst.op == "~")
+          out << "    mvn x0, x0\n";
+        else if (inst.op == "neg")
+          out << "    neg x0, x0\n";
+        else {
+          out << "    cmp x0, #0\n";
+          out << "    cset x0, eq\n";
         }
         out << "    str x0, [sp, #-16]!\n";
       } else if (inst.op == "jz") {
@@ -1087,7 +1189,9 @@ namespace Backend {
       } else if (inst.op == "+" || inst.op == "-" || inst.op == "*" ||
                  inst.op == "/" || inst.op == "==" || inst.op == "!=" ||
                  inst.op == "<" || inst.op == ">" || inst.op == "<=" ||
-                 inst.op == ">=" || inst.op == "index") {
+                 inst.op == ">=" || inst.op == "index" ||
+                 inst.op == "&" || inst.op == "|" || inst.op == "^" ||
+                 inst.op == "<<" || inst.op == ">>") {
         out << "    popq %rcx\n";
         out << "    popq %rax\n";
         if (inst.op == "index") {
@@ -1101,6 +1205,17 @@ namespace Backend {
         else if (inst.op == "/") {
           out << "    cqto\n";
           out << "    idivq %rcx\n";
+        } else if (inst.op == "&")
+          out << "    andq %rcx, %rax\n";
+        else if (inst.op == "|")
+          out << "    orq %rcx, %rax\n";
+        else if (inst.op == "^")
+          out << "    xorq %rcx, %rax\n";
+        else if (inst.op == "<<" || inst.op == ">>") {
+          if (inst.op == "<<")
+            out << "    shlq %cl, %rax\n";
+          else
+            out << "    sarq %cl, %rax\n";
         } else {
           out << "    cmpq %rcx, %rax\n";
           if (inst.op == "==")
@@ -1115,6 +1230,18 @@ namespace Backend {
             out << "    setle %al\n";
           else
             out << "    setge %al\n";
+          out << "    movzbq %al, %rax\n";
+        }
+        out << "    pushq %rax\n";
+      } else if (inst.op == "~" || inst.op == "!" || inst.op == "neg") {
+        out << "    popq %rax\n";
+        if (inst.op == "~")
+          out << "    notq %rax\n";
+        else if (inst.op == "neg")
+          out << "    negq %rax\n";
+        else {
+          out << "    cmpq $0, %rax\n";
+          out << "    sete %al\n";
           out << "    movzbq %al, %rax\n";
         }
         out << "    pushq %rax\n";
@@ -1192,7 +1319,9 @@ namespace Backend {
       } else if (inst.op == "+" || inst.op == "-" || inst.op == "*" ||
                  inst.op == "/" || inst.op == "==" || inst.op == "!=" ||
                  inst.op == "<" || inst.op == ">" || inst.op == "<=" ||
-                 inst.op == ">=" || inst.op == "index") {
+                 inst.op == ">=" || inst.op == "index" ||
+                 inst.op == "&" || inst.op == "|" || inst.op == "^" ||
+                 inst.op == "<<" || inst.op == ">>") {
         out << "    popl %ecx\n";
         out << "    popl %eax\n";
         if (inst.op == "index") {
@@ -1206,6 +1335,17 @@ namespace Backend {
         else if (inst.op == "/") {
           out << "    cltd\n";
           out << "    idivl %ecx\n";
+        } else if (inst.op == "&")
+          out << "    andl %ecx, %eax\n";
+        else if (inst.op == "|")
+          out << "    orl %ecx, %eax\n";
+        else if (inst.op == "^")
+          out << "    xorl %ecx, %eax\n";
+        else if (inst.op == "<<" || inst.op == ">>") {
+          if (inst.op == "<<")
+            out << "    shll %cl, %eax\n";
+          else
+            out << "    sarl %cl, %eax\n";
         } else {
           out << "    cmpl %ecx, %eax\n";
           if (inst.op == "==")
@@ -1220,6 +1360,18 @@ namespace Backend {
             out << "    setle %al\n";
           else
             out << "    setge %al\n";
+          out << "    movzbl %al, %eax\n";
+        }
+        out << "    pushl %eax\n";
+      } else if (inst.op == "~" || inst.op == "!" || inst.op == "neg") {
+        out << "    popl %eax\n";
+        if (inst.op == "~")
+          out << "    notl %eax\n";
+        else if (inst.op == "neg")
+          out << "    negl %eax\n";
+        else {
+          out << "    cmpl $0, %eax\n";
+          out << "    sete %al\n";
           out << "    movzbl %al, %eax\n";
         }
         out << "    pushl %eax\n";
