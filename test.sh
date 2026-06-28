@@ -213,6 +213,30 @@ set -e
 test "$rc" = 42
 echo "ok m11_pointer_scale"
 
+./build/b1cc tests/m11_static.c -o "$tmp/m11_static"
+set +e
+"$tmp/m11_static"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m11_static"
+
+./build/b1cc tests/m11_multidim.c -o "$tmp/m11_multidim"
+set +e
+"$tmp/m11_multidim"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m11_multidim"
+
+./build/b1cc -I tests/include tests/m12_preprocessor.c -o "$tmp/m12_preprocessor"
+set +e
+"$tmp/m12_preprocessor"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m12_preprocessor"
+
 ./build/b1cc src/b1cc_token_lexer.c -o "$tmp/b1cc_token_lexer"
 "$tmp/b1cc_token_lexer" < tests/local.c > "$tmp/lexer_output.txt"
 grep -q "IDENT: int" "$tmp/lexer_output.txt"

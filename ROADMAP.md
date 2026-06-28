@@ -84,15 +84,15 @@
 ## M11: Global Variables & Memory Model
 
 - [x] Support global variable declarations with compile-time constant initializers.
-- [ ] Support static local and global variables.
-- [ ] Support multidimensional arrays (e.g., `arr[i][j]`).
-- [ ] Support scale-aware pointer arithmetic (e.g., `ptr + offset` scales by element size).
+- [x] Support static local and global variables.
+- [x] Support multidimensional arrays (e.g., `arr[i][j]`).
+- [x] Support scale-aware pointer arithmetic (e.g., `ptr + offset` scales by element size).
 
 ## M12: Full Preprocessor
 
-- [ ] Support conditional preprocessor directives (`#ifdef`, `#ifndef`, `#else`, `#endif`, `#if`).
-- [ ] Support function-like macros (`#define MACRO(a,b) ...`).
-- [ ] Support standard include directories search paths.
+- [x] Support conditional preprocessor directives (`#ifdef`, `#ifndef`, `#else`, `#endif`, `#if`).
+- [x] Support function-like macros (`#define MACRO(a,b) ...`).
+- [x] Support standard include directories search paths.
 
 ## M13: C++ Frontend
 
@@ -100,5 +100,26 @@
 - [ ] Add namespaces, references, classes, methods, constructors, and mangling.
 - [ ] Add overloads before templates.
 - [ ] Add templates, exceptions, and RTTI only when B1NIX needs them.
+
+## M14: TCC-Level C Frontend
+
+- [ ] Add `sizeof` and move declarator parsing toward real C declarators (`int *a[3]`, `int (*fp)(int)`).
+- [ ] Tighten integer typing: signed/unsigned behavior, integer promotions, cast width, and char/short widening.
+- [ ] Improve aggregate layout: alignment, padding, nested structs, arrays inside structs, `->`, and `union`.
+- [ ] Add function pointer declarators and calls without special parser shortcuts.
+
+## M15: TCC-Level Driver and ABI
+
+- [ ] Add ABI regression tests for stack-passed arguments, varargs calls, function pointers, and small integer returns.
+- [ ] Add driver modes expected from a tiny C compiler: `-E`, `-c`, multiple input files, and pass-through linker flags.
+- [ ] Make object output real enough for B1NIX: symbols, relocations, sections, and debug dumps.
+- [ ] Compile a small curated set of real B1NIX userspace files without TCC fallback.
+
+## M16: PCC-Style Compiler Shape
+
+- [ ] Split C frontend semantics more clearly from target lowering.
+- [ ] Add a backend contract for type legalization, calling convention lowering, instruction selection, and register allocation.
+- [ ] Add tiny local optimizations only after type semantics are stable.
+- [ ] Grow tests from real B1NIX userspace sources before chasing wider C compatibility.
 
 Skipped: full C/C++ upfront. Add features only when a test or B1NIX source needs them.
