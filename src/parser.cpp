@@ -1431,8 +1431,7 @@ namespace Parser {
     }
     if (std::isdigit(static_cast<unsigned char>(peek()[0]))) {
       auto node = create_node("num", line, col);
-      for (char c : take())
-        node->value = node->value * 10 + (c - '0');
+      node->value = std::strtoul(take().c_str(), nullptr, 0);
       return node;
     }
     if (peek()[0] == '\'') {

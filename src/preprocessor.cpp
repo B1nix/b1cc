@@ -278,6 +278,24 @@ namespace Preprocessor {
           bool parent_active = is_active();
           cond_stack.push_back({cond, cond && parent_active});
           out += "\n";
+        } else if (directive == "elif") {
+          if (cond_stack.empty()) {
+            Diagnostics::fatal("unmatched #elif");
+          }
+          bool parent_active = true;
+          for (size_t idx = 0; idx + 1 < cond_stack.size(); ++idx) {
+            if (!cond_stack[idx].active) parent_active = false;
+          }
+          if (cond_stack.back().condition_met) {
+            cond_stack.back().active = false;
+          } else {
+            bool cond = eval_preproc_expr(line.substr(p), macros) != 0;
+            cond_stack.back().active = cond && parent_active;
+            if (cond) {
+              cond_stack.back().condition_met = true;
+            }
+          }
+          out += "\n";
         } else if (directive == "else") {
           if (cond_stack.empty()) {
             Diagnostics::fatal("unmatched #else");

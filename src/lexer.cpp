@@ -30,8 +30,22 @@ namespace Lexer {
       if (std::isspace(c)) {
         consume(1);
       } else if (src[i] == '#') {
-        while (i < src.size() && src[i] != '\n') {
-          consume(1);
+        size_t check_i = i + 1;
+        while (check_i < src.size() && (src[check_i] == ' ' || src[check_i] == '\t')) {
+          check_i++;
+        }
+        if (check_i < src.size() && std::isdigit(static_cast<unsigned char>(src[check_i]))) {
+          while (i < src.size() && src[i] != '\n') {
+            consume(1);
+          }
+        } else {
+          if (i + 1 < src.size() && src[i + 1] == '#') {
+            consume(2);
+            out.push_back({"##", tok_line, tok_col});
+          } else {
+            consume(1);
+            out.push_back({"#", tok_line, tok_col});
+          }
         }
       } else if (i + 1 < src.size() && src.substr(i, 2) == "//") {
         consume(2);
@@ -80,7 +94,24 @@ namespace Lexer {
           next_active.insert(ident);
           const auto &m = macros.at(ident);
           if (!m.is_function_like) {
-            auto macro_tokens = lex(m.body, macros, next_active);
+            auto body_tokens = lex(m.body, {}, {});
+            std::vector<Token> pasted;
+            for (size_t k = 0; k < body_tokens.size(); ++k) {
+              if (body_tokens[k].text == "EOF") continue;
+              if (body_tokens[k].text == "##") {
+                if (!pasted.empty() && k + 1 < body_tokens.size() && body_tokens[k + 1].text != "EOF") {
+                  pasted.back().text += body_tokens[k + 1].text;
+                  k++;
+                }
+              } else {
+                pasted.push_back(body_tokens[k]);
+              }
+            }
+            std::string concatenated;
+            for (const auto &tok : pasted) {
+              concatenated += tok.text + " ";
+            }
+            auto macro_tokens = lex(concatenated, macros, next_active);
             for (auto &tok : macro_tokens) {
               if (tok.text != "EOF") {
                 tok.line = tok_line;
@@ -130,30 +161,112 @@ namespace Lexer {
                 while (e_idx > s_idx && std::isspace(static_cast<unsigned char>(arg[e_idx - 1]))) e_idx--;
                 arg = arg.substr(s_idx, e_idx - s_idx);
               }
-              
-              std::string result_body;
-              size_t b_idx = 0;
-              while (b_idx < m.body.size()) {
-                if (std::isalpha(static_cast<unsigned char>(m.body[b_idx])) || m.body[b_idx] == '_') {
-                  size_t s_start = b_idx;
-                  while (b_idx < m.body.size() && (std::isalnum(static_cast<unsigned char>(m.body[b_idx])) || m.body[b_idx] == '_')) b_idx++;
-                  std::string token = m.body.substr(s_start, b_idx - s_start);
-                  auto it = std::find(m.params.begin(), m.params.end(), token);
-                  if (it != m.params.end()) {
-                    size_t p_idx = std::distance(m.params.begin(), it);
-                    if (p_idx < args.size()) {
-                      result_body += args[p_idx];
+
+              auto body_tokens = lex(m.body, {}, {});
+              std::vector<Token> expanded;
+              for (size_t k = 0; k < body_tokens.size(); ++k) {
+                if (body_tokens[k].text == "EOF") continue;
+
+                // Stringification (#)
+                if (body_tokens[k].text == "#") {
+                  if (k + 1 < body_tokens.size() && body_tokens[k + 1].text != "EOF") {
+                    std::string param_name = body_tokens[k + 1].text;
+                    if (param_name == "__VA_ARGS__") {
+                      auto it_var = std::find(m.params.begin(), m.params.end(), "...");
+                      if (it_var != m.params.end()) {
+                        size_t p_idx = std::distance(m.params.begin(), it_var);
+                        std::string va_args_str;
+                        for (size_t arg_i = p_idx; arg_i < args.size(); ++arg_i) {
+                          if (arg_i > p_idx) va_args_str += ", ";
+                          va_args_str += args[arg_i];
+                        }
+                        std::string stringified = "\"";
+                        for (char ch : va_args_str) {
+                          if (ch == '"' || ch == '\\') stringified += '\\';
+                          stringified += ch;
+                        }
+                        stringified += "\"";
+                        Token tok = body_tokens[k];
+                        tok.text = stringified;
+                        expanded.push_back(tok);
+                        k++;
+                        continue;
+                      }
+                    } else {
+                      auto it = std::find(m.params.begin(), m.params.end(), param_name);
+                      if (it != m.params.end()) {
+                        size_t p_idx = std::distance(m.params.begin(), it);
+                        std::string arg_val = (p_idx < args.size()) ? args[p_idx] : "";
+                        std::string stringified = "\"";
+                        for (char ch : arg_val) {
+                          if (ch == '"' || ch == '\\') stringified += '\\';
+                          stringified += ch;
+                        }
+                        stringified += "\"";
+                        Token tok = body_tokens[k];
+                        tok.text = stringified;
+                        expanded.push_back(tok);
+                        k++;
+                        continue;
+                      }
                     }
-                  } else {
-                    result_body += token;
+                  }
+                }
+
+                // __VA_ARGS__ substitution
+                if (body_tokens[k].text == "__VA_ARGS__") {
+                  auto it_var = std::find(m.params.begin(), m.params.end(), "...");
+                  if (it_var != m.params.end()) {
+                    size_t p_idx = std::distance(m.params.begin(), it_var);
+                    std::string va_args_str;
+                    for (size_t arg_i = p_idx; arg_i < args.size(); ++arg_i) {
+                      if (arg_i > p_idx) va_args_str += ", ";
+                      va_args_str += args[arg_i];
+                    }
+                    auto arg_tokens = lex(va_args_str, macros, active_macros);
+                    for (auto &tok : arg_tokens) {
+                      if (tok.text != "EOF") {
+                        expanded.push_back(tok);
+                      }
+                    }
+                    continue;
+                  }
+                }
+
+                // Parameter substitution
+                auto it = std::find(m.params.begin(), m.params.end(), body_tokens[k].text);
+                if (it != m.params.end()) {
+                  size_t p_idx = std::distance(m.params.begin(), it);
+                  std::string arg_val = (p_idx < args.size()) ? args[p_idx] : "";
+                  auto arg_tokens = lex(arg_val, macros, active_macros);
+                  for (auto &tok : arg_tokens) {
+                    if (tok.text != "EOF") {
+                      expanded.push_back(tok);
+                    }
+                  }
+                  continue;
+                }
+
+                expanded.push_back(body_tokens[k]);
+              }
+
+              std::vector<Token> pasted;
+              for (size_t k = 0; k < expanded.size(); ++k) {
+                if (expanded[k].text == "##") {
+                  if (!pasted.empty() && k + 1 < expanded.size()) {
+                    pasted.back().text += expanded[k + 1].text;
+                    k++;
                   }
                 } else {
-                  result_body += m.body[b_idx];
-                  b_idx++;
+                  pasted.push_back(expanded[k]);
                 }
               }
-              
-              auto macro_tokens = lex(result_body, macros, next_active);
+
+              std::string concatenated;
+              for (const auto &tok : pasted) {
+                concatenated += tok.text + " ";
+              }
+              auto macro_tokens = lex(concatenated, macros, next_active);
               for (auto &tok : macro_tokens) {
                 if (tok.text != "EOF") {
                   tok.line = tok_line;

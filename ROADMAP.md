@@ -124,9 +124,9 @@
 
 ## M17: Full C99 Preprocessor
 
-- [ ] Add macro definitions with arguments (e.g., `#define MAX(a, b) ...`).
-- [ ] Add macro operators `#` (stringification) and `##` (token pasting).
-- [ ] Add full constant expression evaluation for conditional directives (`#if`, `#elif` with `defined`).
+- [x] Add macro definitions with arguments (e.g., `#define MAX(a, b) ...`).
+- [x] Add macro operators `#` (stringification) and `##` (token pasting).
+- [x] Add full constant expression evaluation for conditional directives (`#if`, `#elif` with `defined`).
 
 ## M18: Conforming Aggregates & ABI
 

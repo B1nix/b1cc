@@ -285,6 +285,15 @@ set -e
 test "$rc" = 0
 echo "ok m15_abi_returns"
 
+./build/b1cc tests/m17_preprocessor_full.c -o "$tmp/m17_preprocessor_full"
+set +e
+"$tmp/m17_preprocessor_full"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok m17_preprocessor_full"
+
+
 ./build/b1cc src/b1cc_token_lexer.c -o "$tmp/b1cc_token_lexer"
 "$tmp/b1cc_token_lexer" < tests/local.c > "$tmp/lexer_output.txt"
 grep -q "IDENT: int" "$tmp/lexer_output.txt"
