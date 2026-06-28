@@ -277,7 +277,24 @@ namespace Parser {
         stars++;
       }
       skip_attribute();
-      std::string name = take();
+      std::string name;
+      bool is_func_ptr = false;
+      if (peek() == "(") {
+        take("(");
+        while (peek() == "*") { take("*"); }
+        name = take();
+        take(")");
+        take("(");
+        int depth = 1;
+        while (depth > 0 && pos_ < tokens_.size()) {
+          if (peek() == "(") depth++;
+          else if (peek() == ")") depth--;
+          take();
+        }
+        is_func_ptr = true;
+      } else {
+        name = take();
+      }
       skip_attribute();
       if (peek() == "__asm__" || peek() == "__asm" || peek() == "asm") {
         take();
@@ -285,11 +302,11 @@ namespace Parser {
         take();
         take(")");
       }
-      bool is_pointer = (stars > 0);
+      bool is_pointer = (stars > 0 || is_func_ptr);
       int elem_scale = 1;
-      if (stars == 1) {
+      if (stars == 1 && !is_func_ptr) {
         elem_scale = base_size;
-      } else if (stars > 1) {
+      } else if (stars > 1 || is_func_ptr) {
         elem_scale = target_scale_;
       }
 
@@ -431,9 +448,18 @@ namespace Parser {
   std::unique_ptr<Node> Parser::function(bool is_static) {
     int line = tokens_[pos_].line;
     int col = tokens_[pos_].col;
-    type();
+    int ret_base = parse_base_type();
+    int ret_stars = 0;
+    while (peek() == "*") {
+      take("*");
+      ret_stars++;
+    }
+    skip_attribute();
+    int ret_size = (ret_stars > 0) ? target_scale_ : ret_base;
+
     auto node = create_node("func", line, col);
     node->name = take();
+    node->value = ret_size;
     node->is_static = is_static;
     
     current_func_name_ = node->name;
@@ -678,7 +704,24 @@ namespace Parser {
         stars++;
       }
       skip_attribute();
-      std::string name = take();
+      std::string name;
+      bool is_func_ptr = false;
+      if (peek() == "(") {
+        take("(");
+        while (peek() == "*") { take("*"); }
+        name = take();
+        take(")");
+        take("(");
+        int depth = 1;
+        while (depth > 0 && pos_ < tokens_.size()) {
+          if (peek() == "(") depth++;
+          else if (peek() == ")") depth--;
+          take();
+        }
+        is_func_ptr = true;
+      } else {
+        name = take();
+      }
       skip_attribute();
       if (peek() == "__asm__" || peek() == "__asm" || peek() == "asm") {
         take();
@@ -686,11 +729,11 @@ namespace Parser {
         take();
         take(")");
       }
-      bool is_pointer = (stars > 0);
+      bool is_pointer = (stars > 0 || is_func_ptr);
       int elem_scale = 1;
-      if (stars == 1) {
+      if (stars == 1 && !is_func_ptr) {
         elem_scale = base_size;
-      } else if (stars > 1) {
+      } else if (stars > 1 || is_func_ptr) {
         elem_scale = target_scale_;
       }
 
@@ -801,7 +844,24 @@ namespace Parser {
               next_stars++;
             }
             skip_attribute();
-            std::string next_name = take();
+            std::string next_name;
+            bool next_is_func_ptr = false;
+            if (peek() == "(") {
+              take("(");
+              while (peek() == "*") { take("*"); }
+              next_name = take();
+              take(")");
+              take("(");
+              int depth = 1;
+              while (depth > 0 && pos_ < tokens_.size()) {
+                if (peek() == "(") depth++;
+                else if (peek() == ")") depth--;
+                take();
+              }
+              next_is_func_ptr = true;
+            } else {
+              next_name = take();
+            }
             skip_attribute();
             std::string next_unique_name = next_name + "$" + std::to_string(local_var_counter_++);
             if (scopes_.back().count(next_name)) {
@@ -810,8 +870,8 @@ namespace Parser {
             scopes_.back()[next_name] = next_unique_name;
             auto next = create_node("decl", line, col);
             next->name = next_unique_name;
-            bool next_is_pointer = (next_stars > 0);
-            int next_elem_scale = next_stars == 1 ? base_size : (next_stars > 1 ? target_scale_ : 1);
+            bool next_is_pointer = (next_stars > 0 || next_is_func_ptr);
+            int next_elem_scale = next_is_func_ptr ? target_scale_ : (next_stars == 1 ? base_size : (next_stars > 1 ? target_scale_ : 1));
             std::string next_local_key = current_func_name_ + "$" + next_unique_name;
             IR::local_var_is_pointer[next_local_key] = next_is_pointer;
             IR::local_var_elem_scales[next_local_key] = next_elem_scale;
@@ -1203,7 +1263,7 @@ namespace Parser {
 
   std::unique_ptr<Node> Parser::factor() {
     auto node = unary();
-    while (peek() == "[" || peek() == "." || peek() == "->" || peek() == "++" || peek() == "--") {
+    while (peek() == "[" || peek() == "." || peek() == "->" || peek() == "++" || peek() == "--" || peek() == "(") {
       int line = tokens_[pos_].line;
       int col = tokens_[pos_].col;
       std::string op = take();
@@ -1213,6 +1273,27 @@ namespace Parser {
         auto parent = create_node("postfix_" + op, line, col);
         parent->name = node->name;
         node = std::move(parent);
+      } else if (op == "(") {
+        auto call_node = create_node("call", line, col);
+        // Strip leading unary_* from the callee (in C, dereferencing function pointers is a no-op)
+        while (node->op == "unary_*") {
+          node = std::move(node->lhs);
+        }
+        if (node->op == "var") {
+          call_node->name = node->name;
+        } else {
+          call_node->lhs = std::move(node);
+        }
+        if (peek() != ")") {
+          while (true) {
+            call_node->body.push_back(expr());
+            if (peek() != ",")
+              break;
+            take(",");
+          }
+        }
+        take(")");
+        node = std::move(call_node);
       } else if (op == "[") {
         auto parent = create_node("index", line, col);
         parent->lhs = std::move(node);
@@ -1383,21 +1464,6 @@ namespace Parser {
     }
     if (std::isalpha(static_cast<unsigned char>(peek()[0])) || peek()[0] == '_') {
       std::string ident = take();
-      if (peek() == "(") {
-        auto node = create_node("call", line, col);
-        node->name = resolve_name(ident);
-        take("(");
-        if (peek() != ")") {
-          while (true) {
-            node->body.push_back(expr());
-            if (peek() != ",")
-              break;
-            take(",");
-          }
-        }
-        take(")");
-        return node;
-      }
       if (current_static_locals_.count(ident)) {
         ident = current_static_locals_[ident];
       } else {

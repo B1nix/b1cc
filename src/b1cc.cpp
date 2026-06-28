@@ -45,8 +45,13 @@ namespace Driver {
 
   static int run(int argc, char **argv) {
     bool emit_asm = false;
-    std::string input;
-    std::string output = "a.out";
+    bool compile_only = false;
+    bool preprocess_only = false;
+    bool dump_ast = false;
+    bool dump_ir = false;
+    std::vector<std::string> inputs;
+    std::vector<std::string> link_flags;
+    std::string output = "";
     std::string target = "arm64-darwin";
 
     Preprocessor::driver_include_dirs.clear();
@@ -60,6 +65,14 @@ namespace Driver {
       std::string arg = argv[i];
       if (arg == "-S") {
         emit_asm = true;
+      } else if (arg == "-c") {
+        compile_only = true;
+      } else if (arg == "-E") {
+        preprocess_only = true;
+      } else if (arg == "-fdump-ast") {
+        dump_ast = true;
+      } else if (arg == "-fdump-ir") {
+        dump_ir = true;
       } else if (arg.rfind("--target=", 0) == 0) {
         target = arg.substr(9);
       } else if (arg == "-o") {
@@ -97,16 +110,14 @@ namespace Driver {
         m.body = val;
         Preprocessor::driver_macros[name] = m;
       } else if (arg[0] == '-' && arg != "-") {
-        Diagnostics::fatal("unknown option " + arg);
-      } else if (input.empty()) {
-        input = arg;
+        link_flags.push_back(arg);
       } else {
-        Diagnostics::fatal("multiple input files are not supported");
+        inputs.push_back(arg);
       }
     }
 
-    if (input.empty())
-      Diagnostics::fatal("usage: b1cc [-S] input.c [-o output]");
+    if (inputs.empty())
+      Diagnostics::fatal("usage: b1cc [-S] [-c] [-E] [-fdump-ast] [-fdump-ir] input.c ... [-o output]");
 
     if (target == "arm64-darwin") {
       Preprocessor::driver_macros["stdin"] = {false, {}, "__stdinp"};
@@ -114,37 +125,150 @@ namespace Driver {
       Preprocessor::driver_macros["stderr"] = {false, {}, "__stderrp"};
     }
 
-    Diagnostics::filepath = input;
-
-    const std::string asm_text = Backend::compile_asm(read_file(input), target);
-    if (emit_asm) {
-      write_file(output, asm_text);
-      return 0;
-    }
-
-    char tmp[] = "/tmp/b1cc-XXXXXX.s";
-    int fd = mkstemps(tmp, 2);
-    if (fd < 0)
-      Diagnostics::fatal("cannot create temporary assembly file");
-    close(fd);
-    write_file(tmp, asm_text);
-
     std::string cc = "cc";
     std::string prefix;
     if (target == "x86_64-b1nix" || target == "i386-b1nix" || target == "x86-b1nix") {
       const char *env_cc = std::getenv("B1NIX_CC");
       cc = env_cc ? env_cc : "../b1nix/tools/toolchain/bin/b1nix-cc";
-      if (!exists(cc))
+      if (!preprocess_only && !emit_asm && !exists(cc))
         Diagnostics::fatal("set B1NIX_CC or run from next to ../b1nix");
       prefix = "B1NIX_ARCH=" + (target == "x86_64-b1nix" ? std::string("x86_64") : std::string("x86")) + " ";
     } else if (target != "arm64-darwin") {
-      Diagnostics::fatal("linking is not supported for target " + target);
+      Diagnostics::fatal("linking/assembling is not supported for target " + target);
     }
 
-    const std::string cmd =
-        prefix + shell_quote(cc) + " " + shell_quote(tmp) + " -o " + shell_quote(output);
-    int rc = std::system(cmd.c_str());
-    unlink(tmp);
+    if (preprocess_only) {
+      std::ostringstream prep_out;
+      for (const auto &inp : inputs) {
+        std::map<std::string, Preprocessor::Macro> macros = Preprocessor::driver_macros;
+        std::set<std::string> included_files;
+        included_files.insert(inp);
+        std::string prep = Preprocessor::preprocess(read_file(inp), inp, Preprocessor::driver_include_dirs, macros, included_files);
+        prep_out << prep << "\n";
+      }
+      if (output.empty()) {
+        std::cout << prep_out.str();
+      } else {
+        write_file(output, prep_out.str());
+      }
+      return 0;
+    }
+
+    if (emit_asm) {
+      for (const auto &inp : inputs) {
+        Diagnostics::filepath = inp;
+        std::string asm_text = Backend::compile_asm(read_file(inp), target, dump_ast, dump_ir);
+        std::string dest = output;
+        if (dest.empty() || inputs.size() > 1) {
+          size_t dot = inp.find_last_of('.');
+          dest = (dot != std::string::npos ? inp.substr(0, dot) : inp) + ".s";
+        }
+        write_file(dest, asm_text);
+      }
+      return 0;
+    }
+
+    if (compile_only) {
+      for (const auto &inp : inputs) {
+        if (inp.rfind(".o") == inp.size() - 2 || inp.rfind(".a") == inp.size() - 2) {
+          continue;
+        }
+        Diagnostics::filepath = inp;
+        std::string asm_text = Backend::compile_asm(read_file(inp), target, dump_ast, dump_ir);
+        
+        char tmp_asm[] = "/tmp/b1cc-XXXXXX.s";
+        int fd = mkstemps(tmp_asm, 2);
+        if (fd < 0) Diagnostics::fatal("cannot create temporary file");
+        close(fd);
+        write_file(tmp_asm, asm_text);
+
+        std::string dest_obj = output;
+        if (dest_obj.empty() || inputs.size() > 1) {
+          size_t dot = inp.find_last_of('.');
+          dest_obj = (dot != std::string::npos ? inp.substr(0, dot) : inp) + ".o";
+        }
+
+        std::string cmd = prefix + shell_quote(cc) + " -c " + shell_quote(tmp_asm) + " -o " + shell_quote(dest_obj);
+        int rc = std::system(cmd.c_str());
+        unlink(tmp_asm);
+        if (rc != 0) return 1;
+      }
+      return 0;
+    }
+
+    if (inputs.size() == 1 && !compile_only && !emit_asm && !preprocess_only) {
+      std::string inp = inputs[0];
+      if (inp.rfind(".o") == inp.size() - 2 || inp.rfind(".a") == inp.size() - 2) {
+        std::string out_name = output.empty() ? "a.out" : output;
+        std::string cmd = prefix + shell_quote(cc) + " " + shell_quote(inp);
+        for (const auto &flag : link_flags) cmd += " " + shell_quote(flag);
+        cmd += " -o " + shell_quote(out_name);
+        return std::system(cmd.c_str()) == 0 ? 0 : 1;
+      }
+      Diagnostics::filepath = inp;
+      std::string asm_text = Backend::compile_asm(read_file(inp), target, dump_ast, dump_ir);
+      
+      char tmp_asm[] = "/tmp/b1cc-XXXXXX.s";
+      int fd = mkstemps(tmp_asm, 2);
+      if (fd < 0) Diagnostics::fatal("cannot create temporary file");
+      close(fd);
+      write_file(tmp_asm, asm_text);
+
+      std::string out_name = output.empty() ? "a.out" : output;
+      std::string cmd = prefix + shell_quote(cc) + " " + shell_quote(tmp_asm);
+      for (const auto &flag : link_flags) cmd += " " + shell_quote(flag);
+      cmd += " -o " + shell_quote(out_name);
+      int rc = std::system(cmd.c_str());
+      unlink(tmp_asm);
+      return rc == 0 ? 0 : 1;
+    }
+
+    std::vector<std::string> temp_objects;
+    std::vector<std::string> link_cmd_args;
+    for (const auto &inp : inputs) {
+      if (inp.rfind(".o") == inp.size() - 2 || inp.rfind(".a") == inp.size() - 2) {
+        link_cmd_args.push_back(inp);
+        continue;
+      }
+      Diagnostics::filepath = inp;
+      std::string asm_text = Backend::compile_asm(read_file(inp), target, dump_ast, dump_ir);
+      
+      char tmp_asm[] = "/tmp/b1cc-XXXXXX.s";
+      int fd_asm = mkstemps(tmp_asm, 2);
+      if (fd_asm < 0) Diagnostics::fatal("cannot create temporary file");
+      close(fd_asm);
+      write_file(tmp_asm, asm_text);
+
+      char tmp_obj[] = "/tmp/b1cc-XXXXXX.o";
+      int fd_obj = mkstemps(tmp_obj, 2);
+      if (fd_obj < 0) Diagnostics::fatal("cannot create temporary file");
+      close(fd_obj);
+      temp_objects.push_back(tmp_obj);
+      link_cmd_args.push_back(tmp_obj);
+
+      std::string cmd = prefix + shell_quote(cc) + " -c " + shell_quote(tmp_asm) + " -o " + shell_quote(tmp_obj);
+      int rc = std::system(cmd.c_str());
+      unlink(tmp_asm);
+      if (rc != 0) {
+        for (const auto &to : temp_objects) unlink(to.c_str());
+        return 1;
+      }
+    }
+
+    std::string out_name = output.empty() ? "a.out" : output;
+    std::string link_cmd = prefix + shell_quote(cc);
+    for (const auto &obj : link_cmd_args) {
+      link_cmd += " " + shell_quote(obj);
+    }
+    for (const auto &flag : link_flags) {
+      link_cmd += " " + shell_quote(flag);
+    }
+    link_cmd += " -o " + shell_quote(out_name);
+
+    int rc = std::system(link_cmd.c_str());
+    for (const auto &to : temp_objects) {
+      unlink(to.c_str());
+    }
     return rc == 0 ? 0 : 1;
   }
 }

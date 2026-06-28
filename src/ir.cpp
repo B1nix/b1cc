@@ -18,6 +18,8 @@ namespace IR {
   thread_local int current_target_scale = 8;
 
   static thread_local std::vector<LoopContext> loop_contexts;
+  static thread_local int current_func_ret_size = 0;
+
 
   static void lower_addr(const AST::Node &node, IrFunction &fn, int target_scale);
 
@@ -191,7 +193,7 @@ namespace IR {
       } else if (global_arrays.count(node.name)) {
         fn.code.push_back({"gaddr", node.name, 0});
       } else {
-        Diagnostics::error(node.line, node.col, "unknown variable " + node.name);
+        fn.code.push_back({"gaddr", node.name, 0});
       }
       return;
     }
@@ -202,11 +204,13 @@ namespace IR {
       return;
     }
     if (node.op == "call") {
-      if (node.body.size() > 8)
-        Diagnostics::error(node.line, node.col, "calls with more than 8 arguments are not supported");
-      bool indirect = fn.locals.count(node.name);
-      if (indirect)
+      bool indirect = !node.name.empty() && fn.locals.count(node.name);
+      if (node.lhs) {
+        lower_expr(*node.lhs, fn);
+        indirect = true;
+      } else if (indirect) {
         fn.code.push_back({"load", "", fn.locals[node.name]});
+      }
       for (const auto &arg : node.body)
         lower_expr(*arg, fn);
       fn.has_call = true;
@@ -424,7 +428,7 @@ namespace IR {
       } else if (global_vars.count(node.name) || global_arrays.count(node.name)) {
         fn.code.push_back({"gaddr", node.name, 0});
       } else {
-        Diagnostics::error(node.line, node.col, "unknown variable " + node.name);
+        fn.code.push_back({"gaddr", node.name, 0});
       }
     } else {
       Diagnostics::error(node.line, node.col, "lvalue required");
@@ -453,6 +457,9 @@ namespace IR {
       }
     } else if (stmt.op == "return") {
       lower_expr(*stmt.lhs, fn);
+      if (current_func_ret_size > 0 && current_func_ret_size < 8) {
+        fn.code.push_back({"cast", "", current_func_ret_size});
+      }
       fn.code.push_back({"ret", "", 0});
     } else if (stmt.op == "expr") {
       lower_expr(*stmt.lhs, fn);
@@ -584,6 +591,7 @@ namespace IR {
   }
 
   static IrFunction lower_func(const Node &ast, int target_scale) {
+    current_func_ret_size = (int)ast.value;
     IrFunction fn;
     fn.name = ast.name;
     fn.params = ast.params;

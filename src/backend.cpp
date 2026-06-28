@@ -30,10 +30,16 @@ namespace Backend {
         out << ".p2align " << align << "\n";
         out << "_" << g.name << ":\n";
       } else if (target == "x86_64-b1nix") {
+        out << ".type " << g.name << ", @object\n";
+        long total_bytes = g.is_array ? (g.size * g.elem_size) : g.elem_size;
+        out << ".size " << g.name << ", " << total_bytes << "\n";
         out << ".p2align " << align << "\n";
         out << g.name << ":\n";
       } else {
         int i386_align = (g.elem_size >= 4) ? 2 : (g.elem_size == 2) ? 1 : 0;
+        out << ".type " << g.name << ", @object\n";
+        long total_bytes = g.is_array ? (g.size * g.elem_size) : g.elem_size;
+        out << ".size " << g.name << ", " << total_bytes << "\n";
         out << ".p2align " << i386_align << "\n";
         out << g.name << ":\n";
       }
@@ -86,12 +92,30 @@ namespace Backend {
       out << "    mov x29, sp\n";
       if (!fn.locals.empty())
         out << "    sub sp, sp, #" << (fn.locals.size() * 16) << "\n";
-      for (size_t i = 0; i < fn.params.size(); ++i)
-        out << "    str x" << i << ", [x29, #-" << ((i + 1) * 16) << "]\n";
+      for (size_t i = 0; i < fn.params.size(); ++i) {
+        if (i < 8) {
+          out << "    str x" << i << ", [x29, #-" << ((i + 1) * 16) << "]\n";
+        } else {
+          // stack argument at [x29, #16 + (i - 8) * 8]
+          out << "    ldr x8, [x29, #" << (16 + (i - 8) * 8) << "]\n";
+          out << "    str x8, [x29, #-" << ((i + 1) * 16) << "]\n";
+        }
+      }
     }
     for (const IrInst &inst : fn.code) {
       if (inst.op == "const") {
-        out << "    mov x0, #" << inst.value << "\n";
+        if (inst.value >= 0 && inst.value <= 65535) {
+          out << "    mov x0, #" << inst.value << "\n";
+        } else {
+          unsigned long long val = inst.value;
+          out << "    movz x0, #" << (val & 0xffff) << "\n";
+          if (val & 0xffff0000ULL)
+            out << "    movk x0, #" << ((val >> 16) & 0xffff) << ", lsl #16\n";
+          if (val & 0xffff00000000ULL)
+            out << "    movk x0, #" << ((val >> 32) & 0xffff) << ", lsl #32\n";
+          if (val & 0xffff000000000000ULL)
+            out << "    movk x0, #" << ((val >> 48) & 0xffff) << ", lsl #48\n";
+        }
         out << "    str x0, [sp, #-16]!\n";
       } else if (inst.op == "load") {
         out << "    ldr x0, [x29, #-" << ((inst.value + 1) * 16) << "]\n";
@@ -189,16 +213,42 @@ namespace Backend {
         out << "    b " << inst.arg << "\n";
       } else if (inst.op == "label") {
         out << inst.arg << ":\n";
-      } else if (inst.op == "call") {
-        for (long i = inst.value - 1; i >= 0; --i)
-          out << "    ldr x" << i << ", [sp], #16\n";
-        out << "    bl _" << inst.arg << "\n";
-        out << "    str x0, [sp, #-16]!\n";
-      } else if (inst.op == "icall") {
-        for (long i = inst.value - 1; i >= 0; --i)
-          out << "    ldr x" << i << ", [sp], #16\n";
-        out << "    ldr x16, [sp], #16\n";
-        out << "    blr x16\n";
+      } else if (inst.op == "call" || inst.op == "icall") {
+        long num_args = inst.value;
+        if (num_args <= 8) {
+          for (long i = num_args - 1; i >= 0; --i)
+            out << "    ldr x" << i << ", [sp], #16\n";
+          if (inst.op == "icall") {
+            out << "    ldr x16, [sp], #16\n";
+            out << "    blr x16\n";
+          } else {
+            out << "    bl _" << inst.arg << "\n";
+          }
+        } else {
+          long num_stack_args = num_args - 8;
+          for (long i = num_args - 1; i >= 8; --i) {
+            int reg_idx = 8 + (int)(i - 8);
+            out << "    ldr x" << reg_idx << ", [sp], #16\n";
+          }
+          for (long i = 7; i >= 0; --i) {
+            out << "    ldr x" << i << ", [sp], #16\n";
+          }
+          if (inst.op == "icall") {
+            out << "    ldr x16, [sp], #16\n";
+          }
+          long stack_bytes = ((num_stack_args + 1) / 2) * 16;
+          out << "    sub sp, sp, #" << stack_bytes << "\n";
+          for (long i = 8; i < num_args; ++i) {
+            int reg_idx = 8 + (int)(i - 8);
+            out << "    str x" << reg_idx << ", [sp, #" << ((i - 8) * 8) << "]\n";
+          }
+          if (inst.op == "icall") {
+            out << "    blr x16\n";
+          } else {
+            out << "    bl _" << inst.arg << "\n";
+          }
+          out << "    add sp, sp, #" << stack_bytes << "\n";
+        }
         out << "    str x0, [sp, #-16]!\n";
       } else if (inst.op == "addr") {
         out << "    sub x0, x29, #" << ((inst.value + 1) * 16) << "\n";
@@ -311,6 +361,7 @@ namespace Backend {
     if (!fn.is_static) {
       out << ".globl " << fn.name << "\n";
     }
+    out << ".type " << fn.name << ", @function\n";
     out << fn.name << ":\n";
     const bool frame = fn.has_call || !fn.locals.empty();
     if (frame) {
@@ -319,9 +370,15 @@ namespace Backend {
       if (!fn.locals.empty())
         out << "    subq $" << (fn.locals.size() * 16) << ", %rsp\n";
       static const char *arg_regs[] = {"%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"};
-      for (size_t i = 0; i < fn.params.size(); ++i)
-        out << "    movq " << arg_regs[i] << ", -" << ((i + 1) * 16)
-            << "(%rbp)\n";
+      for (size_t i = 0; i < fn.params.size(); ++i) {
+        if (i < 6) {
+          out << "    movq " << arg_regs[i] << ", -" << ((i + 1) * 16) << "(%rbp)\n";
+        } else {
+          // stack argument at [16 + (i - 6) * 8](%rbp)
+          out << "    movq " << (16 + (i - 6) * 8) << "(%rbp), %rax\n";
+          out << "    movq %rax, -" << ((i + 1) * 16) << "(%rbp)\n";
+        }
+      }
     }
     for (const IrInst &inst : fn.code) {
       if (inst.op == "const") {
@@ -425,20 +482,47 @@ namespace Backend {
         out << "    jmp " << inst.arg << "\n";
       } else if (inst.op == "label") {
         out << inst.arg << ":\n";
-      } else if (inst.op == "call") {
-        if (inst.value > 6)
-          Diagnostics::fatal("x86_64 calls with more than 6 arguments are not supported");
-        for (long i = inst.value - 1; i >= 0; --i)
-          out << "    popq " << regs[i] << "\n";
-        out << "    call " << inst.arg << "\n";
-        out << "    pushq %rax\n";
-      } else if (inst.op == "icall") {
-        if (inst.value > 6)
-          Diagnostics::fatal("x86_64 calls with more than 6 arguments are not supported");
-        for (long i = inst.value - 1; i >= 0; --i)
-          out << "    popq " << regs[i] << "\n";
-        out << "    popq %rax\n";
-        out << "    call *%rax\n";
+      } else if (inst.op == "call" || inst.op == "icall") {
+        long num_args = inst.value;
+        if (num_args <= 6) {
+          for (long i = num_args - 1; i >= 0; --i)
+            out << "    popq " << regs[i] << "\n";
+          if (inst.op == "icall") {
+            out << "    popq %rax\n";
+            out << "    movq %rax, %r11\n";
+            out << "    xorl %eax, %eax\n";
+            out << "    call *%r11\n";
+          } else {
+            out << "    xorl %eax, %eax\n";
+            out << "    call " << inst.arg << "\n";
+          }
+        } else {
+          long num_stack_args = num_args - 6;
+          static const char *temp_regs[] = {"%r10", "%r11", "%r12", "%r13", "%r14", "%r15"};
+          for (long i = num_args - 1; i >= 6; --i) {
+            int t_idx = (int)(i - 6);
+            out << "    popq " << temp_regs[t_idx % 6] << "\n";
+          }
+          for (long i = 5; i >= 0; --i) {
+            out << "    popq " << regs[i] << "\n";
+          }
+          if (inst.op == "icall") {
+            out << "    popq %rax\n";
+          }
+          for (long i = num_args - 1; i >= 6; --i) {
+            int t_idx = (int)(i - 6);
+            out << "    pushq " << temp_regs[t_idx % 6] << "\n";
+          }
+          if (inst.op == "icall") {
+            out << "    movq %rax, %r10\n";
+            out << "    xorl %eax, %eax\n";
+            out << "    call *%r10\n";
+          } else {
+            out << "    xorl %eax, %eax\n";
+            out << "    call " << inst.arg << "\n";
+          }
+          out << "    addq $" << (num_stack_args * 8) << ", %rsp\n";
+        }
         out << "    pushq %rax\n";
       } else if (inst.op == "addr") {
         out << "    leaq -" << ((inst.value + 1) * 16) << "(%rbp), %rax\n";
@@ -494,12 +578,13 @@ namespace Backend {
         Diagnostics::fatal("unknown IR op " + inst.op);
       }
     }
+    out << ".size " << fn.name << ", .-" << fn.name << "\n";
     return out.str();
   }
 
   static std::string emit_i386_b1nix(const IrFunction &fn) {
-    static const char *regs[] = {"%eax", "%ecx", "%edx", "%ebx", "%esi", "%edi"};
     std::ostringstream out;
+
     if (!fn.strings.empty()) {
       out << ".section .rodata\n";
       for (const auto &s : fn.strings)
@@ -509,6 +594,7 @@ namespace Backend {
     if (!fn.is_static) {
       out << ".globl " << fn.name << "\n";
     }
+    out << ".type " << fn.name << ", @function\n";
     out << fn.name << ":\n";
     const bool frame = fn.has_call || !fn.locals.empty();
     if (frame) {
@@ -622,25 +708,25 @@ namespace Backend {
       } else if (inst.op == "label") {
         out << inst.arg << ":\n";
       } else if (inst.op == "call") {
-        if (inst.value > 6)
-          Diagnostics::fatal("i386 calls with more than 6 arguments are not supported");
-        for (long i = 0; i < inst.value; ++i)
-          out << "    popl " << regs[i] << "\n";
-        for (long i = 0; i < inst.value; ++i)
-          out << "    pushl " << regs[i] << "\n";
+        long num_args = inst.value;
+        out << "    subl $" << (num_args * 4) << ", %esp\n";
+        for (long i = 0; i < num_args; ++i) {
+          out << "    movl " << ((2 * num_args - 1 - i) * 4) << "(%esp), %eax\n";
+          out << "    movl %eax, " << (i * 4) << "(%esp)\n";
+        }
         out << "    call " << inst.arg << "\n";
-        out << "    addl $" << (inst.value * 4) << ", %esp\n";
+        out << "    addl $" << (2 * num_args * 4) << ", %esp\n";
         out << "    pushl %eax\n";
       } else if (inst.op == "icall") {
-        if (inst.value > 6)
-          Diagnostics::fatal("i386 calls with more than 6 arguments are not supported");
-        for (long i = 0; i < inst.value; ++i)
-          out << "    popl " << regs[i] << "\n";
-        out << "    popl %eax\n";
-        for (long i = 0; i < inst.value; ++i)
-          out << "    pushl " << regs[i] << "\n";
+        long num_args = inst.value;
+        out << "    subl $" << (num_args * 4) << ", %esp\n";
+        for (long i = 0; i < num_args; ++i) {
+          out << "    movl " << ((2 * num_args - 1 - i) * 4) << "(%esp), %eax\n";
+          out << "    movl %eax, " << (i * 4) << "(%esp)\n";
+        }
+        out << "    movl " << ((2 * num_args) * 4) << "(%esp), %eax\n";
         out << "    call *%eax\n";
-        out << "    addl $" << (inst.value * 4) << ", %esp\n";
+        out << "    addl $" << ((2 * num_args + 1) * 4) << ", %esp\n";
         out << "    pushl %eax\n";
       } else if (inst.op == "addr") {
         out << "    leal -" << ((inst.value + 1) * 16) << "(%ebp), %eax\n";
@@ -692,10 +778,46 @@ namespace Backend {
         Diagnostics::fatal("unknown IR op " + inst.op);
       }
     }
+    out << ".size " << fn.name << ", .-" << fn.name << "\n";
     return out.str();
   }
 
-  std::string compile_asm(const std::string &src, const std::string &target) {
+  static void dump_ast_node(const AST::Node &node, int indent) {
+    std::string ind(indent * 2, ' ');
+    std::cerr << ind << "Node(op=" << node.op;
+    if (!node.name.empty()) std::cerr << ", name=" << node.name;
+    if (node.value != 0) std::cerr << ", value=" << node.value;
+    std::cerr << ")\n";
+    if (node.lhs) dump_ast_node(*node.lhs, indent + 1);
+    if (node.rhs) dump_ast_node(*node.rhs, indent + 1);
+    for (const auto &child : node.body) {
+      if (child) dump_ast_node(*child, indent + 1);
+    }
+  }
+
+  static void dump_ast(const std::vector<std::unique_ptr<AST::Node>> &ast) {
+    std::cerr << "=== AST DUMP ===\n";
+    for (const auto &node : ast) {
+      if (node) dump_ast_node(*node, 0);
+    }
+    std::cerr << "================\n";
+  }
+
+  static void dump_ir(const std::vector<IrFunction> &funcs) {
+    std::cerr << "=== IR DUMP ===\n";
+    for (const auto &fn : funcs) {
+      std::cerr << "Function " << fn.name << ":\n";
+      for (const auto &inst : fn.code) {
+        std::cerr << "  " << inst.op;
+        if (!inst.arg.empty()) std::cerr << " " << inst.arg;
+        if (inst.value != 0) std::cerr << " " << inst.value;
+        std::cerr << "\n";
+      }
+    }
+    std::cerr << "================\n";
+  }
+
+  std::string compile_asm(const std::string &src, const std::string &target, bool dump_ast_flag, bool dump_ir_flag) {
     global_decls.clear();
     global_vars.clear();
     global_arrays.clear();
@@ -718,7 +840,13 @@ namespace Backend {
     auto tokens = Lexer::lex(preprocessed_src, macros);
     Parser::Parser parser(std::move(tokens), target_scale);
     auto ast = parser.parse();
+    if (dump_ast_flag) {
+      dump_ast(ast);
+    }
     auto ir_functions = lower_program(std::move(ast), target);
+    if (dump_ir_flag) {
+      dump_ir(ir_functions);
+    }
 
     out << emit_globals(target);
 

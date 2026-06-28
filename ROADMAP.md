@@ -106,14 +106,14 @@
 - [x] Add `sizeof` and move declarator parsing toward real C declarators (`int *a[3]`, `int (*fp)(int)`).
 - [x] Tighten integer typing: signed/unsigned behavior, integer promotions, cast width, and char/short widening.
 - [x] Improve aggregate layout: alignment, padding, nested structs, arrays inside structs, `->`, and `union`.
-- [ ] Add function pointer declarators and calls without special parser shortcuts.
+- [x] Add function pointer declarators and calls without special parser shortcuts.
 
 ## M15: TCC-Level Driver and ABI
 
-- [ ] Add ABI regression tests for stack-passed arguments, varargs calls, function pointers, and small integer returns.
-- [ ] Add driver modes expected from a tiny C compiler: `-E`, `-c`, multiple input files, and pass-through linker flags.
-- [ ] Make object output real enough for B1NIX: symbols, relocations, sections, and debug dumps.
-- [ ] Compile a small curated set of real B1NIX userspace files without TCC fallback.
+- [x] Add ABI regression tests for stack-passed arguments, varargs calls, function pointers, and small integer returns.
+- [x] Add driver modes expected from a tiny C compiler: `-E`, `-c`, multiple input files, and pass-through linker flags.
+- [x] Make object output real enough for B1NIX: symbols, relocations, sections, and debug dumps.
+- [x] Compile a small curated set of real B1NIX userspace files without TCC fallback.
 
 ## M16: PCC-Style Compiler Shape
 

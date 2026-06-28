@@ -261,6 +261,30 @@ set -e
 test "$rc" = 0
 echo "ok m14_union"
 
+./build/b1cc tests/m15_abi_stack_args.c -o "$tmp/m15_abi_stack_args"
+set +e
+"$tmp/m15_abi_stack_args"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok m15_abi_stack_args"
+
+./build/b1cc tests/m15_abi_func_ptr.c -o "$tmp/m15_abi_func_ptr"
+set +e
+"$tmp/m15_abi_func_ptr"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok m15_abi_func_ptr"
+
+./build/b1cc tests/m15_abi_returns.c -o "$tmp/m15_abi_returns"
+set +e
+"$tmp/m15_abi_returns"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok m15_abi_returns"
+
 ./build/b1cc src/b1cc_token_lexer.c -o "$tmp/b1cc_token_lexer"
 "$tmp/b1cc_token_lexer" < tests/local.c > "$tmp/lexer_output.txt"
 grep -q "IDENT: int" "$tmp/lexer_output.txt"
