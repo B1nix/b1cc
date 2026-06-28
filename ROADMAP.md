@@ -117,9 +117,33 @@
 
 ## M16: PCC-Style Compiler Shape
 
-- [ ] Split C frontend semantics more clearly from target lowering.
-- [ ] Add a backend contract for type legalization, calling convention lowering, instruction selection, and register allocation.
-- [ ] Add tiny local optimizations only after type semantics are stable.
-- [ ] Grow tests from real B1NIX userspace sources before chasing wider C compatibility.
+- [x] Split C frontend semantics more clearly from target lowering.
+- [x] Add a backend contract for type legalization, calling convention lowering, instruction selection, and register allocation.
+- [x] Add tiny local optimizations only after type semantics are stable.
+- [x] Grow tests from real B1NIX userspace sources before chasing wider C compatibility.
+
+## M17: Full C99 Preprocessor
+
+- [ ] Add macro definitions with arguments (e.g., `#define MAX(a, b) ...`).
+- [ ] Add macro operators `#` (stringification) and `##` (token pasting).
+- [ ] Add full constant expression evaluation for conditional directives (`#if`, `#elif` with `defined`).
+
+## M18: Conforming Aggregates & ABI
+
+- [ ] Support struct passing and return by value according to target ABI specifications (stack/register splitting).
+- [ ] Support designated initializers (e.g., `struct Point p = { .x = 1 }`).
+- [ ] Support nested brace initializers for multidimensional arrays and structures.
+
+## M19: Complete Type System & Math
+
+- [ ] Support floating-point types (`float`, `double`) with vector/FPU backend instructions and registers.
+- [ ] Support `long long` 64-bit integer operations on 32-bit platforms (register pairs on i386).
+- [ ] Integrate type qualifiers (`const`, `volatile`, `unsigned` promotions).
+- [ ] Implement bitfields packing/unpacking in aggregates.
+
+## M20: Callee-Side Varargs & Self-Hosting
+
+- [ ] Add compiler built-ins for writing vararg functions (`__builtin_va_list`, `__builtin_va_start`, etc.).
+- [ ] Support compilation of a clean-room C version of the compiler codebase (e.g., pure C variant of `b1cc` or C++ subsets).
 
 Skipped: full C/C++ upfront. Add features only when a test or B1NIX source needs them.
