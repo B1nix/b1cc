@@ -25,10 +25,13 @@ namespace Backend {
         if (!g.is_static) {
           out << ".globl _" << g.name << "\n";
         }
-        int align = (g.elem_size == 8) ? 3 : (g.elem_size == 4) ? 2 : (g.elem_size == 2) ? 1 : 0;
+        int align = g.align;
+        if (align == 0) {
+          align = (g.elem_size == 8) ? 3 : (g.elem_size == 4) ? 2 : (g.elem_size == 2) ? 1 : 0;
+        }
         out << ".p2align " << align << "\n";
         out << "_" << g.name << ":\n";
-        if (g.is_array) {
+        if (g.is_array || g.initializers.size() > 1) {
           for (long val : g.initializers) {
             if (g.elem_size == 1)
               out << "    .byte " << (val & 0xff) << "\n";
@@ -77,12 +80,24 @@ namespace Backend {
         out << "    mov x29, sp\n";
         if (!fn.locals.empty())
           out << "    sub sp, sp, #" << (fn.locals.size() * 16) << "\n";
+        int abi_word = 0;
+        int stack_word = 0;
         for (size_t i = 0; i < fn.params.size(); ++i) {
-          if (i < 8) {
-            out << "    str x" << i << ", [x29, #-" << ((i + 1) * 16) << "]\n";
-          } else {
-            out << "    ldr x8, [x29, #" << (16 + (i - 8) * 8) << "]\n";
-            out << "    str x8, [x29, #-" << ((i + 1) * 16) << "]\n";
+          int agg_size = (i < fn.param_aggregate_sizes.size()) ? fn.param_aggregate_sizes[i] : 0;
+          int words = agg_size > 0 ? (agg_size + 7) / 8 : 1;
+          bool in_regs = abi_word + words <= 8;
+          for (int w = 0; w < words; ++w) {
+            int off = -((int)(i + 1) * 16) + (w * 8);
+            if (in_regs) {
+              out << "    str x" << (abi_word + w) << ", [x29, #" << off << "]\n";
+            } else {
+              out << "    ldr x8, [x29, #" << (16 + stack_word * 8) << "]\n";
+              out << "    str x8, [x29, #" << off << "]\n";
+              stack_word++;
+            }
+          }
+          if (in_regs) {
+            abi_word += words;
           }
         }
       }
@@ -116,6 +131,8 @@ namespace Backend {
         } else if (inst.op == "+" || inst.op == "-" || inst.op == "*" ||
                    inst.op == "/" || inst.op == "%" || inst.op == "==" || inst.op == "!=" ||
                    inst.op == "<" || inst.op == ">" || inst.op == "<=" ||
+                   inst.op == "u<" || inst.op == "u>" || inst.op == "u<=" ||
+                   inst.op == "u>=" || inst.op == "u>>" ||
                    inst.op == ">=" || inst.op == "index" ||
                    inst.op == "&" || inst.op == "|" || inst.op == "^" ||
                    inst.op == "<<" || inst.op == ">>") {
@@ -153,6 +170,8 @@ namespace Backend {
             out << "    lsl x0, x1, x0\n";
           else if (inst.op == ">>")
             out << "    asr x0, x1, x0\n";
+          else if (inst.op == "u>>")
+            out << "    lsr x0, x1, x0\n";
           else {
             out << "    cmp x1, x0\n";
             if (inst.op == "==")
@@ -165,8 +184,16 @@ namespace Backend {
               out << "    cset x0, gt\n";
             else if (inst.op == "<=")
               out << "    cset x0, le\n";
-            else
+            else if (inst.op == ">=")
               out << "    cset x0, ge\n";
+            else if (inst.op == "u<")
+              out << "    cset x0, lo\n";
+            else if (inst.op == "u>")
+              out << "    cset x0, hi\n";
+            else if (inst.op == "u<=")
+              out << "    cset x0, ls\n";
+            else
+              out << "    cset x0, hs\n";
           }
           out << "    str x0, [sp, #-16]!\n";
         } else if (inst.op == "~" || inst.op == "!" || inst.op == "neg" || inst.op == "cast") {
@@ -197,7 +224,85 @@ namespace Backend {
           out << inst.arg << ":\n";
         } else if (inst.op == "call" || inst.op == "icall") {
           long num_args = inst.value;
-          if (num_args <= 8) {
+          std::vector<int> agg_sizes;
+          if (inst.op == "call" && function_param_aggregate_sizes.count(inst.arg)) {
+            agg_sizes = function_param_aggregate_sizes[inst.arg];
+          }
+          bool has_aggregate_arg = false;
+          std::vector<bool> arg_in_regs(num_args, false);
+          std::vector<int> arg_first_word(num_args, 0);
+          std::vector<int> arg_stack_word(num_args, 0);
+          int vararg_fixed_count = -1;
+          if (inst.op == "call" && function_vararg_fixed_counts.count(inst.arg))
+            vararg_fixed_count = function_vararg_fixed_counts[inst.arg];
+          int abi_words = 0;
+          int stack_words = 0;
+          for (long i = 0; i < num_args; ++i) {
+            int agg_size = (i < (long)agg_sizes.size()) ? agg_sizes[i] : 0;
+            int words = agg_size > 0 ? (agg_size + 7) / 8 : 1;
+            has_aggregate_arg = has_aggregate_arg || agg_size > 0;
+            if (abi_words + words <= 8) {
+              arg_in_regs[i] = true;
+              arg_first_word[i] = abi_words;
+              abi_words += words;
+            } else {
+              arg_stack_word[i] = stack_words;
+              stack_words += words;
+            }
+          }
+          if (vararg_fixed_count >= 0 && !has_aggregate_arg) {
+            if (vararg_fixed_count > 8)
+              Diagnostics::fatal("arm64 variadic calls with more than 8 fixed args are not supported");
+            long num_varargs = num_args - vararg_fixed_count;
+            long stack_bytes = ((num_varargs * 8 + 15) / 16) * 16;
+            if (stack_bytes > 0)
+              out << "    sub sp, sp, #" << stack_bytes << "\n";
+            for (long i = 0; i < num_args; ++i) {
+              long src_off = stack_bytes + (num_args - 1 - i) * 16;
+              if (i < vararg_fixed_count) {
+                out << "    ldr x" << i << ", [sp, #" << src_off << "]\n";
+              } else {
+                out << "    ldr x9, [sp, #" << src_off << "]\n";
+                out << "    str x9, [sp, #" << ((i - vararg_fixed_count) * 8) << "]\n";
+              }
+            }
+            out << "    bl _" << inst.arg << "\n";
+            out << "    add sp, sp, #" << (stack_bytes + num_args * 16) << "\n";
+          } else if (has_aggregate_arg) {
+            int stack_bytes = ((stack_words * 8 + 15) / 16) * 16;
+            if (stack_bytes > 0)
+              out << "    sub sp, sp, #" << stack_bytes << "\n";
+            for (long i = 0; i < num_args; ++i) {
+              int agg_size = (i < (long)agg_sizes.size()) ? agg_sizes[i] : 0;
+              int words = agg_size > 0 ? (agg_size + 7) / 8 : 1;
+              int src_off = stack_bytes + (int)(num_args - 1 - i) * 16;
+              if (agg_size > 0) {
+                out << "    ldr x9, [sp, #" << src_off << "]\n";
+                for (int w = 0; w < words; ++w) {
+                  if (arg_in_regs[i]) {
+                    out << "    ldr x" << (arg_first_word[i] + w) << ", [x9, #" << (w * 8) << "]\n";
+                  } else {
+                    out << "    ldr x10, [x9, #" << (w * 8) << "]\n";
+                    out << "    str x10, [sp, #" << ((arg_stack_word[i] + w) * 8) << "]\n";
+                  }
+                }
+              } else {
+                if (arg_in_regs[i]) {
+                  out << "    ldr x" << arg_first_word[i] << ", [sp, #" << src_off << "]\n";
+                } else {
+                  out << "    ldr x10, [sp, #" << src_off << "]\n";
+                  out << "    str x10, [sp, #" << (arg_stack_word[i] * 8) << "]\n";
+                }
+              }
+            }
+            if (inst.op == "icall") {
+              out << "    ldr x16, [sp, #" << (stack_bytes + num_args * 16) << "]\n";
+              out << "    blr x16\n";
+            } else {
+              out << "    bl _" << inst.arg << "\n";
+            }
+            out << "    add sp, sp, #" << (stack_bytes + num_args * 16 + (inst.op == "icall" ? 16 : 0)) << "\n";
+          } else if (num_args <= 8) {
             for (long i = num_args - 1; i >= 0; --i)
               out << "    ldr x" << i << ", [sp], #16\n";
             if (inst.op == "icall") {
@@ -231,7 +336,10 @@ namespace Backend {
             }
             out << "    add sp, sp, #" << stack_bytes << "\n";
           }
+          int ret_agg_size = (inst.op == "call" && function_return_aggregate_sizes.count(inst.arg)) ? function_return_aggregate_sizes[inst.arg] : 0;
           out << "    str x0, [sp, #-16]!\n";
+          if (ret_agg_size > 8)
+            out << "    str x1, [sp, #-16]!\n";
         } else if (inst.op == "addr") {
           out << "    sub x0, x29, #" << ((inst.value + 1) * 16) << "\n";
           out << "    str x0, [sp, #-16]!\n";
@@ -319,6 +427,24 @@ namespace Backend {
           } else {
             out << "    str x0, [x1, x2, lsl #3]\n";
           }
+        } else if (inst.op == "store_agg") {
+          out << "    ldr x9, [sp], #16\n";
+          if (inst.value > 8) {
+            out << "    ldr x0, [sp], #16\n";
+            out << "    str x0, [x9, #8]\n";
+          }
+          out << "    ldr x0, [sp], #16\n";
+          out << "    str x0, [x9]\n";
+        } else if (inst.op == "ret_agg") {
+          out << "    ldr x9, [sp], #16\n";
+          out << "    ldr x0, [x9]\n";
+          if (inst.value > 8)
+            out << "    ldr x1, [x9, #8]\n";
+          if (frame) {
+            out << "    mov sp, x29\n";
+            out << "    ldp x29, x30, [sp], #16\n";
+          }
+          out << "    ret\n";
         } else if (inst.op == "ret") {
           out << "    ldr x0, [sp], #16\n";
           if (frame) {

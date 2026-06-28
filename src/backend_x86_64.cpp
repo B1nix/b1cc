@@ -16,13 +16,16 @@ namespace Backend {
         if (!g.is_static) {
           out << ".globl " << g.name << "\n";
         }
-        int align = (g.elem_size == 8) ? 3 : (g.elem_size == 4) ? 2 : (g.elem_size == 2) ? 1 : 0;
+        int align = g.align;
+        if (align == 0) {
+          align = (g.elem_size == 8) ? 3 : (g.elem_size == 4) ? 2 : (g.elem_size == 2) ? 1 : 0;
+        }
         out << ".type " << g.name << ", @object\n";
-        long total_bytes = g.is_array ? (g.size * g.elem_size) : g.elem_size;
+        long total_bytes = g.is_array ? (g.size * g.elem_size) : (g.initializers.empty() ? 1 : g.initializers.size()) * g.elem_size;
         out << ".size " << g.name << ", " << total_bytes << "\n";
         out << ".p2align " << align << "\n";
         out << g.name << ":\n";
-        if (g.is_array) {
+        if (g.is_array || g.initializers.size() > 1) {
           for (long val : g.initializers) {
             if (g.elem_size == 1)
               out << "    .byte " << (val & 0xff) << "\n";
@@ -74,12 +77,24 @@ namespace Backend {
         if (!fn.locals.empty())
           out << "    subq $" << (fn.locals.size() * 16) << ", %rsp\n";
         static const char *arg_regs[] = {"%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"};
+        int abi_word = 0;
+        int stack_word = 0;
         for (size_t i = 0; i < fn.params.size(); ++i) {
-          if (i < 6) {
-            out << "    movq " << arg_regs[i] << ", -" << ((i + 1) * 16) << "(%rbp)\n";
-          } else {
-            out << "    movq " << (16 + (i - 6) * 8) << "(%rbp), %rax\n";
-            out << "    movq %rax, -" << ((i + 1) * 16) << "(%rbp)\n";
+          int agg_size = (i < fn.param_aggregate_sizes.size()) ? fn.param_aggregate_sizes[i] : 0;
+          int words = agg_size > 0 ? (agg_size + 7) / 8 : 1;
+          bool in_regs = abi_word + words <= 6;
+          for (int w = 0; w < words; ++w) {
+            int off = -((int)(i + 1) * 16) + (w * 8);
+            if (in_regs) {
+              out << "    movq " << arg_regs[abi_word + w] << ", " << off << "(%rbp)\n";
+            } else {
+              out << "    movq " << (16 + stack_word * 8) << "(%rbp), %rax\n";
+              out << "    movq %rax, " << off << "(%rbp)\n";
+              stack_word++;
+            }
+          }
+          if (in_regs) {
+            abi_word += words;
           }
         }
       }
@@ -101,6 +116,8 @@ namespace Backend {
         } else if (inst.op == "+" || inst.op == "-" || inst.op == "*" ||
                    inst.op == "/" || inst.op == "%" || inst.op == "==" || inst.op == "!=" ||
                    inst.op == "<" || inst.op == ">" || inst.op == "<=" ||
+                   inst.op == "u<" || inst.op == "u>" || inst.op == "u<=" ||
+                   inst.op == "u>=" || inst.op == "u>>" ||
                    inst.op == ">=" || inst.op == "index" ||
                    inst.op == "&" || inst.op == "|" || inst.op == "^" ||
                    inst.op == "<<" || inst.op == ">>") {
@@ -135,11 +152,13 @@ namespace Backend {
             out << "    orq %rcx, %rax\n";
           else if (inst.op == "^")
             out << "    xorq %rcx, %rax\n";
-          else if (inst.op == "<<" || inst.op == ">>") {
+          else if (inst.op == "<<" || inst.op == ">>" || inst.op == "u>>") {
             if (inst.op == "<<")
               out << "    shlq %cl, %rax\n";
-            else
+            else if (inst.op == ">>")
               out << "    sarq %cl, %rax\n";
+            else
+              out << "    shrq %cl, %rax\n";
           } else {
             out << "    cmpq %rcx, %rax\n";
             if (inst.op == "==")
@@ -152,8 +171,16 @@ namespace Backend {
               out << "    setg %al\n";
             else if (inst.op == "<=")
               out << "    setle %al\n";
-            else
+            else if (inst.op == ">=")
               out << "    setge %al\n";
+            else if (inst.op == "u<")
+              out << "    setb %al\n";
+            else if (inst.op == "u>")
+              out << "    seta %al\n";
+            else if (inst.op == "u<=")
+              out << "    setbe %al\n";
+            else
+              out << "    setae %al\n";
             out << "    movzbq %al, %rax\n";
           }
           out << "    pushq %rax\n";
@@ -186,7 +213,67 @@ namespace Backend {
           out << inst.arg << ":\n";
         } else if (inst.op == "call" || inst.op == "icall") {
           long num_args = inst.value;
-          if (num_args <= 6) {
+          std::vector<int> agg_sizes;
+          if (inst.op == "call" && function_param_aggregate_sizes.count(inst.arg)) {
+            agg_sizes = function_param_aggregate_sizes[inst.arg];
+          }
+          bool has_aggregate_arg = false;
+          std::vector<bool> arg_in_regs(num_args, false);
+          std::vector<int> arg_first_word(num_args, 0);
+          std::vector<int> arg_stack_word(num_args, 0);
+          int abi_words = 0;
+          int stack_words = 0;
+          for (long i = 0; i < num_args; ++i) {
+            int agg_size = (i < (long)agg_sizes.size()) ? agg_sizes[i] : 0;
+            int words = agg_size > 0 ? (agg_size + 7) / 8 : 1;
+            has_aggregate_arg = has_aggregate_arg || agg_size > 0;
+            if (abi_words + words <= 6) {
+              arg_in_regs[i] = true;
+              arg_first_word[i] = abi_words;
+              abi_words += words;
+            } else {
+              arg_stack_word[i] = stack_words;
+              stack_words += words;
+            }
+          }
+          if (has_aggregate_arg) {
+            int stack_bytes = stack_words * 8;
+            if (stack_bytes > 0)
+              out << "    subq $" << stack_bytes << ", %rsp\n";
+            for (long i = 0; i < num_args; ++i) {
+              int agg_size = (i < (long)agg_sizes.size()) ? agg_sizes[i] : 0;
+              int words = agg_size > 0 ? (agg_size + 7) / 8 : 1;
+              int src_off = stack_bytes + (int)(num_args - 1 - i) * 8;
+              if (agg_size > 0) {
+                out << "    movq " << src_off << "(%rsp), %r10\n";
+                for (int w = 0; w < words; ++w) {
+                  if (arg_in_regs[i]) {
+                    out << "    movq " << (w * 8) << "(%r10), " << regs[arg_first_word[i] + w] << "\n";
+                  } else {
+                    out << "    movq " << (w * 8) << "(%r10), %r11\n";
+                    out << "    movq %r11, " << ((arg_stack_word[i] + w) * 8) << "(%rsp)\n";
+                  }
+                }
+              } else {
+                if (arg_in_regs[i]) {
+                  out << "    movq " << src_off << "(%rsp), " << regs[arg_first_word[i]] << "\n";
+                } else {
+                  out << "    movq " << src_off << "(%rsp), %r11\n";
+                  out << "    movq %r11, " << (arg_stack_word[i] * 8) << "(%rsp)\n";
+                }
+              }
+            }
+            if (inst.op == "icall") {
+              out << "    movq " << (stack_bytes + num_args * 8) << "(%rsp), %rax\n";
+              out << "    movq %rax, %r11\n";
+              out << "    xorl %eax, %eax\n";
+              out << "    call *%r11\n";
+            } else {
+              out << "    xorl %eax, %eax\n";
+              out << "    call " << inst.arg << "\n";
+            }
+            out << "    addq $" << (stack_bytes + num_args * 8 + (inst.op == "icall" ? 8 : 0)) << ", %rsp\n";
+          } else if (num_args <= 6) {
             for (long i = num_args - 1; i >= 0; --i)
               out << "    popq " << regs[i] << "\n";
             if (inst.op == "icall") {
@@ -225,7 +312,10 @@ namespace Backend {
             }
             out << "    addq $" << (num_stack_args * 8) << ", %rsp\n";
           }
+          int ret_agg_size = (inst.op == "call" && function_return_aggregate_sizes.count(inst.arg)) ? function_return_aggregate_sizes[inst.arg] : 0;
           out << "    pushq %rax\n";
+          if (ret_agg_size > 8)
+            out << "    pushq %rdx\n";
         } else if (inst.op == "addr") {
           out << "    leaq -" << ((inst.value + 1) * 16) << "(%rbp), %rax\n";
           out << "    pushq %rax\n";
@@ -271,6 +361,22 @@ namespace Backend {
           } else {
             out << "    movq %rdx, (%rax,%rcx,8)\n";
           }
+        } else if (inst.op == "store_agg") {
+          out << "    popq %r10\n";
+          if (inst.value > 8) {
+            out << "    popq %rax\n";
+            out << "    movq %rax, 8(%r10)\n";
+          }
+          out << "    popq %rax\n";
+          out << "    movq %rax, (%r10)\n";
+        } else if (inst.op == "ret_agg") {
+          out << "    popq %r10\n";
+          out << "    movq (%r10), %rax\n";
+          if (inst.value > 8)
+            out << "    movq 8(%r10), %rdx\n";
+          if (frame)
+            out << "    leave\n";
+          out << "    ret\n";
         } else if (inst.op == "ret") {
           out << "    popq %rax\n";
           if (frame)

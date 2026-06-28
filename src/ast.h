@@ -15,6 +15,14 @@ namespace AST {
     std::unique_ptr<Node> rhs;
     std::vector<std::unique_ptr<Node>> body;
     std::vector<std::string> params;
+    std::vector<int> param_aggregate_sizes;
+    int aggregate_size = 0;
+    std::string type_tag;
+    std::vector<long> array_dims;
+    int elem_size = 0;
+    bool is_unsigned = false;
+    int type_size = 8;
+    bool is_bool = false;
     int line = 1;
     int col = 1;
   };

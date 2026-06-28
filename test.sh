@@ -125,6 +125,13 @@ set -e
 test "$rc" = 11
 echo "ok include_initializer"
 
+./build/b1cc -c tests/puts.c -fdump-symbols -fdump-sections -fdump-relocs -o "$tmp/m6_object_dump.o" > "$tmp/m6_object_dump.txt" 2>&1
+test -s "$tmp/m6_object_dump.o"
+grep -Eq '(^|[ _])main' "$tmp/m6_object_dump.txt"
+grep -Eq '(__text|\\.text)' "$tmp/m6_object_dump.txt"
+grep -Eq '(_puts|puts)' "$tmp/m6_object_dump.txt"
+echo "ok m6_object_dumps"
+
 ./build/b1cc tests/m7_enum_typedef.c -o "$tmp/m7_enum_typedef"
 set +e
 "$tmp/m7_enum_typedef"
@@ -164,6 +171,25 @@ rc=$?
 set -e
 test "$rc" = 42
 echo "ok m7_macro"
+
+./build/b1cc tests/m7_varargs_printf.c -o "$tmp/m7_varargs_printf"
+"$tmp/m7_varargs_printf" > "$tmp/m7_varargs_printf.out"
+grep -qx "1 2" "$tmp/m7_varargs_printf.out"
+echo "ok m7_varargs_printf"
+
+if [ -f ../b1nix/userspace/bin/b1cc_hello.c ]; then
+  ./build/b1cc ../b1nix/userspace/bin/b1cc_hello.c -o "$tmp/b1nix_b1cc_hello"
+  "$tmp/b1nix_b1cc_hello" > "$tmp/b1nix_b1cc_hello.out"
+  grep -qx "M25-HELLO: hello from b1cc" "$tmp/b1nix_b1cc_hello.out"
+  echo "ok b1nix_userspace_b1cc_hello"
+fi
+
+if [ -f ../b1nix/userspace/bin/b1cc_better_c.c ]; then
+  ./build/b1cc ../b1nix/userspace/bin/b1cc_better_c.c -o "$tmp/b1nix_b1cc_better_c"
+  "$tmp/b1nix_b1cc_better_c" > "$tmp/b1nix_b1cc_better_c.out"
+  grep -qx "B1CC-BETTER-C-SMOKE: ok" "$tmp/b1nix_b1cc_better_c.out"
+  echo "ok b1nix_userspace_b1cc_better_c"
+fi
 
 ./build/b1cc tests/m10_logical.c -o "$tmp/m10_logical"
 set +e
@@ -253,6 +279,14 @@ set -e
 test "$rc" = 0
 echo "ok m14_cast_trunc"
 
+./build/b1cc tests/m14_type_system_regressions.c -o "$tmp/m14_type_system_regressions"
+set +e
+"$tmp/m14_type_system_regressions"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok m14_type_system_regressions"
+
 ./build/b1cc tests/m14_union.c -o "$tmp/m14_union"
 set +e
 "$tmp/m14_union"
@@ -285,6 +319,23 @@ set -e
 test "$rc" = 0
 echo "ok m15_abi_returns"
 
+printf '%s\n' '#ifndef VALUE' '#define VALUE 1' '#endif' 'int main(void) { return VALUE; }' > "$tmp/m15_driver_preprocess.c"
+./build/b1cc -E -DVALUE=42 "$tmp/m15_driver_preprocess.c" -o "$tmp/m15_driver_preprocess.i"
+grep -q 'return 42' "$tmp/m15_driver_preprocess.i"
+
+./build/b1cc -c tests/return_42.c -o "$tmp/m15_driver_return_42.o"
+test -s "$tmp/m15_driver_return_42.o"
+
+printf '%s\n' 'int f(void) { return 40; }' > "$tmp/m15_driver_a.c"
+printf '%s\n' 'int f(void); int main(void) { return f() + 2; }' > "$tmp/m15_driver_b.c"
+./build/b1cc "$tmp/m15_driver_a.c" "$tmp/m15_driver_b.c" -Wl,-no_warn_duplicate_libraries -o "$tmp/m15_driver_multi"
+set +e
+"$tmp/m15_driver_multi"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m15_driver_modes"
+
 ./build/b1cc tests/m17_preprocessor_full.c -o "$tmp/m17_preprocessor_full"
 set +e
 "$tmp/m17_preprocessor_full"
@@ -292,6 +343,38 @@ rc=$?
 set -e
 test "$rc" = 0
 echo "ok m17_preprocessor_full"
+
+./build/b1cc tests/m17_if_macro_expr.c -o "$tmp/m17_if_macro_expr"
+set +e
+"$tmp/m17_if_macro_expr"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok m17_if_macro_expr"
+
+./build/b1cc tests/m18_aggregates.c -o "$tmp/m18_aggregates"
+set +e
+"$tmp/m18_aggregates"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok m18_aggregates"
+
+./build/b1cc tests/m18_aggregate_abi.c -o "$tmp/m18_aggregate_abi"
+set +e
+"$tmp/m18_aggregate_abi"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok m18_aggregate_abi"
+
+./build/b1cc tests/m19_integer_typing.c -o "$tmp/m19_integer_typing"
+set +e
+"$tmp/m19_integer_typing"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok m19_integer_typing"
 
 
 ./build/b1cc src/b1cc_token_lexer.c -o "$tmp/b1cc_token_lexer"
@@ -306,10 +389,19 @@ grep -q '^main:' "$tmp/return_42_x86_64.s"
 grep -q 'ret' "$tmp/return_42_x86_64.s"
 echo "ok x86_64_b1nix_asm"
 
+./build/b1cc --target=x86_64-b1nix tests/m18_aggregate_abi.c -S -o "$tmp/m18_aggregate_abi_x86_64.s"
+grep -q '^make_pair:' "$tmp/m18_aggregate_abi_x86_64.s"
+grep -q '^stack_pair:' "$tmp/m18_aggregate_abi_x86_64.s"
+echo "ok x86_64_b1nix_m18_aggregate_abi_asm"
+
 if [ -x ../b1nix/tools/toolchain/bin/b1nix-cc ]; then
   ./build/b1cc --target=x86_64-b1nix tests/return_42.c -o "$tmp/return_42.b1nix"
   test -s "$tmp/return_42.b1nix"
   echo "ok x86_64_b1nix_elf"
+
+  ./build/b1cc --target=x86_64-b1nix tests/m18_aggregate_abi.c -o "$tmp/m18_aggregate_abi.b1nix"
+  test -s "$tmp/m18_aggregate_abi.b1nix"
+  echo "ok x86_64_b1nix_m18_aggregate_abi_elf"
 fi
 
 ./build/b1cc --target=i386-b1nix tests/return_42.c -S -o "$tmp/return_42_i386.s"

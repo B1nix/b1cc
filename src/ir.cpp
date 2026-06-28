@@ -7,6 +7,7 @@ namespace IR {
   thread_local std::vector<IrGlobalVar> global_decls;
   thread_local std::set<std::string> global_vars;
   thread_local std::set<std::string> global_arrays;
+  thread_local std::set<std::string> global_struct_vars;
   thread_local std::map<std::string, std::vector<long>> global_array_dims;
   thread_local std::map<std::string, std::vector<long>> local_array_dims;
   thread_local std::map<std::string, int> global_array_base_sizes;
@@ -15,10 +16,14 @@ namespace IR {
   thread_local std::map<std::string, bool> global_var_is_pointer;
   thread_local std::map<std::string, int> local_var_elem_scales;
   thread_local std::map<std::string, bool> local_var_is_pointer;
+  thread_local std::map<std::string, int> function_return_aggregate_sizes;
+  thread_local std::map<std::string, std::vector<int>> function_param_aggregate_sizes;
+  thread_local std::map<std::string, int> function_vararg_fixed_counts;
   thread_local int current_target_scale = 8;
 
   static thread_local std::vector<LoopContext> loop_contexts;
   static thread_local int current_func_ret_size = 0;
+  static thread_local int current_func_ret_aggregate_size = 0;
 
 
   static void lower_addr(const AST::Node &node, IrFunction &fn, int target_scale);
@@ -30,6 +35,29 @@ namespace IR {
   }
 
   static std::vector<long> get_node_dims(const Node &node, const IrFunction &fn) {
+    if (!node.array_dims.empty()) {
+      return node.array_dims;
+    }
+    if (node.op == "index") {
+      if (node.lhs && !node.lhs->array_dims.empty()) {
+        if (node.lhs->array_dims.size() <= 1) {
+          return {};
+        }
+        return std::vector<long>(node.lhs->array_dims.begin() + 1, node.lhs->array_dims.end());
+      }
+      const Node *base = &node;
+      int index_count = 0;
+      while (base->op == "index") {
+        index_count++;
+        base = base->lhs.get();
+      }
+      if (!base->array_dims.empty()) {
+        if (index_count >= static_cast<int>(base->array_dims.size())) {
+          return {};
+        }
+        return std::vector<long>(base->array_dims.begin() + index_count, base->array_dims.end());
+      }
+    }
     std::string base_name = get_base_var_name(node);
     if (base_name.empty()) return {};
     std::vector<long> dims;
@@ -79,9 +107,9 @@ namespace IR {
     }
     if (node.op == "index") {
       std::vector<long> dims = get_node_dims(node, fn);
+      std::string base_name = get_base_var_name(node);
+      std::string local_key = fn.name + "$" + base_name;
       if (!dims.empty()) {
-        std::string base_name = get_base_var_name(node);
-        std::string local_key = fn.name + "$" + base_name;
         int base_size = 8;
         if (local_array_base_sizes.count(local_key)) {
           base_size = local_array_base_sizes[local_key];
@@ -130,6 +158,12 @@ namespace IR {
       if (node.value > 0 && node.value < 8) {
         fn.code.push_back({"cast", "", node.value});
       }
+      return;
+    }
+    if (node.op == "bool_cast") {
+      lower_expr(*node.lhs, fn);
+      fn.code.push_back({"const", "", 0});
+      fn.code.push_back({"!=", "", 0});
       return;
     }
     if (node.op == "prefix_++" || node.op == "prefix_--") {
@@ -188,6 +222,8 @@ namespace IR {
     if (node.op == "var") {
       if (fn.locals.count(node.name)) {
         fn.code.push_back({"load", "", fn.locals[node.name]});
+      } else if (global_struct_vars.count(node.name)) {
+        fn.code.push_back({"gaddr", node.name, 0});
       } else if (global_vars.count(node.name)) {
         fn.code.push_back({"gload", node.name, 0});
       } else if (global_arrays.count(node.name)) {
@@ -265,6 +301,14 @@ namespace IR {
       lower_expr(*node.lhs, fn);
       fn.code.push_back({"const", "", 0});
       int scale = get_expr_pointer_scale(*node.lhs, fn);
+      if (scale == 0 && node.lhs->op == "index") {
+        std::string base_name = get_base_var_name(*node.lhs);
+        std::string local_key = fn.name + "$" + base_name;
+        if (local_var_is_pointer.count(local_key) && local_var_is_pointer[local_key])
+          scale = local_var_elem_scales[local_key];
+        else if (global_var_is_pointer.count(base_name) && global_var_is_pointer[base_name])
+          scale = global_var_elem_scales[base_name];
+      }
       if (scale == 0) scale = current_target_scale;
       fn.code.push_back({"index", "", static_cast<long>(scale)});
       return;
@@ -274,18 +318,22 @@ namespace IR {
       return;
     }
     if (node.op == "index") {
-      lower_expr(*node.lhs, fn);
       // Check for struct byte_offset access: rhs is a literal byte offset, no scaling needed
       if (node.name == "byte_offset") {
+        lower_addr(*node.lhs, fn, current_target_scale);
         // rhs is the byte offset literal
         lower_expr(*node.rhs, fn);
         fn.code.push_back({"+", "", 0});
+        if (!node.array_dims.empty()) {
+          return;
+        }
         // node.value holds the field byte size
         int field_sz = (node.value > 0) ? (int)node.value : current_target_scale;
         fn.code.push_back({"const", "", 0});
         fn.code.push_back({"index", "", static_cast<long>(field_sz)});
         return;
       }
+      lower_expr(*node.lhs, fn);
       lower_expr(*node.rhs, fn);
       std::vector<long> parent_dims = get_node_dims(*node.lhs, fn);
       long mult = 1;
@@ -301,7 +349,9 @@ namespace IR {
       std::string base_name = get_base_var_name(node);
       std::string local_key = fn.name + "$" + base_name;
       int base_size = current_target_scale;
-      if (local_array_base_sizes.count(local_key)) {
+      if (node.lhs && node.lhs->elem_size > 0) {
+        base_size = node.lhs->elem_size;
+      } else if (local_array_base_sizes.count(local_key)) {
         base_size = local_array_base_sizes[local_key];
       } else if (global_array_base_sizes.count(base_name)) {
         base_size = global_array_base_sizes[base_name];
@@ -356,7 +406,11 @@ namespace IR {
     }
     lower_expr(*node.lhs, fn);
     lower_expr(*node.rhs, fn);
-    fn.code.push_back({node.op, "", 0});
+    std::string op = node.op;
+    if (node.is_unsigned && (op == "<" || op == ">" || op == "<=" || op == ">=" || op == ">>")) {
+      op = "u" + op;
+    }
+    fn.code.push_back({op, "", 0});
   }
 
   static void collect_cases(const Node &node, std::vector<std::pair<long, std::string>> &cases, std::string &default_label, IrFunction &fn) {
@@ -389,12 +443,13 @@ namespace IR {
       return;
     }
     if (node.op == "index") {
-      lower_expr(*node.lhs, fn);
       // Struct byte_offset: rhs is a literal byte offset, add directly without scaling
       if (node.name == "byte_offset") {
+        lower_addr(*node.lhs, fn, target_scale);
         lower_expr(*node.rhs, fn);
         fn.code.push_back({"+", "", 0});
       } else {
+        lower_expr(*node.lhs, fn);
         lower_expr(*node.rhs, fn);
         std::vector<long> parent_dims = get_node_dims(*node.lhs, fn);
         long mult = 1;
@@ -410,7 +465,9 @@ namespace IR {
         std::string base_name = get_base_var_name(node);
         std::string local_key = fn.name + "$" + base_name;
         int base_size = target_scale;
-        if (local_array_base_sizes.count(local_key)) {
+        if (node.lhs && node.lhs->elem_size > 0) {
+          base_size = node.lhs->elem_size;
+        } else if (local_array_base_sizes.count(local_key)) {
           base_size = local_array_base_sizes[local_key];
         } else if (global_array_base_sizes.count(base_name)) {
           base_size = global_array_base_sizes[base_name];
@@ -424,7 +481,12 @@ namespace IR {
       }
     } else if (node.op == "var") {
       if (fn.locals.count(node.name)) {
-        fn.code.push_back({"addr", "", fn.locals[node.name]});
+        std::string local_key = fn.name + "$" + node.name;
+        if (local_array_dims.count(local_key)) {
+          fn.code.push_back({"load", "", fn.locals[node.name]});
+        } else {
+          fn.code.push_back({"addr", "", fn.locals[node.name]});
+        }
       } else if (global_vars.count(node.name) || global_arrays.count(node.name)) {
         fn.code.push_back({"gaddr", node.name, 0});
       } else {
@@ -456,6 +518,11 @@ namespace IR {
         Diagnostics::error(stmt.line, stmt.col, "unknown variable " + stmt.name);
       }
     } else if (stmt.op == "return") {
+      if (current_func_ret_aggregate_size > 0) {
+        lower_addr(*stmt.lhs, fn, target_scale);
+        fn.code.push_back({"ret_agg", "", current_func_ret_aggregate_size});
+        return;
+      }
       lower_expr(*stmt.lhs, fn);
       if (current_func_ret_size > 0 && current_func_ret_size < 8) {
         fn.code.push_back({"cast", "", current_func_ret_size});
@@ -568,16 +635,37 @@ namespace IR {
       fn.code.push_back({"addr", "", buf_start_slot + static_cast<int>(num_slots - 1)});
       fn.code.push_back({"store", "", base_slot});
       for (size_t i = 0; i < stmt.body.size(); ++i) {
-        lower_expr(*stmt.body[i], fn);
-        fn.code.push_back({"const", "", static_cast<long>(i)});
-        fn.code.push_back({"load", "", base_slot});
-        fn.code.push_back({"store_index", "", static_cast<long>(base_size)});
+        if (stmt.body[i]->op == "init_item") {
+          int size = std::stoi(stmt.body[i]->name);
+          long offset = stmt.body[i]->value;
+          lower_expr(*stmt.body[i]->lhs, fn);
+          if (size > target_scale) {
+            fn.code.push_back({"load", "", base_slot});
+            fn.code.push_back({"const", "", offset});
+            fn.code.push_back({"+", "", 0});
+            fn.code.push_back({"store_agg", "", static_cast<long>(size)});
+          } else {
+            fn.code.push_back({"const", "", 0});
+            fn.code.push_back({"load", "", base_slot});
+            fn.code.push_back({"const", "", offset});
+            fn.code.push_back({"+", "", 0});
+            fn.code.push_back({"store_index", "", static_cast<long>(size)});
+          }
+        } else {
+          lower_expr(*stmt.body[i], fn);
+          fn.code.push_back({"const", "", static_cast<long>(i)});
+          fn.code.push_back({"load", "", base_slot});
+          fn.code.push_back({"store_index", "", static_cast<long>(base_size)});
+        }
       }
     } else if (stmt.op == "store_index") {
       lower_expr(*stmt.rhs, fn);
       fn.code.push_back({"const", "", 0});
       lower_addr(*stmt.lhs, fn, target_scale);
       int scale = get_expr_pointer_scale(*stmt.lhs, fn);
+      if (stmt.lhs->op == "index" && stmt.lhs->name == "byte_offset" && stmt.lhs->elem_size > 0) {
+        scale = stmt.lhs->elem_size;
+      }
       if (scale == 0) {
         if (stmt.lhs->op == "index" || stmt.lhs->op == "unary_*") {
           scale = get_expr_pointer_scale(*stmt.lhs->lhs, fn);
@@ -592,10 +680,13 @@ namespace IR {
 
   static IrFunction lower_func(const Node &ast, int target_scale) {
     current_func_ret_size = (int)ast.value;
+    current_func_ret_aggregate_size = ast.aggregate_size;
     IrFunction fn;
     fn.name = ast.name;
     fn.params = ast.params;
+    fn.param_aggregate_sizes = ast.param_aggregate_sizes;
     fn.is_static = ast.is_static;
+    fn.return_aggregate_size = ast.aggregate_size;
     for (const std::string &param : fn.params) {
       if (fn.locals.count(param))
         Diagnostics::error(ast.line, ast.col, "duplicate parameter " + param);
@@ -609,6 +700,10 @@ namespace IR {
     std::vector<IrFunction> out;
     int target_scale = (target == "i386-b1nix" || target == "x86-b1nix") ? 4 : 8;
     current_target_scale = target_scale;
+    for (const auto &func : ast) {
+      function_return_aggregate_sizes[func->name] = func->aggregate_size;
+      function_param_aggregate_sizes[func->name] = func->param_aggregate_sizes;
+    }
     for (const auto &func : ast)
       out.push_back(lower_func(*func, target_scale));
     return out;

@@ -16,13 +16,16 @@ namespace Backend {
         if (!g.is_static) {
           out << ".globl " << g.name << "\n";
         }
-        int i386_align = (g.elem_size >= 4) ? 2 : (g.elem_size == 2) ? 1 : 0;
+        int i386_align = g.align;
+        if (i386_align == 0) {
+          i386_align = (g.elem_size >= 4) ? 2 : (g.elem_size == 2) ? 1 : 0;
+        }
         out << ".type " << g.name << ", @object\n";
-        long total_bytes = g.is_array ? (g.size * g.elem_size) : g.elem_size;
+        long total_bytes = g.is_array ? (g.size * g.elem_size) : (g.initializers.empty() ? 1 : g.initializers.size()) * g.elem_size;
         out << ".size " << g.name << ", " << total_bytes << "\n";
         out << ".p2align " << i386_align << "\n";
         out << g.name << ":\n";
-        if (g.is_array) {
+        if (g.is_array || g.initializers.size() > 1) {
           for (long val : g.initializers) {
             if (g.elem_size == 1)
               out << "    .byte " << (val & 0xff) << "\n";
@@ -95,6 +98,8 @@ namespace Backend {
         } else if (inst.op == "+" || inst.op == "-" || inst.op == "*" ||
                    inst.op == "/" || inst.op == "%" || inst.op == "==" || inst.op == "!=" ||
                    inst.op == "<" || inst.op == ">" || inst.op == "<=" ||
+                   inst.op == "u<" || inst.op == "u>" || inst.op == "u<=" ||
+                   inst.op == "u>=" || inst.op == "u>>" ||
                    inst.op == ">=" || inst.op == "index" ||
                    inst.op == "&" || inst.op == "|" || inst.op == "^" ||
                    inst.op == "<<" || inst.op == ">>") {
@@ -129,11 +134,13 @@ namespace Backend {
             out << "    orl %ecx, %eax\n";
           else if (inst.op == "^")
             out << "    xorl %ecx, %eax\n";
-          else if (inst.op == "<<" || inst.op == ">>") {
+          else if (inst.op == "<<" || inst.op == ">>" || inst.op == "u>>") {
             if (inst.op == "<<")
               out << "    shll %cl, %eax\n";
-            else
+            else if (inst.op == ">>")
               out << "    sarl %cl, %eax\n";
+            else
+              out << "    shrl %cl, %eax\n";
           } else {
             out << "    cmpl %ecx, %eax\n";
             if (inst.op == "==")
@@ -146,8 +153,16 @@ namespace Backend {
               out << "    setg %al\n";
             else if (inst.op == "<=")
               out << "    setle %al\n";
-            else
+            else if (inst.op == ">=")
               out << "    setge %al\n";
+            else if (inst.op == "u<")
+              out << "    setb %al\n";
+            else if (inst.op == "u>")
+              out << "    seta %al\n";
+            else if (inst.op == "u<=")
+              out << "    setbe %al\n";
+            else
+              out << "    setae %al\n";
             out << "    movzbl %al, %eax\n";
           }
           out << "    pushl %eax\n";

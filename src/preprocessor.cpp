@@ -1,5 +1,6 @@
 #include "preprocessor.h"
 #include "diagnostics.h"
+#include "lexer.h"
 #include <sstream>
 #include <fstream>
 #include <cctype>
@@ -169,6 +170,13 @@ namespace Preprocessor {
       }
       std::string replacement = macros.count(name) ? "1" : "0";
       s.replace(pos, i - pos, replacement);
+    }
+
+    auto expanded = Lexer::lex(s, macros);
+    s.clear();
+    for (const auto &tok : expanded) {
+      if (tok.text != "EOF")
+        s += tok.text + " ";
     }
 
     std::string res;

@@ -20,9 +20,27 @@ namespace Parser {
     return name;
   }
 
+  std::string Parser::infer_struct_tag(const AST::Node &node) const {
+    if (node.op == "var") {
+      auto it = var_struct_tags_.find(node.name);
+      return it == var_struct_tags_.end() ? "" : it->second;
+    }
+    if (node.op == "index" && !node.type_tag.empty()) {
+      return node.type_tag;
+    }
+    if (node.op == "unary_*" && node.lhs) {
+      return infer_struct_tag(*node.lhs);
+    }
+    return "";
+  }
+
   std::vector<std::unique_ptr<Node>> Parser::parse() {
     local_var_counter_ = 0;
     scopes_.clear();
+    unsigned_vars_.clear();
+    bool_vars_.clear();
+    value_sizes_.clear();
+    var_struct_tags_.clear();
     std::vector<std::unique_ptr<Node>> funcs;
     while (peek() != "EOF") {
       bool is_static = false;
@@ -62,12 +80,13 @@ namespace Parser {
     size_t p = pos_;
     while (p < tokens_.size()) {
       std::string t = tokens_[p].text;
-      if (t == "const" || t == "volatile" || t == "inline" || t == "__inline" || t == "__inline__" || t == "register") {
+      if (t == "const" || t == "volatile" || t == "restrict" || t == "__restrict" || t == "__restrict__" ||
+          t == "inline" || t == "__inline" || t == "__inline__" || t == "register") {
         p++;
       } else if (t == "struct" || t == "enum") {
         p++;
         if (p < tokens_.size()) p++;
-      } else if (t == "int" || t == "char" || t == "short" || t == "long" || t == "void" || t == "unsigned" || t == "signed" || t == "float" || t == "double" || global_typedefs.count(t)) {
+      } else if (t == "int" || t == "char" || t == "short" || t == "long" || t == "void" || t == "unsigned" || t == "signed" || t == "_Bool" || t == "float" || t == "double" || global_typedefs.count(t)) {
         p++;
       } else if (t == "*") {
         p++;
@@ -83,9 +102,11 @@ namespace Parser {
   }
 
   void Parser::skip_attribute() {
-    while (peek() == "__attribute__" || peek() == "__attribute") {
-      take();
-      if (peek() == "(") {
+    while (peek() == "__attribute__" || peek() == "__attribute" ||
+           peek() == "const" || peek() == "volatile" || peek() == "restrict" ||
+           peek() == "__restrict" || peek() == "__restrict__") {
+      std::string attr = take();
+      if ((attr == "__attribute__" || attr == "__attribute") && peek() == "(") {
         take("(");
         int depth = 1;
         while (depth > 0 && pos_ < tokens_.size()) {
@@ -100,7 +121,9 @@ namespace Parser {
   int Parser::parse_base_type() {
     skip_attribute();
     int base_size = target_scale_;
-    while (peek() == "const" || peek() == "volatile" || peek() == "register" || peek() == "__attribute__" || peek() == "__attribute") {
+    last_type_unsigned_ = false;
+    last_type_bool_ = false;
+    while (peek() == "const" || peek() == "volatile" || peek() == "restrict" || peek() == "__restrict" || peek() == "__restrict__" || peek() == "register" || peek() == "__attribute__" || peek() == "__attribute") {
       if (peek() == "__attribute__" || peek() == "__attribute") {
         skip_attribute();
       } else {
@@ -108,8 +131,9 @@ namespace Parser {
       }
     }
     if (peek() == "unsigned" || peek() == "signed") {
+      last_type_unsigned_ = (peek() == "unsigned");
       take();
-      while (peek() == "const" || peek() == "volatile" || peek() == "register" || peek() == "__attribute__" || peek() == "__attribute") {
+      while (peek() == "const" || peek() == "volatile" || peek() == "restrict" || peek() == "__restrict" || peek() == "__restrict__" || peek() == "register" || peek() == "__attribute__" || peek() == "__attribute") {
         if (peek() == "__attribute__" || peek() == "__attribute") {
           skip_attribute();
         } else {
@@ -117,14 +141,14 @@ namespace Parser {
         }
       }
       if (peek() != "struct" && peek() != "enum" &&
-          (peek() == "char" || peek() == "int" || peek() == "long" || peek() == "short" || peek() == "void" ||
+          (peek() == "char" || peek() == "int" || peek() == "long" || peek() == "short" || peek() == "void" || peek() == "_Bool" ||
            peek() == "float" || peek() == "double" || global_typedefs.count(peek()))) {
         // continue to parse the actual base type below
       } else {
         return target_scale_;
       }
     }
-    while (peek() == "const" || peek() == "volatile" || peek() == "register" || peek() == "__attribute__" || peek() == "__attribute") {
+    while (peek() == "const" || peek() == "volatile" || peek() == "restrict" || peek() == "__restrict" || peek() == "__restrict__" || peek() == "register" || peek() == "__attribute__" || peek() == "__attribute") {
       if (peek() == "__attribute__" || peek() == "__attribute") {
         skip_attribute();
       } else {
@@ -144,6 +168,12 @@ namespace Parser {
         int union_max_size = 0;
         std::map<std::string, int> fields;
         while (peek() != "}") {
+          std::string f_tag = "";
+          if (peek() == "struct" || peek() == "union") {
+            if (pos_ + 1 < tokens_.size() && tokens_[pos_ + 1].text != "{") {
+              f_tag = tokens_[pos_ + 1].text;
+            }
+          }
           int field_base_size = parse_base_type();
           while (true) {
             int stars = 0;
@@ -154,13 +184,17 @@ namespace Parser {
             int field_size = (stars > 0) ? target_scale_ : field_base_size;
             std::string field_name = take();
             long arr_count = 1;
+            std::vector<long> field_dims;
             if (peek() == "[") {
               while (peek() == "[") {
                 take("[");
+                long dim = 0;
                 if (peek() != "]") {
-                  arr_count *= eval_const(*expr());
+                  dim = eval_const(*expr());
+                  arr_count *= dim;
                 }
                 take("]");
+                field_dims.push_back(dim);
               }
             }
             // Align field offset to field_size boundary (but max 8)
@@ -169,10 +203,20 @@ namespace Parser {
             if (!is_union && align > 1 && (offset % align) != 0) {
               offset += align - (offset % align);
             }
+            if (!tag.empty() && !f_tag.empty() && stars == 0) {
+              global_struct_field_tags[tag + "." + field_name] = f_tag;
+            }
             fields[field_name] = offset;
             global_field_offsets[field_name] = offset;
             global_field_sizes[field_name] = field_size;
             int this_field_total = (int)(field_size * arr_count);
+            if (!tag.empty()) {
+              std::string key = tag + "." + field_name;
+              global_struct_field_offsets_by_tag[key] = offset;
+              global_struct_field_sizes_by_tag[key] = field_size;
+              global_struct_field_total_sizes_by_tag[key] = this_field_total;
+              global_struct_field_dims_by_tag[key] = field_dims;
+            }
             if (is_union) {
               if (this_field_total > union_max_size) union_max_size = this_field_total;
             } else {
@@ -239,6 +283,9 @@ namespace Parser {
       std::string t = take();
       if (t == "char") {
         base_size = 1;
+      } else if (t == "_Bool") {
+        base_size = 1;
+        last_type_bool_ = true;
       } else if (t == "short") {
         base_size = 2;
       } else if (t == "int") {
@@ -265,7 +312,15 @@ namespace Parser {
   }
 
   void Parser::global_decl(bool is_static, bool is_extern) {
+    std::string struct_tag = "";
+    if (peek() == "struct" || peek() == "union") {
+      if (pos_ + 1 < tokens_.size() && tokens_[pos_ + 1].text != "{") {
+        struct_tag = tokens_[pos_ + 1].text;
+      }
+    }
     int base_size = parse_base_type();
+    bool type_unsigned = last_type_unsigned_;
+    bool type_bool = last_type_bool_;
     if (peek() == ";") {
       take(";");
       return;
@@ -310,8 +365,8 @@ namespace Parser {
         elem_scale = target_scale_;
       }
 
+      std::vector<long> dims;
       if (peek() == "[") {
-        std::vector<long> dims;
         while (peek() == "[") {
           take("[");
           long dim_size = 0;
@@ -321,45 +376,113 @@ namespace Parser {
           take("]");
           dims.push_back(dim_size);
         }
-        long total_size = 1;
-        for (long d : dims) total_size *= d;
+      }
 
-        std::vector<long> inits;
-        if (peek() == "=") {
-          take("=");
-          take("{");
-          while (true) {
-            inits.push_back(eval_const(*expr()));
-            if (peek() == ",")
-              take(",");
-            else
-              break;
-          }
-          take("}");
+      long total_size = 1;
+      for (long d : dims) total_size *= d;
+      if (stars > 0) {
+        base_size = target_scale_;
+      }
+      long total_byte_size = total_size * base_size;
+
+      std::vector<InitElement> parsed_inits;
+      if (peek() == "=") {
+        take("=");
+        if (peek() == "{") {
+          parse_aggregate_init(0, struct_tag, dims, 0, base_size, parsed_inits);
+        } else {
+          auto init = expr();
+          if (type_bool && stars == 0) init = bool_normalize(std::move(init));
+          parsed_inits.push_back({0, std::move(init), base_size});
         }
-        if (total_size == 0) total_size = inits.size();
+      }
+
+      if (!dims.empty()) {
+        std::vector<long> inits;
         int elem_size = (stars > 0) ? target_scale_ : base_size;
+        int align_val = (elem_size >= 8) ? 3 : (elem_size == 4) ? 2 : (elem_size == 2) ? 1 : 0;
+        if (!parsed_inits.empty()) {
+          if (stars > 0 || (struct_tag.empty() && dims.size() == 1)) {
+            for (auto &item : parsed_inits) {
+              inits.push_back(eval_const(*item.val));
+            }
+            if (total_size == 0) total_size = inits.size();
+          } else {
+            if (total_size == 0) {
+              long max_offset = 0;
+              for (const auto &item : parsed_inits) {
+                if (item.offset + item.size > max_offset) {
+                  max_offset = item.offset + item.size;
+                }
+              }
+              total_byte_size = max_offset;
+              total_size = (total_byte_size + base_size - 1) / base_size;
+            }
+            std::vector<long> byte_buf(total_byte_size, 0);
+            for (const auto &item : parsed_inits) {
+              long val = eval_const(*item.val);
+              for (int b = 0; b < item.size; ++b) {
+                if (item.offset + b < total_byte_size) {
+                  byte_buf[item.offset + b] = (val >> (b * 8)) & 0xff;
+                }
+              }
+            }
+            inits = byte_buf;
+            elem_size = 1;
+          }
+        }
+        if (total_size == 0) total_size = 1;
         if (!is_extern) {
-          IR::IrGlobalVar g = {name, true, total_size, inits, is_static, elem_size};
+          IR::IrGlobalVar g = {name, true, total_size, inits, is_static, elem_size, align_val};
           IR::global_decls.push_back(g);
         }
         IR::global_arrays.insert(name);
         IR::global_array_dims[name] = dims;
         IR::global_array_base_sizes[name] = base_size;
+        IR::global_var_is_pointer[name] = stars > 0;
+        IR::global_var_elem_scales[name] = elem_scale;
+        if (!struct_tag.empty()) {
+          var_struct_tags_[name] = struct_tag;
+        }
+        bool_vars_[name] = type_bool && stars == 0;
+        value_sizes_[name] = total_size * base_size;
       } else {
         std::vector<long> inits;
-        if (peek() == "=") {
-          take("=");
-          inits.push_back(eval_const(*expr()));
-        }
         int elem_size = (stars > 0) ? target_scale_ : base_size;
+        int align_val = (elem_size >= 8) ? 3 : (elem_size == 4) ? 2 : (elem_size == 2) ? 1 : 0;
+        if (!parsed_inits.empty()) {
+          if (stars > 0 || struct_tag.empty()) {
+            inits.push_back(eval_const(*parsed_inits[0].val));
+          } else {
+            std::vector<long> byte_buf(total_byte_size, 0);
+            for (const auto &item : parsed_inits) {
+              long val = eval_const(*item.val);
+              for (int b = 0; b < item.size; ++b) {
+                if (item.offset + b < total_byte_size) {
+                  byte_buf[item.offset + b] = (val >> (b * 8)) & 0xff;
+                }
+              }
+            }
+            inits = byte_buf;
+            elem_size = 1;
+          }
+        }
         if (!is_extern) {
-          IR::IrGlobalVar g = {name, false, 1, inits, is_static, elem_size};
+          IR::IrGlobalVar g = {name, false, 1, inits, is_static, elem_size, align_val};
           IR::global_decls.push_back(g);
         }
         IR::global_vars.insert(name);
+        if (!struct_tag.empty() && stars == 0) {
+          IR::global_struct_vars.insert(name);
+        }
+        if (!struct_tag.empty()) {
+          var_struct_tags_[name] = struct_tag;
+        }
         IR::global_var_is_pointer[name] = is_pointer;
         IR::global_var_elem_scales[name] = elem_scale;
+        unsigned_vars_[name] = type_unsigned && !is_pointer;
+        bool_vars_[name] = type_bool && !is_pointer;
+        value_sizes_[name] = is_pointer ? target_scale_ : base_size;
       }
       skip_attribute();
       if (peek() == ",") {
@@ -371,8 +494,164 @@ namespace Parser {
     take(";");
   }
 
+  void Parser::parse_aggregate_init(long base_offset, const std::string &struct_tag, const std::vector<long> &array_dims, size_t dim_idx, int base_type_size, std::vector<InitElement> &inits) {
+    parse_aggregate_init_internal(base_offset, struct_tag, array_dims, dim_idx, base_type_size, inits, true);
+  }
+
+  void Parser::parse_aggregate_init_internal(long base_offset, const std::string &struct_tag, const std::vector<long> &array_dims, size_t dim_idx, int base_type_size, std::vector<InitElement> &inits, bool has_braces) {
+    if (has_braces) {
+      take("{");
+    }
+    struct FieldInfo {
+      std::string name;
+      long offset;
+      int size;
+      std::string tag;
+      std::vector<long> dims;
+    };
+    std::vector<FieldInfo> struct_fields;
+    if (!struct_tag.empty() && global_structs.count(struct_tag)) {
+      for (const auto &pair : global_structs[struct_tag]) {
+        std::string key = struct_tag + "." + pair.first;
+        int sz = global_struct_field_sizes_by_tag.count(key) ? global_struct_field_sizes_by_tag[key] :
+                 (global_field_sizes.count(pair.first) ? global_field_sizes[pair.first] : target_scale_);
+        std::string field_tag = global_struct_field_tags.count(key) ? global_struct_field_tags[key] : "";
+        std::vector<long> field_dims = global_struct_field_dims_by_tag.count(key) ? global_struct_field_dims_by_tag[key] : std::vector<long>{};
+        struct_fields.push_back({pair.first, (long)pair.second, sz, field_tag, field_dims});
+      }
+      std::sort(struct_fields.begin(), struct_fields.end(), [](const FieldInfo &a, const FieldInfo &b) {
+        return a.offset < b.offset;
+      });
+    }
+
+    long elem_size = base_type_size;
+    if (!array_dims.empty() && dim_idx + 1 < array_dims.size()) {
+      long sub_array_elems = 1;
+      for (size_t d = dim_idx + 1; d < array_dims.size(); ++d) {
+        sub_array_elems *= array_dims[d];
+      }
+      elem_size = sub_array_elems * base_type_size;
+    }
+
+    size_t field_idx = 0;
+    long array_idx = 0;
+
+    while (true) {
+      if (peek() == "}") {
+        break;
+      }
+      if (!has_braces) {
+        if (!struct_fields.empty() && field_idx >= struct_fields.size()) {
+          break;
+        }
+        if (!array_dims.empty() && array_idx >= array_dims[dim_idx]) {
+          break;
+        }
+      }
+
+      long item_offset = 0;
+      int item_size = 0;
+      std::string item_struct_tag = "";
+      std::vector<long> item_array_dims;
+      size_t item_dim_idx = 0;
+      int item_base_size = base_type_size;
+
+      if (peek() == ".") {
+        take(".");
+        std::string field_name = take();
+        take("=");
+        bool found = false;
+        for (size_t idx = 0; idx < struct_fields.size(); ++idx) {
+          if (struct_fields[idx].name == field_name) {
+            item_offset = struct_fields[idx].offset;
+            item_size = struct_fields[idx].size;
+            item_struct_tag = struct_fields[idx].tag;
+            item_array_dims = struct_fields[idx].dims;
+            item_base_size = item_size;
+            field_idx = idx + 1;
+            found = true;
+            break;
+          }
+        }
+        if (!found) error("struct " + struct_tag + " has no field " + field_name);
+      } else if (peek() == "[") {
+        take("[");
+        long idx_val = std::strtol(take().c_str(), nullptr, 0);
+        take("]");
+        take("=");
+        item_offset = idx_val * elem_size;
+        item_size = (int)elem_size;
+        array_idx = idx_val + 1;
+        if (!array_dims.empty() && dim_idx + 1 < array_dims.size()) {
+          item_array_dims = array_dims;
+          item_dim_idx = dim_idx + 1;
+          item_struct_tag = "";
+          item_base_size = base_type_size;
+        } else {
+          item_struct_tag = struct_tag;
+          item_base_size = base_type_size;
+        }
+      } else {
+        if (!struct_fields.empty()) {
+          if (field_idx >= struct_fields.size()) {
+            error("excess initializers for struct " + struct_tag);
+          }
+          item_offset = struct_fields[field_idx].offset;
+          item_size = struct_fields[field_idx].size;
+          item_struct_tag = struct_fields[field_idx].tag;
+          item_array_dims = struct_fields[field_idx].dims;
+          item_base_size = item_size;
+          field_idx++;
+        } else if (!array_dims.empty()) {
+          item_offset = array_idx * elem_size;
+          item_size = (int)elem_size;
+          array_idx++;
+          if (dim_idx + 1 < array_dims.size()) {
+            item_array_dims = array_dims;
+            item_dim_idx = dim_idx + 1;
+            item_struct_tag = "";
+            item_base_size = base_type_size;
+          } else {
+            item_struct_tag = struct_tag;
+            item_base_size = base_type_size;
+          }
+        } else {
+          error("excess initializers for primitive type");
+        }
+      }
+
+      if (peek() == "{") {
+        parse_aggregate_init_internal(base_offset + item_offset, item_struct_tag, item_array_dims, item_dim_idx, item_base_size, inits, true);
+      } else if (!item_array_dims.empty() && item_dim_idx < item_array_dims.size()) {
+        parse_aggregate_init_internal(base_offset + item_offset, item_struct_tag, item_array_dims, item_dim_idx, item_base_size, inits, false);
+      } else if (!item_struct_tag.empty() && global_structs.count(item_struct_tag)) {
+        parse_aggregate_init_internal(base_offset + item_offset, item_struct_tag, item_array_dims, item_dim_idx, item_base_size, inits, false);
+      } else {
+        inits.push_back({base_offset + item_offset, expr(), item_size});
+      }
+
+      if (peek() == ",") {
+        if (!has_braces) {
+          if (!struct_fields.empty() && field_idx >= struct_fields.size()) {
+            break;
+          }
+          if (!array_dims.empty() && array_idx >= array_dims[dim_idx]) {
+            break;
+          }
+        }
+        take(",");
+      } else {
+        break;
+      }
+    }
+    if (has_braces) {
+      take("}");
+    }
+  }
+
   long Parser::eval_const(const Node &node) {
     if (node.op == "num") return node.value;
+    if (node.op == "bool_cast") return eval_const(*node.lhs) != 0;
     if (node.op == "cast") return eval_const(*node.lhs);
     if (node.op == "unary_-") return -eval_const(*node.lhs);
     if (node.op == "unary_~") return ~eval_const(*node.lhs);
@@ -398,6 +677,63 @@ namespace Parser {
     if (node.op == ">=") return eval_const(*node.lhs) >= eval_const(*node.rhs);
     Diagnostics::error(node.line, node.col, "compile-time constant expression required");
     return 0;
+  }
+
+  long Parser::sizeof_expr(const Node &node) const {
+    if (node.op == "num") return 4;
+    if (node.op == "str") return target_scale_;
+    if (node.op == "cast") return node.value > 0 ? node.value : target_scale_;
+    if (node.op == "var") {
+      auto it = value_sizes_.find(node.name);
+      if (it != value_sizes_.end()) return it->second;
+      return target_scale_;
+    }
+    if (node.op == "unary_&") return target_scale_;
+    if (node.op == "unary_*") {
+      int scale = target_scale_;
+      if (node.lhs) {
+        std::string base;
+        const Node *cur = node.lhs.get();
+        while (cur && cur->op == "index") cur = cur->lhs.get();
+        if (cur && cur->op == "var") base = cur->name;
+        std::string local_key = current_func_name_ + "$" + base;
+        if (IR::local_var_elem_scales.count(local_key))
+          scale = IR::local_var_elem_scales[local_key];
+        else if (IR::global_var_elem_scales.count(base))
+          scale = IR::global_var_elem_scales[base];
+      }
+      return scale;
+    }
+    if (node.op == "index") {
+      if (node.name == "byte_offset")
+        return node.value > 0 ? node.value : target_scale_;
+      std::string base;
+      const Node *cur = &node;
+      int index_count = 0;
+      while (cur && cur->op == "index") {
+        index_count++;
+        cur = cur->lhs.get();
+      }
+      if (cur && cur->op == "var") base = cur->name;
+      std::string local_key = current_func_name_ + "$" + base;
+      std::vector<long> dims;
+      int base_size = target_scale_;
+      if (IR::local_array_dims.count(local_key)) {
+        dims = IR::local_array_dims[local_key];
+        base_size = IR::local_array_base_sizes[local_key];
+      } else if (IR::global_array_dims.count(base)) {
+        dims = IR::global_array_dims[base];
+        base_size = IR::global_array_base_sizes[base];
+      }
+      if (index_count < (int)dims.size()) {
+        long total = base_size;
+        for (size_t i = index_count; i < dims.size(); ++i)
+          total *= dims[i];
+        return total;
+      }
+      return base_size;
+    }
+    return target_scale_;
   }
 
   void Parser::error(const std::string &msg) {
@@ -445,9 +781,44 @@ namespace Parser {
     return node;
   }
 
+  void Parser::apply_integer_conversion(AST::Node &node) {
+    if (!node.lhs || !node.rhs) return;
+    auto promoted_size = [](const AST::Node &n) {
+      return n.type_size < 4 ? 4 : n.type_size;
+    };
+    auto promoted_unsigned = [](const AST::Node &n) {
+      return n.type_size >= 4 && n.is_unsigned;
+    };
+    int lhs_size = promoted_size(*node.lhs);
+    int rhs_size = promoted_size(*node.rhs);
+    bool lhs_unsigned = promoted_unsigned(*node.lhs);
+    bool rhs_unsigned = promoted_unsigned(*node.rhs);
+
+    int result_size = lhs_size > rhs_size ? lhs_size : rhs_size;
+    bool result_unsigned = false;
+    if (lhs_size == rhs_size) {
+      result_unsigned = lhs_unsigned || rhs_unsigned;
+    } else if (lhs_size > rhs_size) {
+      result_unsigned = lhs_unsigned;
+    } else {
+      result_unsigned = rhs_unsigned;
+    }
+    node.type_size = result_size;
+    node.is_unsigned = result_unsigned;
+  }
+
+  std::unique_ptr<AST::Node> Parser::bool_normalize(std::unique_ptr<AST::Node> node) {
+    auto out = create_node("bool_cast", node->line, node->col);
+    out->lhs = std::move(node);
+    out->type_size = 1;
+    out->is_bool = true;
+    return out;
+  }
+
   std::unique_ptr<Node> Parser::function(bool is_static) {
     int line = tokens_[pos_].line;
     int col = tokens_[pos_].col;
+    bool ret_is_struct = (peek() == "struct" || peek() == "union");
     int ret_base = parse_base_type();
     int ret_stars = 0;
     while (peek() == "*") {
@@ -456,10 +827,12 @@ namespace Parser {
     }
     skip_attribute();
     int ret_size = (ret_stars > 0) ? target_scale_ : ret_base;
+    int ret_aggregate_size = (ret_stars == 0 && ret_is_struct) ? ret_base : 0;
 
     auto node = create_node("func", line, col);
     node->name = take();
     node->value = ret_size;
+    node->aggregate_size = ret_aggregate_size;
     node->is_static = is_static;
     
     current_func_name_ = node->name;
@@ -467,15 +840,24 @@ namespace Parser {
     scopes_.push_back({});
 
     take("(");
+    bool is_vararg = false;
     if (peek() == "void" && tokens_[pos_ + 1].text == ")") {
       take("void");
     } else if (peek() != ")") {
       while (true) {
         if (peek() == "...") {
           take("...");
+          is_vararg = true;
           break;
         }
+        bool param_is_struct = (peek() == "struct" || peek() == "union");
+        std::string param_struct_tag = "";
+        if (param_is_struct && pos_ + 1 < tokens_.size() && tokens_[pos_ + 1].text != "{") {
+          param_struct_tag = tokens_[pos_ + 1].text;
+        }
         int base_size = parse_base_type();
+        bool param_unsigned = last_type_unsigned_;
+        bool param_bool = last_type_bool_;
         int stars = 0;
         while (peek() == "*") {
           take("*");
@@ -517,9 +899,16 @@ namespace Parser {
         }
         std::string unique_name = name + "$" + std::to_string(local_var_counter_++);
         scopes_.back()[name] = unique_name;
+        unsigned_vars_[unique_name] = param_unsigned && stars == 0 && !array_param;
+        bool_vars_[unique_name] = param_bool && stars == 0 && !array_param;
+        value_sizes_[unique_name] = (stars > 0 || array_param) ? target_scale_ : base_size;
+        if (!param_struct_tag.empty()) {
+          var_struct_tags_[unique_name] = param_struct_tag;
+        }
         node->params.push_back(unique_name);
         
         bool is_pointer = (stars > 0 || array_param);
+        node->param_aggregate_sizes.push_back((!is_pointer && param_is_struct) ? base_size : 0);
         int elem_scale = 1;
         if (stars == 1) {
           elem_scale = base_size;
@@ -539,6 +928,10 @@ namespace Parser {
     skip_attribute();
     if (peek() == ";") {
       take(";");
+      IR::function_return_aggregate_sizes[node->name] = node->aggregate_size;
+      IR::function_param_aggregate_sizes[node->name] = node->param_aggregate_sizes;
+      if (is_vararg)
+        IR::function_vararg_fixed_counts[node->name] = (int)node->params.size();
       current_func_name_ = "";
       current_static_locals_.clear();
       scopes_.pop_back();
@@ -546,6 +939,10 @@ namespace Parser {
     }
     auto block = block_stmt();
     node->body = std::move(block->body);
+    IR::function_return_aggregate_sizes[node->name] = node->aggregate_size;
+    IR::function_param_aggregate_sizes[node->name] = node->param_aggregate_sizes;
+    if (is_vararg)
+      IR::function_vararg_fixed_counts[node->name] = (int)node->params.size();
     
     current_func_name_ = "";
     current_static_locals_.clear();
@@ -619,26 +1016,48 @@ namespace Parser {
       int union_max_sz = 0;
       std::map<std::string, int> fields;
       while (peek() != "}") {
+        std::string f_tag = "";
+        if (peek() == "struct" || peek() == "union") {
+          if (pos_ + 1 < tokens_.size() && tokens_[pos_ + 1].text != "{") {
+            f_tag = tokens_[pos_ + 1].text;
+          }
+        }
         int fbase = parse_base_type();
         int fstars = 0;
         while (peek() == "*") { take("*"); fstars++; }
         int fsize = (fstars > 0) ? target_scale_ : fbase;
         std::string field_name = take();
         long arr_cnt = 1;
+        std::vector<long> field_dims;
         if (peek() == "[") {
           while (peek() == "[") {
             take("[");
-            if (peek() != "]") arr_cnt *= eval_const(*expr());
+            long dim = 0;
+            if (peek() != "]") {
+              dim = eval_const(*expr());
+              arr_cnt *= dim;
+            }
             take("]");
+            field_dims.push_back(dim);
           }
         }
         int align = fsize; if (align > 8) align = 8;
         if (!is_union_local && align > 1 && (offset % align) != 0)
           offset += align - (offset % align);
+        if (!tag.empty() && !f_tag.empty() && fstars == 0) {
+          global_struct_field_tags[tag + "." + field_name] = f_tag;
+        }
         fields[field_name] = offset;
         global_field_offsets[field_name] = offset;
         global_field_sizes[field_name] = fsize;
         int total = (int)(fsize * arr_cnt);
+        if (!tag.empty()) {
+          std::string key = tag + "." + field_name;
+          global_struct_field_offsets_by_tag[key] = offset;
+          global_struct_field_sizes_by_tag[key] = fsize;
+          global_struct_field_total_sizes_by_tag[key] = total;
+          global_struct_field_dims_by_tag[key] = field_dims;
+        }
         if (is_union_local) { if (total > union_max_sz) union_max_sz = total; }
         else offset += total;
         take(";");
@@ -652,48 +1071,21 @@ namespace Parser {
       global_struct_sizes[tag] = struct_byte_size;
       return create_node("block", line, col);
     }
-    if ((peek() == "struct" || peek() == "union") && tokens_[pos_ + 2].text != "{") {
-      take();
-      std::string tag = take();
-      std::string name = take();
-      long struct_byte_size = target_scale_;
-      if (global_struct_sizes.count(tag)) {
-        struct_byte_size = global_struct_sizes[tag];
-      } else if (global_structs.count(tag)) {
-        struct_byte_size = global_structs[tag].size() * target_scale_;
-      }
-      // number of target_scale_ slots needed
-      long struct_slots = (struct_byte_size + target_scale_ - 1) / target_scale_;
-      take(";");
-      if (is_static) {
-        std::string unique_name = current_func_name_ + "$" + name;
-        IR::IrGlobalVar g = {unique_name, true, struct_slots, {}, true};
-        IR::global_decls.push_back(g);
-        IR::global_arrays.insert(unique_name);
-        IR::global_array_dims[unique_name] = {struct_slots};
-        IR::global_array_base_sizes[unique_name] = target_scale_;
-        current_static_locals_[name] = unique_name;
-        return create_node("block", line, col);
-      } else {
-        std::string unique_name = name + "$" + std::to_string(local_var_counter_++);
-        if (scopes_.back().count(name)) {
-          error("redefinition of local " + name);
-        }
-        scopes_.back()[name] = unique_name;
-        auto node = create_node("array_decl", line, col);
-        node->name = unique_name;
-        node->value = struct_slots;
-        IR::local_array_dims[current_func_name_ + "$" + unique_name] = {struct_slots};
-        IR::local_array_base_sizes[current_func_name_ + "$" + unique_name] = target_scale_;
-        return node;
-      }
-    }
+
     if (peek() == "int" || peek() == "char" || peek() == "short" || peek() == "long" ||
-        peek() == "void" || peek() == "unsigned" || peek() == "signed" ||
-        peek() == "const" || peek() == "volatile" || peek() == "register" ||
-        peek() == "float" || peek() == "double" ||
+        peek() == "void" || peek() == "unsigned" || peek() == "signed" || peek() == "_Bool" ||
+        peek() == "const" || peek() == "volatile" || peek() == "restrict" || peek() == "__restrict" || peek() == "__restrict__" || peek() == "register" ||
+        peek() == "float" || peek() == "double" || peek() == "struct" || peek() == "union" ||
         global_typedefs.count(peek())) {
+      std::string struct_tag = "";
+      if (peek() == "struct" || peek() == "union") {
+        if (pos_ + 1 < tokens_.size() && tokens_[pos_ + 1].text != "{") {
+          struct_tag = tokens_[pos_ + 1].text;
+        }
+      }
       int base_size = parse_base_type();
+      bool type_unsigned = last_type_unsigned_;
+      bool type_bool = last_type_bool_;
       if (peek() == ";") {
         take(";");
         return create_node("block", line, col);
@@ -737,42 +1129,74 @@ namespace Parser {
         elem_scale = target_scale_;
       }
 
-      if (peek() == "[") {
+      bool is_aggregate = (peek() == "[" || (!struct_tag.empty() && stars == 0));
+
+      if (is_aggregate) {
         std::vector<long> dims;
-        while (peek() == "[") {
-          take("[");
-          long dim_size = 0;
-          if (peek() != "]") {
-            dim_size = std::stol(take());
+        if (peek() == "[") {
+          while (peek() == "[") {
+            take("[");
+            long dim_size = 0;
+            if (peek() != "]") {
+              dim_size = std::stol(take());
+            }
+            take("]");
+            dims.push_back(dim_size);
           }
-          take("]");
-          dims.push_back(dim_size);
         }
         long total_size = 1;
         for (long d : dims) total_size *= d;
+        
+        long orig_base_size = base_size;
+        if (!struct_tag.empty()) {
+          long struct_slots = (base_size + target_scale_ - 1) / target_scale_;
+          total_size = total_size * struct_slots;
+          base_size = target_scale_;
+          if (dims.empty()) {
+            dims = { struct_slots };
+          } else {
+            dims = { total_size }; 
+          }
+        }
 
         if (is_static) {
           std::string unique_name = current_func_name_ + "$" + name;
-          std::vector<long> inits;
+          std::vector<InitElement> parsed_inits;
           if (peek() == "=") {
             take("=");
-            take("{");
-            while (true) {
-              inits.push_back(eval_const(*expr()));
-              if (peek() == ",")
-                take(",");
-              else
-                break;
+            if (peek() == "{") {
+              parse_aggregate_init(0, struct_tag, dims, 0, orig_base_size, parsed_inits);
+            } else {
+              auto init = expr();
+              if (type_bool && stars == 0) init = bool_normalize(std::move(init));
+              parsed_inits.push_back({0, std::move(init), static_cast<int>(orig_base_size)});
             }
-            take("}");
           }
-          if (total_size == 0) total_size = inits.size();
-          IR::IrGlobalVar g = {unique_name, true, total_size, inits, true};
+          std::vector<long> inits;
+          if (!parsed_inits.empty()) {
+            long total_byte_size = total_size * base_size;
+            std::vector<long> byte_buf(total_byte_size, 0);
+            for (const auto &item : parsed_inits) {
+              long val = eval_const(*item.val);
+              for (int b = 0; b < item.size; ++b) {
+                if (item.offset + b < total_byte_size) {
+                  byte_buf[item.offset + b] = (val >> (b * 8)) & 0xff;
+                }
+              }
+            }
+            inits = byte_buf;
+            base_size = 1; 
+          }
+          IR::IrGlobalVar g = {unique_name, true, total_size, inits, true, (int)base_size};
           IR::global_decls.push_back(g);
           IR::global_arrays.insert(unique_name);
           IR::global_array_dims[unique_name] = dims;
           IR::global_array_base_sizes[unique_name] = base_size;
           current_static_locals_[name] = unique_name;
+          if (!struct_tag.empty()) {
+            var_struct_tags_[unique_name] = struct_tag;
+          }
+          bool_vars_[unique_name] = type_bool && stars == 0;
           take(";");
           return create_node("block", line, col);
         } else {
@@ -781,22 +1205,44 @@ namespace Parser {
             error("redefinition of local " + name);
           }
           scopes_.back()[name] = unique_name;
+          if (!struct_tag.empty()) {
+            var_struct_tags_[unique_name] = struct_tag;
+          }
           auto node = create_node("array_decl", line, col);
           node->name = unique_name;
           node->value = total_size;
           IR::local_array_dims[current_func_name_ + "$" + unique_name] = dims;
+          if (stars > 0) {
+            base_size = target_scale_;
+            orig_base_size = target_scale_;
+          }
           IR::local_array_base_sizes[current_func_name_ + "$" + unique_name] = base_size;
+          IR::local_var_is_pointer[current_func_name_ + "$" + unique_name] = stars > 0;
+          IR::local_var_elem_scales[current_func_name_ + "$" + unique_name] = elem_scale;
+          value_sizes_[unique_name] = total_size * base_size;
+          bool_vars_[unique_name] = type_bool && stars == 0 && dims.empty();
+
           if (peek() == "=") {
             take("=");
-            take("{");
-            while (true) {
-              node->body.push_back(expr());
-              if (peek() == ",")
-                take(",");
-              else
-                break;
+            if (peek() == "{") {
+              std::vector<InitElement> local_inits;
+              parse_aggregate_init(0, struct_tag, dims, 0, orig_base_size, local_inits);
+              for (auto &item : local_inits) {
+                auto item_node = create_node("init_item", line, col);
+                item_node->value = item.offset;
+                item_node->name = std::to_string(item.size);
+                item_node->lhs = std::move(item.val);
+                node->body.push_back(std::move(item_node));
+              }
+            } else {
+              auto item_node = create_node("init_item", line, col);
+              item_node->value = 0;
+              item_node->name = std::to_string(orig_base_size);
+              auto init = expr();
+              if (type_bool && stars == 0) init = bool_normalize(std::move(init));
+              item_node->lhs = std::move(init);
+              node->body.push_back(std::move(item_node));
             }
-            take("}");
           }
           take(";");
           return node;
@@ -808,7 +1254,9 @@ namespace Parser {
         std::vector<long> inits;
         if (peek() == "=") {
           take("=");
-          inits.push_back(eval_const(*expr()));
+          auto init = expr();
+          if (type_bool && stars == 0) init = bool_normalize(std::move(init));
+          inits.push_back(eval_const(*init));
         }
         IR::IrGlobalVar g = {unique_name, false, 1, inits, true};
         IR::global_decls.push_back(g);
@@ -816,6 +1264,10 @@ namespace Parser {
         IR::global_var_is_pointer[unique_name] = is_pointer;
         IR::global_var_elem_scales[unique_name] = elem_scale;
         current_static_locals_[name] = unique_name;
+        if (!struct_tag.empty()) {
+          var_struct_tags_[unique_name] = struct_tag;
+        }
+        bool_vars_[unique_name] = type_bool && !is_pointer;
         take(";");
         return create_node("block", line, col);
       } else {
@@ -824,14 +1276,21 @@ namespace Parser {
           error("redefinition of local " + name);
         }
         scopes_.back()[name] = unique_name;
+        if (!struct_tag.empty()) {
+          var_struct_tags_[unique_name] = struct_tag;
+        }
         auto node = create_node("decl", line, col);
         node->name = unique_name;
         std::string local_key = current_func_name_ + "$" + unique_name;
         IR::local_var_is_pointer[local_key] = is_pointer;
         IR::local_var_elem_scales[local_key] = elem_scale;
+        unsigned_vars_[unique_name] = type_unsigned && !is_pointer;
+        bool_vars_[unique_name] = type_bool && !is_pointer;
+        value_sizes_[unique_name] = is_pointer ? target_scale_ : base_size;
         if (peek() == "=") {
           take("=");
           node->lhs = expr();
+          if (type_bool && !is_pointer) node->lhs = bool_normalize(std::move(node->lhs));
         }
         if (peek() == ",") {
           auto block = create_node("block", line, col);
@@ -875,9 +1334,13 @@ namespace Parser {
             std::string next_local_key = current_func_name_ + "$" + next_unique_name;
             IR::local_var_is_pointer[next_local_key] = next_is_pointer;
             IR::local_var_elem_scales[next_local_key] = next_elem_scale;
+            unsigned_vars_[next_unique_name] = type_unsigned && !next_is_pointer;
+            bool_vars_[next_unique_name] = type_bool && !next_is_pointer;
+            value_sizes_[next_unique_name] = next_is_pointer ? target_scale_ : base_size;
             if (peek() == "=") {
               take("=");
               next->lhs = expr();
+              if (type_bool && !next_is_pointer) next->lhs = bool_normalize(std::move(next->lhs));
             }
             block->body.push_back(std::move(next));
           }
@@ -888,6 +1351,7 @@ namespace Parser {
         return node;
       }
     }
+
     if (peek() == "return") {
       take("return");
       auto node = create_node("return", line, col);
@@ -978,8 +1442,8 @@ namespace Parser {
       take("(");
       
       if (peek() == "int" || peek() == "char" || peek() == "short" || peek() == "long" ||
-          peek() == "void" || peek() == "unsigned" || peek() == "signed" ||
-          peek() == "const" || peek() == "volatile" || peek() == "register" ||
+          peek() == "void" || peek() == "unsigned" || peek() == "signed" || peek() == "_Bool" ||
+          peek() == "const" || peek() == "volatile" || peek() == "restrict" || peek() == "__restrict" || peek() == "__restrict__" || peek() == "register" ||
           peek() == "float" || peek() == "double" ||
           global_typedefs.count(peek())) {
         node->body.push_back(stmt());
@@ -1099,14 +1563,24 @@ namespace Parser {
     node->name = name;
     if (op == "=") {
       node->lhs = expr();
+      if (bool_vars_.count(name) && bool_vars_[name]) {
+        node->lhs = bool_normalize(std::move(node->lhs));
+      }
     } else {
       std::string bin_op = op.substr(0, 1);
       auto bin_node = create_node(bin_op, line, col);
       auto var_node = create_node("var", line, col);
       var_node->name = name;
+      var_node->is_unsigned = unsigned_vars_.count(name) && unsigned_vars_[name];
+      var_node->type_size = value_sizes_.count(name) ? (int)value_sizes_[name] : target_scale_;
+      var_node->is_bool = bool_vars_.count(name) && bool_vars_[name];
       bin_node->lhs = std::move(var_node);
       bin_node->rhs = expr();
+      apply_integer_conversion(*bin_node);
       node->lhs = std::move(bin_node);
+      if (bool_vars_.count(name) && bool_vars_[name]) {
+        node->lhs = bool_normalize(std::move(node->lhs));
+      }
     }
     if (semicolon)
       take(";");
@@ -1126,6 +1600,13 @@ namespace Parser {
       node->lhs = std::move(cond);
       node->body.push_back(std::move(true_expr));
       node->body.push_back(std::move(false_expr));
+      int lhs_size = node->body[0]->type_size < 4 ? 4 : node->body[0]->type_size;
+      int rhs_size = node->body[1]->type_size < 4 ? 4 : node->body[1]->type_size;
+      bool lhs_unsigned = node->body[0]->type_size >= 4 && node->body[0]->is_unsigned;
+      bool rhs_unsigned = node->body[1]->type_size >= 4 && node->body[1]->is_unsigned;
+      node->type_size = lhs_size > rhs_size ? lhs_size : rhs_size;
+      node->is_unsigned = (lhs_size == rhs_size) ? (lhs_unsigned || rhs_unsigned) :
+                          (lhs_size > rhs_size ? lhs_unsigned : rhs_unsigned);
       return node;
     }
     return cond;
@@ -1139,6 +1620,8 @@ namespace Parser {
       auto parent = create_node(take(), line, col);
       parent->lhs = std::move(node);
       parent->rhs = logical_and();
+      parent->type_size = 4;
+      parent->is_unsigned = false;
       node = std::move(parent);
     }
     return node;
@@ -1152,6 +1635,8 @@ namespace Parser {
       auto parent = create_node(take(), line, col);
       parent->lhs = std::move(node);
       parent->rhs = bitwise_or();
+      parent->type_size = 4;
+      parent->is_unsigned = false;
       node = std::move(parent);
     }
     return node;
@@ -1165,6 +1650,7 @@ namespace Parser {
       auto parent = create_node(take(), line, col);
       parent->lhs = std::move(node);
       parent->rhs = bitwise_xor();
+      apply_integer_conversion(*parent);
       node = std::move(parent);
     }
     return node;
@@ -1178,6 +1664,7 @@ namespace Parser {
       auto parent = create_node(take(), line, col);
       parent->lhs = std::move(node);
       parent->rhs = bitwise_and();
+      apply_integer_conversion(*parent);
       node = std::move(parent);
     }
     return node;
@@ -1191,6 +1678,7 @@ namespace Parser {
       auto parent = create_node(take(), line, col);
       parent->lhs = std::move(node);
       parent->rhs = equality();
+      apply_integer_conversion(*parent);
       node = std::move(parent);
     }
     return node;
@@ -1204,6 +1692,8 @@ namespace Parser {
       auto parent = create_node(take(), line, col);
       parent->lhs = std::move(node);
       parent->rhs = relational();
+      parent->type_size = 4;
+      parent->is_unsigned = false;
       node = std::move(parent);
     }
     return node;
@@ -1217,6 +1707,7 @@ namespace Parser {
       auto parent = create_node(take(), line, col);
       parent->lhs = std::move(node);
       parent->rhs = shift();
+      apply_integer_conversion(*parent);
       node = std::move(parent);
     }
     return node;
@@ -1230,6 +1721,8 @@ namespace Parser {
       auto parent = create_node(take(), line, col);
       parent->lhs = std::move(node);
       parent->rhs = add();
+      parent->type_size = parent->lhs->type_size < 4 ? 4 : parent->lhs->type_size;
+      parent->is_unsigned = parent->lhs->type_size >= 4 && parent->lhs->is_unsigned;
       node = std::move(parent);
     }
     return node;
@@ -1243,6 +1736,7 @@ namespace Parser {
       auto parent = create_node(take(), line, col);
       parent->lhs = std::move(node);
       parent->rhs = term();
+      apply_integer_conversion(*parent);
       node = std::move(parent);
     }
     return node;
@@ -1301,16 +1795,38 @@ namespace Parser {
         take("]");
         node = std::move(parent);
       } else {
+        bool is_arrow = (op == "->");
         std::string field_name = take();
         auto parent = create_node("index", line, col);
-        parent->lhs = std::move(node);
-        int byte_offset = 0;
-        if (global_field_offsets.count(field_name)) {
-          byte_offset = global_field_offsets[field_name];
+        std::string lhs_tag = infer_struct_tag(*node);
+        if (is_arrow) {
+          auto deref = create_node("unary_*", line, col);
+          deref->lhs = std::move(node);
+          deref->type_tag = lhs_tag;
+          parent->lhs = std::move(deref);
+        } else {
+          parent->lhs = std::move(node);
         }
+        int byte_offset = 0;
         int field_sz = target_scale_;
-        if (global_field_sizes.count(field_name)) {
-          field_sz = global_field_sizes[field_name];
+        int field_total_sz = field_sz;
+        std::vector<long> field_dims;
+        std::string field_tag = "";
+        std::string field_key = lhs_tag.empty() ? "" : lhs_tag + "." + field_name;
+        if (!field_key.empty() && global_struct_field_offsets_by_tag.count(field_key)) {
+          byte_offset = global_struct_field_offsets_by_tag[field_key];
+          field_sz = global_struct_field_sizes_by_tag[field_key];
+          field_total_sz = global_struct_field_total_sizes_by_tag[field_key];
+          field_dims = global_struct_field_dims_by_tag[field_key];
+          if (global_struct_field_tags.count(field_key)) {
+            field_tag = global_struct_field_tags[field_key];
+          }
+        } else if (global_field_offsets.count(field_name)) {
+          byte_offset = global_field_offsets[field_name];
+          if (global_field_sizes.count(field_name)) {
+            field_sz = global_field_sizes[field_name];
+            field_total_sz = field_sz;
+          }
         }
         // Encode byte offset as index with scale=1 (raw byte addressing)
         // We use a special marker: store the byte_offset directly and set scale=1
@@ -1320,6 +1836,10 @@ namespace Parser {
         parent->rhs = std::move(index_val);
         // Store field size in the parent node so IR can emit correct load
         parent->value = field_sz;
+        parent->elem_size = field_sz;
+        parent->aggregate_size = field_total_sz;
+        parent->array_dims = field_dims;
+        parent->type_tag = field_tag;
         node = std::move(parent);
       }
     }
@@ -1348,6 +1868,13 @@ namespace Parser {
       int col = tokens_[pos_].col;
       auto node = create_node("unary_" + take(), line, col);
       node->lhs = unary();
+      if (node->op == "unary_!" ) {
+        node->type_size = 4;
+        node->is_unsigned = false;
+      } else {
+        node->type_size = node->lhs->type_size < 4 ? 4 : node->lhs->type_size;
+        node->is_unsigned = node->lhs->type_size >= 4 && node->lhs->is_unsigned;
+      }
       return node;
     }
     return primary();
@@ -1359,9 +1886,9 @@ namespace Parser {
     if (peek() == "(") {
       bool is_cast = false;
       std::string next_tok = tokens_[pos_ + 1].text;
-      if (next_tok == "int" || next_tok == "char" || next_tok == "short" || next_tok == "long" || next_tok == "void" ||
+      if (next_tok == "int" || next_tok == "char" || next_tok == "short" || next_tok == "long" || next_tok == "void" || next_tok == "_Bool" ||
           next_tok == "unsigned" || next_tok == "signed" ||
-          next_tok == "const" || next_tok == "volatile" ||
+          next_tok == "const" || next_tok == "volatile" || next_tok == "restrict" || next_tok == "__restrict" || next_tok == "__restrict__" ||
           next_tok == "float" || next_tok == "double" ||
           global_typedefs.count(next_tok)) {
         is_cast = true;
@@ -1372,13 +1899,21 @@ namespace Parser {
       if (is_cast) {
         take("(");
         int cast_size = parse_base_type();
+        bool cast_unsigned = last_type_unsigned_;
+        bool cast_bool = last_type_bool_;
         int cast_stars = 0;
         while (peek() == "*") { take("*"); cast_stars++; }
         if (cast_stars > 0) cast_size = target_scale_; // pointer cast
         take(")");
         auto node = create_node("cast", line, col);
         node->value = cast_size;  // store target byte size for IR truncation
+        node->is_unsigned = cast_unsigned && cast_stars == 0;
+        node->type_size = cast_size;
+        node->is_bool = cast_bool && cast_stars == 0;
         node->lhs = primary();
+        if (node->is_bool) {
+          return bool_normalize(std::move(node));
+        }
         return node;
       }
       
@@ -1393,9 +1928,9 @@ namespace Parser {
       // Peek: if next token is a type keyword or typedef, parse as type
       std::string nt = peek();
       bool is_type = (nt == "int" || nt == "char" || nt == "short" || nt == "long" ||
-                      nt == "void" || nt == "unsigned" || nt == "signed" ||
+                      nt == "void" || nt == "unsigned" || nt == "signed" || nt == "_Bool" ||
                       nt == "float" || nt == "double" || nt == "struct" || nt == "union" ||
-                      nt == "enum" || nt == "const" || nt == "volatile" ||
+                      nt == "enum" || nt == "const" || nt == "volatile" || nt == "restrict" || nt == "__restrict" || nt == "__restrict__" ||
                       global_typedefs.count(nt));
       long sz = target_scale_;
       if (is_type) {
@@ -1405,19 +1940,13 @@ namespace Parser {
           sz = target_scale_;
         }
       } else {
-        // sizeof(expr): evaluate expression for side-effect-free parsing
-        // We parse the expression but use a heuristic size
-        // For a more accurate approach, emit a 'sizeof' AST node handled in IR
-        // For now: parse the expression and use target_scale_ as size
         auto dummy = expr();
-        // Try to infer size from the expression type (best-effort)
-        sz = target_scale_;  // default
-        if (dummy->op == "num") sz = 4;  // integer literal -> int
-        else if (dummy->op == "str") sz = target_scale_;  // pointer
+        sz = sizeof_expr(*dummy);
       }
       take(")");
       auto node = create_node("num", line, col);
       node->value = sz;
+      node->type_size = target_scale_;
       return node;
     }
     if (peek() == "__builtin_constant_p") {
@@ -1427,11 +1956,13 @@ namespace Parser {
       take(")");
       auto node = create_node("num", line, col);
       node->value = 0;
+      node->type_size = 4;
       return node;
     }
     if (std::isdigit(static_cast<unsigned char>(peek()[0]))) {
       auto node = create_node("num", line, col);
       node->value = std::strtoul(take().c_str(), nullptr, 0);
+      node->type_size = (node->value >= -2147483648LL && node->value <= 2147483647LL) ? 4 : 8;
       return node;
     }
     if (peek()[0] == '\'') {
@@ -1454,6 +1985,7 @@ namespace Parser {
       }
       auto node = create_node("num", line, col);
       node->value = val;
+      node->type_size = 4;
       return node;
     }
     if (peek()[0] == '"') {
@@ -1475,6 +2007,9 @@ namespace Parser {
       }
       auto node = create_node("var", line, col);
       node->name = ident;
+      node->is_unsigned = unsigned_vars_.count(ident) && unsigned_vars_[ident];
+      node->type_size = value_sizes_.count(ident) ? (int)value_sizes_[ident] : target_scale_;
+      node->is_bool = bool_vars_.count(ident) && bool_vars_[ident];
       return node;
     }
     error("expected expression, got '" + peek() + "'");

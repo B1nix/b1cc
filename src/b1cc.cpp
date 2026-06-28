@@ -12,6 +12,7 @@
 #include <map>
 #include <set>
 #include <cstdlib>
+#include <cstdio>
 #include <unistd.h>
 
 namespace Driver {
@@ -43,12 +44,36 @@ namespace Driver {
     return out + "'";
   }
 
+  static void dump_command(const std::string &title, const std::string &cmd) {
+    std::cout << "=== " << title << " ===\n";
+    FILE *pipe = popen(cmd.c_str(), "r");
+    if (!pipe)
+      Diagnostics::fatal("cannot run dump command");
+    char buf[4096];
+    while (fgets(buf, sizeof(buf), pipe))
+      std::cout << buf;
+    pclose(pipe);
+  }
+
+  static void dump_object(const std::string &path, bool dump_symbols, bool dump_sections, bool dump_relocs) {
+    std::string q = shell_quote(path);
+    if (dump_symbols)
+      dump_command("symbols " + path, "nm " + q + " 2>&1");
+    if (dump_sections)
+      dump_command("sections " + path, "(objdump -h " + q + " 2>/dev/null || otool -l " + q + " 2>&1)");
+    if (dump_relocs)
+      dump_command("relocations " + path, "(objdump -r " + q + " 2>/dev/null || otool -r " + q + " 2>&1)");
+  }
+
   static int run(int argc, char **argv) {
     bool emit_asm = false;
     bool compile_only = false;
     bool preprocess_only = false;
     bool dump_ast = false;
     bool dump_ir = false;
+    bool dump_symbols = false;
+    bool dump_sections = false;
+    bool dump_relocs = false;
     std::vector<std::string> inputs;
     std::vector<std::string> link_flags;
     std::string output = "";
@@ -73,6 +98,12 @@ namespace Driver {
         dump_ast = true;
       } else if (arg == "-fdump-ir") {
         dump_ir = true;
+      } else if (arg == "-fdump-symbols") {
+        dump_symbols = true;
+      } else if (arg == "-fdump-sections") {
+        dump_sections = true;
+      } else if (arg == "-fdump-relocs") {
+        dump_relocs = true;
       } else if (arg.rfind("--target=", 0) == 0) {
         target = arg.substr(9);
       } else if (arg == "-o") {
@@ -144,7 +175,16 @@ namespace Driver {
         std::set<std::string> included_files;
         included_files.insert(inp);
         std::string prep = Preprocessor::preprocess(read_file(inp), inp, Preprocessor::driver_include_dirs, macros, included_files);
-        prep_out << prep << "\n";
+        auto toks = Lexer::lex(prep, macros);
+        for (const auto &tok : toks) {
+          if (tok.text == "EOF") continue;
+          prep_out << tok.text;
+          if (tok.text == ";" || tok.text == "}" || tok.text == "{")
+            prep_out << "\n";
+          else
+            prep_out << " ";
+        }
+        prep_out << "\n";
       }
       if (output.empty()) {
         std::cout << prep_out.str();
@@ -192,6 +232,7 @@ namespace Driver {
         int rc = std::system(cmd.c_str());
         unlink(tmp_asm);
         if (rc != 0) return 1;
+        dump_object(dest_obj, dump_symbols, dump_sections, dump_relocs);
       }
       return 0;
     }

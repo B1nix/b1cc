@@ -119,6 +119,7 @@ namespace Backend {
     global_decls.clear();
     global_vars.clear();
     global_arrays.clear();
+    global_struct_vars.clear();
     global_array_dims.clear();
     local_array_dims.clear();
     global_array_base_sizes.clear();
@@ -127,6 +128,9 @@ namespace Backend {
     global_var_is_pointer.clear();
     local_var_elem_scales.clear();
     local_var_is_pointer.clear();
+    function_return_aggregate_sizes.clear();
+    function_param_aggregate_sizes.clear();
+    function_vararg_fixed_counts.clear();
 
     int target_scale = (target == "i386-b1nix" || target == "x86-b1nix") ? 4 : 8;
     std::map<std::string, Preprocessor::Macro> macros = Preprocessor::driver_macros;
