@@ -237,6 +237,30 @@ set -e
 test "$rc" = 42
 echo "ok m12_preprocessor"
 
+./build/b1cc tests/m14_sizeof.c -o "$tmp/m14_sizeof"
+set +e
+"$tmp/m14_sizeof"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok m14_sizeof"
+
+./build/b1cc tests/m14_cast_trunc.c -o "$tmp/m14_cast_trunc"
+set +e
+"$tmp/m14_cast_trunc"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok m14_cast_trunc"
+
+./build/b1cc tests/m14_union.c -o "$tmp/m14_union"
+set +e
+"$tmp/m14_union"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok m14_union"
+
 ./build/b1cc src/b1cc_token_lexer.c -o "$tmp/b1cc_token_lexer"
 "$tmp/b1cc_token_lexer" < tests/local.c > "$tmp/lexer_output.txt"
 grep -q "IDENT: int" "$tmp/lexer_output.txt"

@@ -124,6 +124,10 @@ namespace IR {
     }
     if (node.op == "cast") {
       lower_expr(*node.lhs, fn);
+      // node.value holds the target byte size set by the parser (0 = unknown/no truncation)
+      if (node.value > 0 && node.value < 8) {
+        fn.code.push_back({"cast", "", node.value});
+      }
       return;
     }
     if (node.op == "prefix_++" || node.op == "prefix_--") {
@@ -267,6 +271,17 @@ namespace IR {
     }
     if (node.op == "index") {
       lower_expr(*node.lhs, fn);
+      // Check for struct byte_offset access: rhs is a literal byte offset, no scaling needed
+      if (node.name == "byte_offset") {
+        // rhs is the byte offset literal
+        lower_expr(*node.rhs, fn);
+        fn.code.push_back({"+", "", 0});
+        // node.value holds the field byte size
+        int field_sz = (node.value > 0) ? (int)node.value : current_target_scale;
+        fn.code.push_back({"const", "", 0});
+        fn.code.push_back({"index", "", static_cast<long>(field_sz)});
+        return;
+      }
       lower_expr(*node.rhs, fn);
       std::vector<long> parent_dims = get_node_dims(*node.lhs, fn);
       long mult = 1;
@@ -371,32 +386,38 @@ namespace IR {
     }
     if (node.op == "index") {
       lower_expr(*node.lhs, fn);
-      lower_expr(*node.rhs, fn);
-      std::vector<long> parent_dims = get_node_dims(*node.lhs, fn);
-      long mult = 1;
-      if (parent_dims.size() > 1) {
-        for (size_t i = 1; i < parent_dims.size(); ++i) {
-          mult *= parent_dims[i];
-        }
-      }
-      if (mult > 1) {
-        fn.code.push_back({"const", "", mult});
-        fn.code.push_back({"*", "", 0});
-      }
-      std::string base_name = get_base_var_name(node);
-      std::string local_key = fn.name + "$" + base_name;
-      int base_size = target_scale;
-      if (local_array_base_sizes.count(local_key)) {
-        base_size = local_array_base_sizes[local_key];
-      } else if (global_array_base_sizes.count(base_name)) {
-        base_size = global_array_base_sizes[base_name];
+      // Struct byte_offset: rhs is a literal byte offset, add directly without scaling
+      if (node.name == "byte_offset") {
+        lower_expr(*node.rhs, fn);
+        fn.code.push_back({"+", "", 0});
       } else {
-        int scale = get_expr_pointer_scale(*node.lhs, fn);
-        if (scale > 0) base_size = scale;
+        lower_expr(*node.rhs, fn);
+        std::vector<long> parent_dims = get_node_dims(*node.lhs, fn);
+        long mult = 1;
+        if (parent_dims.size() > 1) {
+          for (size_t i = 1; i < parent_dims.size(); ++i) {
+            mult *= parent_dims[i];
+          }
+        }
+        if (mult > 1) {
+          fn.code.push_back({"const", "", mult});
+          fn.code.push_back({"*", "", 0});
+        }
+        std::string base_name = get_base_var_name(node);
+        std::string local_key = fn.name + "$" + base_name;
+        int base_size = target_scale;
+        if (local_array_base_sizes.count(local_key)) {
+          base_size = local_array_base_sizes[local_key];
+        } else if (global_array_base_sizes.count(base_name)) {
+          base_size = global_array_base_sizes[base_name];
+        } else {
+          int scale = get_expr_pointer_scale(*node.lhs, fn);
+          if (scale > 0) base_size = scale;
+        }
+        fn.code.push_back({"const", "", static_cast<long>(base_size)});
+        fn.code.push_back({"*", "", 0});
+        fn.code.push_back({"+", "", 0});
       }
-      fn.code.push_back({"const", "", static_cast<long>(base_size)});
-      fn.code.push_back({"*", "", 0});
-      fn.code.push_back({"+", "", 0});
     } else if (node.op == "var") {
       if (fn.locals.count(node.name)) {
         fn.code.push_back({"addr", "", fn.locals[node.name]});

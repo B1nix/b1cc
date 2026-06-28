@@ -18,6 +18,8 @@ namespace Parser {
     std::map<std::string, int> global_enums;
     std::map<std::string, std::map<std::string, int>> global_structs;
     std::map<std::string, int> global_field_offsets;
+    std::map<std::string, int> global_field_sizes;
+    std::map<std::string, int> global_struct_sizes;
 
   private:
     std::vector<Lexer::Token> tokens_;

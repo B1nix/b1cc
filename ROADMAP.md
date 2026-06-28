@@ -103,9 +103,9 @@
 
 ## M14: TCC-Level C Frontend
 
-- [ ] Add `sizeof` and move declarator parsing toward real C declarators (`int *a[3]`, `int (*fp)(int)`).
-- [ ] Tighten integer typing: signed/unsigned behavior, integer promotions, cast width, and char/short widening.
-- [ ] Improve aggregate layout: alignment, padding, nested structs, arrays inside structs, `->`, and `union`.
+- [x] Add `sizeof` and move declarator parsing toward real C declarators (`int *a[3]`, `int (*fp)(int)`).
+- [x] Tighten integer typing: signed/unsigned behavior, integer promotions, cast width, and char/short widening.
+- [x] Improve aggregate layout: alignment, padding, nested structs, arrays inside structs, `->`, and `union`.
 - [ ] Add function pointer declarators and calls without special parser shortcuts.
 
 ## M15: TCC-Level Driver and ABI

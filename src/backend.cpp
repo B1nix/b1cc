@@ -161,13 +161,22 @@ namespace Backend {
             out << "    cset x0, ge\n";
         }
         out << "    str x0, [sp, #-16]!\n";
-      } else if (inst.op == "~" || inst.op == "!" || inst.op == "neg") {
+      } else if (inst.op == "~" || inst.op == "!" || inst.op == "neg" || inst.op == "cast") {
         out << "    ldr x0, [sp], #16\n";
         if (inst.op == "~")
           out << "    mvn x0, x0\n";
         else if (inst.op == "neg")
           out << "    neg x0, x0\n";
-        else {
+        else if (inst.op == "cast") {
+          // Sign-extend/truncate to target byte size
+          if (inst.value == 1)
+            out << "    sxtb x0, w0\n";
+          else if (inst.value == 2)
+            out << "    sxth x0, w0\n";
+          else if (inst.value == 4)
+            out << "    sxtw x0, w0\n";
+          // else 8-byte: no-op
+        } else {
           out << "    cmp x0, #0\n";
           out << "    cset x0, eq\n";
         }
@@ -388,13 +397,21 @@ namespace Backend {
           out << "    movzbq %al, %rax\n";
         }
         out << "    pushq %rax\n";
-      } else if (inst.op == "~" || inst.op == "!" || inst.op == "neg") {
+      } else if (inst.op == "~" || inst.op == "!" || inst.op == "neg" || inst.op == "cast") {
         out << "    popq %rax\n";
         if (inst.op == "~")
           out << "    notq %rax\n";
         else if (inst.op == "neg")
           out << "    negq %rax\n";
-        else {
+        else if (inst.op == "cast") {
+          if (inst.value == 1)
+            out << "    movsbq %al, %rax\n";
+          else if (inst.value == 2)
+            out << "    movswq %ax, %rax\n";
+          else if (inst.value == 4)
+            out << "    movslq %eax, %rax\n";
+          // else 8-byte: no-op
+        } else {
           out << "    cmpq $0, %rax\n";
           out << "    sete %al\n";
           out << "    movzbq %al, %rax\n";
@@ -578,13 +595,19 @@ namespace Backend {
           out << "    movzbl %al, %eax\n";
         }
         out << "    pushl %eax\n";
-      } else if (inst.op == "~" || inst.op == "!" || inst.op == "neg") {
+      } else if (inst.op == "~" || inst.op == "!" || inst.op == "neg" || inst.op == "cast") {
         out << "    popl %eax\n";
         if (inst.op == "~")
           out << "    notl %eax\n";
         else if (inst.op == "neg")
           out << "    negl %eax\n";
-        else {
+        else if (inst.op == "cast") {
+          if (inst.value == 1)
+            out << "    movsbl %al, %eax\n";
+          else if (inst.value == 2)
+            out << "    movswl %ax, %eax\n";
+          // else 4-byte or 8-byte: no-op on i386
+        } else {
           out << "    cmpl $0, %eax\n";
           out << "    sete %al\n";
           out << "    movzbl %al, %eax\n";

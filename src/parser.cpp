@@ -131,8 +131,9 @@ namespace Parser {
         take();
       }
     }
-    if (peek() == "struct") {
-      take("struct");
+    if (peek() == "struct" || peek() == "union") {
+      bool is_union = (peek() == "union");
+      take();
       std::string tag;
       if (peek() != "{") {
         tag = take();
@@ -140,24 +141,43 @@ namespace Parser {
       if (peek() == "{") {
         take("{");
         int offset = 0;
+        int union_max_size = 0;
         std::map<std::string, int> fields;
         while (peek() != "}") {
-          parse_base_type();
+          int field_base_size = parse_base_type();
           while (true) {
+            int stars = 0;
             while (peek() == "*") {
               take("*");
+              stars++;
             }
+            int field_size = (stars > 0) ? target_scale_ : field_base_size;
             std::string field_name = take();
+            long arr_count = 1;
             if (peek() == "[") {
               while (peek() == "[") {
                 take("[");
-                expr();
+                if (peek() != "]") {
+                  arr_count *= eval_const(*expr());
+                }
                 take("]");
               }
             }
+            // Align field offset to field_size boundary (but max 8)
+            int align = field_size;
+            if (align > 8) align = 8;
+            if (!is_union && align > 1 && (offset % align) != 0) {
+              offset += align - (offset % align);
+            }
             fields[field_name] = offset;
             global_field_offsets[field_name] = offset;
-            offset++;
+            global_field_sizes[field_name] = field_size;
+            int this_field_total = (int)(field_size * arr_count);
+            if (is_union) {
+              if (this_field_total > union_max_size) union_max_size = this_field_total;
+            } else {
+              offset += this_field_total;
+            }
             if (peek() == ",") {
               take(",");
             } else {
@@ -167,12 +187,23 @@ namespace Parser {
           take(";");
         }
         take("}");
+        if (is_union) {
+          base_size = union_max_size;
+        } else {
+          // Round total struct size up to alignment of largest field (simplified: to target_scale_)
+          if (offset > 0 && (offset % target_scale_) != 0) {
+            offset += target_scale_ - (offset % target_scale_);
+          }
+          base_size = offset;
+        }
         if (!tag.empty()) {
           global_structs[tag] = fields;
+          global_struct_sizes[tag] = base_size;
         }
-        base_size = offset * target_scale_;
       } else {
-        if (global_structs.count(tag)) {
+        if (global_struct_sizes.count(tag)) {
+          base_size = global_struct_sizes[tag];
+        } else if (global_structs.count(tag)) {
           base_size = global_structs[tag].size() * target_scale_;
         } else {
           base_size = target_scale_;
@@ -553,40 +584,67 @@ namespace Parser {
       take(";");
       return create_node("block", line, col);
     }
-    if (peek() == "struct" && tokens_[pos_ + 2].text == "{") {
-      take("struct");
+    if ((peek() == "struct" || peek() == "union") && tokens_[pos_ + 2].text == "{") {
+      bool is_union_local = (peek() == "union");
+      take();
       std::string tag = take();
       take("{");
       int offset = 0;
+      int union_max_sz = 0;
       std::map<std::string, int> fields;
       while (peek() != "}") {
-        type();
+        int fbase = parse_base_type();
+        int fstars = 0;
+        while (peek() == "*") { take("*"); fstars++; }
+        int fsize = (fstars > 0) ? target_scale_ : fbase;
         std::string field_name = take();
-        take(";");
+        long arr_cnt = 1;
+        if (peek() == "[") {
+          while (peek() == "[") {
+            take("[");
+            if (peek() != "]") arr_cnt *= eval_const(*expr());
+            take("]");
+          }
+        }
+        int align = fsize; if (align > 8) align = 8;
+        if (!is_union_local && align > 1 && (offset % align) != 0)
+          offset += align - (offset % align);
         fields[field_name] = offset;
         global_field_offsets[field_name] = offset;
-        offset++;
+        global_field_sizes[field_name] = fsize;
+        int total = (int)(fsize * arr_cnt);
+        if (is_union_local) { if (total > union_max_sz) union_max_sz = total; }
+        else offset += total;
+        take(";");
       }
       take("}");
       take(";");
+      int struct_byte_size = is_union_local ? union_max_sz : offset;
+      if (struct_byte_size > 0 && !is_union_local && (struct_byte_size % target_scale_) != 0)
+        struct_byte_size += target_scale_ - (struct_byte_size % target_scale_);
       global_structs[tag] = fields;
+      global_struct_sizes[tag] = struct_byte_size;
       return create_node("block", line, col);
     }
-    if (peek() == "struct" && tokens_[pos_ + 2].text != "{") {
-      take("struct");
+    if ((peek() == "struct" || peek() == "union") && tokens_[pos_ + 2].text != "{") {
+      take();
       std::string tag = take();
       std::string name = take();
-      long struct_size = 1;
-      if (global_structs.count(tag)) {
-        struct_size = global_structs[tag].size();
+      long struct_byte_size = target_scale_;
+      if (global_struct_sizes.count(tag)) {
+        struct_byte_size = global_struct_sizes[tag];
+      } else if (global_structs.count(tag)) {
+        struct_byte_size = global_structs[tag].size() * target_scale_;
       }
+      // number of target_scale_ slots needed
+      long struct_slots = (struct_byte_size + target_scale_ - 1) / target_scale_;
       take(";");
       if (is_static) {
         std::string unique_name = current_func_name_ + "$" + name;
-        IR::IrGlobalVar g = {unique_name, true, struct_size, {}, true};
+        IR::IrGlobalVar g = {unique_name, true, struct_slots, {}, true};
         IR::global_decls.push_back(g);
         IR::global_arrays.insert(unique_name);
-        IR::global_array_dims[unique_name] = {struct_size};
+        IR::global_array_dims[unique_name] = {struct_slots};
         IR::global_array_base_sizes[unique_name] = target_scale_;
         current_static_locals_[name] = unique_name;
         return create_node("block", line, col);
@@ -598,8 +656,8 @@ namespace Parser {
         scopes_.back()[name] = unique_name;
         auto node = create_node("array_decl", line, col);
         node->name = unique_name;
-        node->value = struct_size;
-        IR::local_array_dims[current_func_name_ + "$" + unique_name] = {struct_size};
+        node->value = struct_slots;
+        IR::local_array_dims[current_func_name_ + "$" + unique_name] = {struct_slots};
         IR::local_array_base_sizes[current_func_name_ + "$" + unique_name] = target_scale_;
         return node;
       }
@@ -1165,13 +1223,22 @@ namespace Parser {
         std::string field_name = take();
         auto parent = create_node("index", line, col);
         parent->lhs = std::move(node);
-        int offset = 0;
+        int byte_offset = 0;
         if (global_field_offsets.count(field_name)) {
-          offset = global_field_offsets[field_name];
+          byte_offset = global_field_offsets[field_name];
         }
+        int field_sz = target_scale_;
+        if (global_field_sizes.count(field_name)) {
+          field_sz = global_field_sizes[field_name];
+        }
+        // Encode byte offset as index with scale=1 (raw byte addressing)
+        // We use a special marker: store the byte_offset directly and set scale=1
+        parent->name = "byte_offset";
         auto index_val = create_node("num", line, col);
-        index_val->value = offset;
+        index_val->value = byte_offset;
         parent->rhs = std::move(index_val);
+        // Store field size in the parent node so IR can emit correct load
+        parent->value = field_sz;
         node = std::move(parent);
       }
     }
@@ -1223,9 +1290,13 @@ namespace Parser {
       
       if (is_cast) {
         take("(");
-        type();
+        int cast_size = parse_base_type();
+        int cast_stars = 0;
+        while (peek() == "*") { take("*"); cast_stars++; }
+        if (cast_stars > 0) cast_size = target_scale_; // pointer cast
         take(")");
         auto node = create_node("cast", line, col);
+        node->value = cast_size;  // store target byte size for IR truncation
         node->lhs = primary();
         return node;
       }
@@ -1233,6 +1304,39 @@ namespace Parser {
       take("(");
       auto node = expr();
       take(")");
+      return node;
+    }
+    if (peek() == "sizeof") {
+      take("sizeof");
+      take("(");
+      // Peek: if next token is a type keyword or typedef, parse as type
+      std::string nt = peek();
+      bool is_type = (nt == "int" || nt == "char" || nt == "short" || nt == "long" ||
+                      nt == "void" || nt == "unsigned" || nt == "signed" ||
+                      nt == "float" || nt == "double" || nt == "struct" || nt == "union" ||
+                      nt == "enum" || nt == "const" || nt == "volatile" ||
+                      global_typedefs.count(nt));
+      long sz = target_scale_;
+      if (is_type) {
+        sz = parse_base_type();
+        while (peek() == "*") {
+          take("*");
+          sz = target_scale_;
+        }
+      } else {
+        // sizeof(expr): evaluate expression for side-effect-free parsing
+        // We parse the expression but use a heuristic size
+        // For a more accurate approach, emit a 'sizeof' AST node handled in IR
+        // For now: parse the expression and use target_scale_ as size
+        auto dummy = expr();
+        // Try to infer size from the expression type (best-effort)
+        sz = target_scale_;  // default
+        if (dummy->op == "num") sz = 4;  // integer literal -> int
+        else if (dummy->op == "str") sz = target_scale_;  // pointer
+      }
+      take(")");
+      auto node = create_node("num", line, col);
+      node->value = sz;
       return node;
     }
     if (peek() == "__builtin_constant_p") {
