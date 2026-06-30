@@ -193,8 +193,15 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
         }
     }
 
+    int last_loc_line = -1;
+    int last_loc_col = -1;
     for (int i_i = 0; i_i < fn->code.count; ++i_i) {
         const IrInst *inst = &fn->code.data[i_i];
+        if (inst->line > 0 && (inst->line != last_loc_line || inst->col != last_loc_col)) {
+            sb_appendf(&out, "    .loc 1 %d %d\n", inst->line, inst->col);
+            last_loc_line = inst->line;
+            last_loc_col = inst->col;
+        }
         if (strcmp(inst->op, "const") == 0) {
             if (inst->value >= 0 && inst->value <= 65535) {
                 sb_appendf(&out, "    mov x0, #%ld\n", inst->value);
@@ -592,6 +599,26 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                 sb_append(&out, "    ldp x29, x30, [sp], #16\n");
             }
             sb_append(&out, "    ret\n");
+        } else if (strcmp(inst->op, "extract_bits") == 0) {
+            /* packed value: low 16 bits = bit_offset, high bits = bit_width */
+            int bf_offset = (int)(inst->value & 0xFFFF);
+            int bf_width  = (int)((inst->value >> 16) & 0xFFFF);
+            sb_append(&out, "    ldr x0, [sp], #16\n");
+            /* UBFX: unsigned bit-field extract: x0 = x0[bf_offset + bf_width - 1 : bf_offset] */
+            sb_appendf(&out, "    ubfx x0, x0, #%d, #%d\n", bf_offset, bf_width);
+            sb_append(&out, "    str x0, [sp, #-16]!\n");
+        } else if (strcmp(inst->op, "insert_bits") == 0) {
+            /* Stack: [top] dest_addr, offset(0), value */
+            int bf_offset = (int)(inst->value & 0xFFFF);
+            int bf_width  = (int)((inst->value >> 16) & 0xFFFF);
+            sb_append(&out, "    ldr x1, [sp], #16\n"); /* dest_addr */
+            sb_append(&out, "    ldr x2, [sp], #16\n"); /* index (==0) */
+            sb_append(&out, "    ldr x0, [sp], #16\n"); /* new value */
+            /* Read current storage word */
+            sb_append(&out, "    ldr x3, [x1]\n");
+            /* BFI: bit-field insert: x3 = x3 with bits [bf_offset+bf_width-1:bf_offset] = x0 */
+            sb_appendf(&out, "    bfi x3, x0, #%d, #%d\n", bf_offset, bf_width);
+            sb_append(&out, "    str x3, [x1]\n");
         } else {
             char msg[128];
             snprintf(msg, sizeof(msg), "unknown IR op %s", inst->op);
@@ -621,10 +648,28 @@ static void arm64_free(TargetBackend *self) {
     free(self);
 }
 
+static int arm64_get_target_scale(TargetBackend *self) {
+    (void)self;
+    return 8;
+}
+
+static int arm64_get_stack_slot_size(TargetBackend *self) {
+    (void)self;
+    return 16;
+}
+
+static int arm64_get_aggregate_slots(TargetBackend *self, int size) {
+    (void)self;
+    return (size + 15) / 16;
+}
+
 TargetBackend* backend_create_arm64(void) {
     Arm64Target *b = malloc(sizeof(Arm64Target));
     b->base.emit_globals = arm64_emit_globals;
     b->base.emit_function = arm64_emit_function;
     b->base.free = arm64_free;
+    b->base.get_target_scale = arm64_get_target_scale;
+    b->base.get_stack_slot_size = arm64_get_stack_slot_size;
+    b->base.get_aggregate_slots = arm64_get_aggregate_slots;
     return &b->base;
 }

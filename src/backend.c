@@ -15,7 +15,7 @@ static void dump_ast_node(const Node *node, int indent) {
     if (node->value != 0) fprintf(stderr, ", value=%ld", node->value);
     if (node->elem_size != 0) fprintf(stderr, ", elem=%d", node->elem_size);
     if (node->pointee_size != 0) fprintf(stderr, ", pointee=%d", node->pointee_size);
-    fprintf(stderr, ")\n");
+    fprintf(stderr, ", line=%d, col=%d)\n", node->line, node->col);
     if (node->lhs) dump_ast_node(node->lhs, indent + 1);
     if (node->rhs) dump_ast_node(node->rhs, indent + 1);
     for (int k = 0; k < node->body.count; ++k) {
@@ -41,7 +41,7 @@ static void dump_ir(IrFunctionArray funcs) {
             fprintf(stderr, "  %s", inst->op);
             if (inst->arg && inst->arg[0]) fprintf(stderr, " %s", inst->arg);
             if (inst->value != 0) fprintf(stderr, " %ld", inst->value);
-            fprintf(stderr, "\n");
+            fprintf(stderr, " (line=%d, col=%d)\n", inst->line, inst->col);
         }
     }
     fprintf(stderr, "================\n");
@@ -191,6 +191,7 @@ const char *backend_compile_asm(const char *src, const char *target, bool dump_a
     StringBuilder out;
     sb_init(&out);
 
+    sb_appendf(&out, "\t.file 1 \"%s\"\n", diagnostics_filepath ? diagnostics_filepath : "source.c");
     sb_append(&out, backend->emit_globals(backend, &ir_global_decls, arena));
 
     for (int k = 0; k < ir_functions.count; ++k) {

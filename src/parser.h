@@ -17,11 +17,13 @@ typedef struct {
 
     HashMap unsigned_vars;
     HashMap bool_vars;
+    HashMap const_vars;
     HashMap value_sizes;
     HashMap var_struct_tags;
     int local_var_counter;
     int last_type_unsigned;
     int last_type_bool;
+    int last_type_const;
 
     HashMap global_typedefs;
     HashMap global_typedef_sizes;
@@ -39,6 +41,8 @@ typedef struct {
     HashMap global_struct_field_elem_sizes_by_tag;
     HashMap global_struct_field_total_sizes_by_tag;
     HashMap global_struct_field_dims_by_tag;
+    HashMap global_struct_field_bit_offsets_by_tag;
+    HashMap global_struct_field_bit_widths_by_tag;
 
     const char *last_parsed_struct_tag;
     Arena *arena;

@@ -440,6 +440,8 @@ static int parse_base_type(ParserState *p) {
             int offset = 0;
             int union_max_size = 0;
             int struct_alignment = 1;
+            int bit_offset = 0;
+            int current_unit_size = 0;
             HashMap *fields = malloc(sizeof(HashMap));
             hashmap_init(fields, 16);
             while (strcmp(peek(p), "}") != 0) {
@@ -553,11 +555,32 @@ static int parse_base_type(ParserState *p) {
                         break;
                     }
                     
-                    const char *field_name = is_func_ptr_field ? func_ptr_field_name : take(p, nullptr);
+                    const char *field_name = "";
+                    int is_bitfield = 0;
+                    int bit_width = 0;
+                    if (strcmp(peek(p), ":") == 0) {
+                        is_bitfield = 1;
+                        char anon_bf_name[128];
+                        static int anon_bf_id = 0;
+                        snprintf(anon_bf_name, sizeof(anon_bf_name), "$anon_bf_%d", anon_bf_id++);
+                        field_name = arena_strdup(p->arena, anon_bf_name);
+                    } else {
+                        field_name = is_func_ptr_field ? func_ptr_field_name : take(p, nullptr);
+                        if (strcmp(peek(p), ":") == 0) {
+                            is_bitfield = 1;
+                        }
+                    }
+
+                    if (is_bitfield) {
+                        take(p, ":");
+                        Node *bf_expr = expr(p);
+                        bit_width = (int)eval_const(p, bf_expr);
+                    }
+
                     long arr_count = 1;
                     LongArray *field_dims = malloc(sizeof(LongArray));
                     long_array_init(field_dims);
-                    if (strcmp(peek(p), "[") == 0) {
+                    if (!is_bitfield && strcmp(peek(p), "[") == 0) {
                         while (strcmp(peek(p), "[") == 0) {
                             take(p, "[");
                             long dim = 0;
@@ -572,39 +595,77 @@ static int parse_base_type(ParserState *p) {
                     }
                     int align = field_align;
                     if (align > 8) align = 8;
-                    if (!is_union && align > 1 && (offset % align) != 0) {
-                        offset += align - (offset % align);
-                    }
-                    if (tag[0] && f_tag[0]) {
-                        char key[256];
-                        snprintf(key, sizeof(key), "%s.%s", tag, field_name);
-                        hashmap_put(&p->global_struct_field_tags, arena_strdup(p->arena, key), (void *)f_tag, 0);
-                    }
-                    hashmap_put(fields, field_name, nullptr, offset);
-                    hashmap_put(&p->global_field_offsets, field_name, nullptr, offset);
-                    hashmap_put(&p->global_field_sizes, field_name, nullptr, field_size);
-                    int this_field_total = (int)(field_size * arr_count);
-                    if (tag[0]) {
-                        char key[256];
-                        snprintf(key, sizeof(key), "%s.%s", tag, field_name);
-                        const char *key_dup = arena_strdup(p->arena, key);
-                        hashmap_put(&p->global_struct_field_offsets_by_tag, key_dup, nullptr, offset);
-                        hashmap_put(&p->global_struct_field_sizes_by_tag, key_dup, nullptr, field_size);
-                        if (stars > 0) {
-                            int field_elem_size = (stars > 1) ? p->target_scale : field_base_size;
-                            hashmap_put(&p->global_struct_field_elem_sizes_by_tag, key_dup, nullptr, field_elem_size);
-                        }
-                        hashmap_put(&p->global_struct_field_total_sizes_by_tag, key_dup, nullptr, this_field_total);
-                        hashmap_put(&p->global_struct_field_dims_by_tag, key_dup, field_dims, 0);
-                    } else {
+
+                    if (is_bitfield) {
                         long_array_free(field_dims);
                         free(field_dims);
-                    }
-                    if (is_union) {
-                        if (this_field_total > union_max_size) union_max_size = this_field_total;
+                        int w = bit_width;
+                        if (current_unit_size != field_size || bit_offset + w > field_size * 8 || w == 0) {
+                            if (bit_offset > 0) {
+                                offset += current_unit_size;
+                            }
+                            if (align > 1 && (offset % align) != 0) {
+                                offset += align - (offset % align);
+                            }
+                            bit_offset = 0;
+                            current_unit_size = field_size;
+                        }
+
+                        if (tag[0]) {
+                            char key[256];
+                            snprintf(key, sizeof(key), "%s.%s", tag, field_name);
+                            const char *key_dup = arena_strdup(p->arena, key);
+                            hashmap_put(&p->global_struct_field_offsets_by_tag, key_dup, nullptr, offset);
+                            hashmap_put(&p->global_struct_field_sizes_by_tag, key_dup, nullptr, field_size);
+                            hashmap_put(&p->global_struct_field_bit_offsets_by_tag, key_dup, nullptr, bit_offset);
+                            hashmap_put(&p->global_struct_field_bit_widths_by_tag, key_dup, nullptr, w);
+                        }
+                        hashmap_put(fields, field_name, nullptr, offset);
+                        hashmap_put(&p->global_field_offsets, field_name, nullptr, offset);
+                        hashmap_put(&p->global_field_sizes, field_name, nullptr, field_size);
+
+                        bit_offset += w;
                     } else {
-                        offset += this_field_total;
+                        if (bit_offset > 0) {
+                            offset += current_unit_size;
+                            bit_offset = 0;
+                            current_unit_size = 0;
+                        }
+                        if (!is_union && align > 1 && (offset % align) != 0) {
+                            offset += align - (offset % align);
+                        }
+                        if (tag[0] && f_tag[0]) {
+                            char key[256];
+                            snprintf(key, sizeof(key), "%s.%s", tag, field_name);
+                            hashmap_put(&p->global_struct_field_tags, arena_strdup(p->arena, key), (void *)f_tag, 0);
+                        }
+                        hashmap_put(fields, field_name, nullptr, offset);
+                        hashmap_put(&p->global_field_offsets, field_name, nullptr, offset);
+                        hashmap_put(&p->global_field_sizes, field_name, nullptr, field_size);
+                        int this_field_total = (int)(field_size * arr_count);
+                        if (tag[0]) {
+                            char key[256];
+                            snprintf(key, sizeof(key), "%s.%s", tag, field_name);
+                            const char *key_dup = arena_strdup(p->arena, key);
+                            hashmap_put(&p->global_struct_field_offsets_by_tag, key_dup, nullptr, offset);
+                            hashmap_put(&p->global_struct_field_sizes_by_tag, key_dup, nullptr, field_size);
+                            if (stars > 0) {
+                                int field_elem_size = (stars > 1) ? p->target_scale : field_base_size;
+                                hashmap_put(&p->global_struct_field_elem_sizes_by_tag, key_dup, nullptr, field_elem_size);
+                            }
+                            hashmap_put(&p->global_struct_field_total_sizes_by_tag, key_dup, nullptr, this_field_total);
+                            hashmap_put(&p->global_struct_field_dims_by_tag, key_dup, field_dims, 0);
+                        } else {
+                            long_array_free(field_dims);
+                            free(field_dims);
+                        }
+                        if (is_union) {
+                            if (this_field_total > union_max_size) union_max_size = this_field_total;
+                        } else {
+                            offset += this_field_total;
+                        }
                     }
+
                     if (strcmp(peek(p), ",") == 0) {
                         take(p, ",");
                     } else {
@@ -617,6 +678,9 @@ static int parse_base_type(ParserState *p) {
             if (is_union) {
                 base_size = union_max_size;
             } else {
+                if (bit_offset > 0) {
+                    offset += current_unit_size;
+                }
                 if (offset > 0 && (offset % p->target_scale) != 0) {
                     offset += p->target_scale - (offset % p->target_scale);
                 }
@@ -1080,7 +1144,7 @@ static Node *factor(ParserState *p) {
                     parent->pointee_size = elem_entry->val_int;
                 }
                 HashMapEntry *tot_entry = hashmap_get(&p->global_struct_field_total_sizes_by_tag, field_key);
-                field_total_sz = tot_entry->val_int;
+                field_total_sz = tot_entry ? tot_entry->val_int : field_sz;
                 
                 LongArray *dims_ptr = ir_get_struct_field_dims(field_key);
                 if (dims_ptr) {
@@ -1112,6 +1176,16 @@ static Node *factor(ParserState *p) {
             parent->aggregate_size = field_total_sz;
             parent->array_dims = field_dims;
             parent->type_tag = field_tag;
+
+            /* Bitfield metadata */
+            if (field_key[0]) {
+                int bf_bit_offset = ir_get_struct_field_bit_offset(field_key);
+                int bf_bit_width  = ir_get_struct_field_bit_width(field_key);
+                if (bf_bit_width > 0) {
+                    parent->bit_offset = bf_bit_offset;
+                    parent->bit_width  = bf_bit_width;
+                }
+            }
             n = parent;
         } else if (strcmp(peek(p), "++") == 0 || strcmp(peek(p), "--") == 0) {
             const char *op = take(p, nullptr);
@@ -1890,6 +1964,8 @@ static Node *stmt(ParserState *p) {
         take(p, "{");
         int offset = 0;
         int union_max_sz = 0;
+        int bit_offset2 = 0;
+        int current_unit_size2 = 0;
         HashMap fields;
         hashmap_init(&fields, 16);
         while (strcmp(peek(p), "}") != 0) {
@@ -1910,65 +1986,121 @@ static Node *stmt(ParserState *p) {
                     fstars++;
                 }
                 int fsize = (fstars > 0) ? p->target_scale : fbase;
-                const char *field_name = take(p, nullptr);
-                long arr_cnt = 1;
-                LongArray field_dims;
-                long_array_init(&field_dims);
-                if (strcmp(peek(p), "[") == 0) {
-                    while (strcmp(peek(p), "[") == 0) {
-                        take(p, "[");
-                        long dim = 0;
-                        if (strcmp(peek(p), "]") != 0) {
-                            Node *sz = expr(p);
-                            dim = eval_const(p, sz);
-                            arr_cnt *= dim;
-                        }
-                        take(p, "]");
-                        long_array_push(&field_dims, dim);
-                    }
-                }
-                int align = fsize;
-                if (align > 8) align = 8;
-                if (!is_union_local && align > 1 && (offset % align) != 0) {
-                    offset += align - (offset % align);
-                }
                 
-                if (tag[0] && f_tag[0]) {
-                    char field_key[512];
-                    snprintf(field_key, sizeof(field_key), "%s.%s", tag, field_name);
-                    hashmap_put(&p->global_struct_field_tags, arena_strdup(p->arena, field_key), (void *)f_tag, 0);
-                }
-                
-                hashmap_put(&fields, field_name, nullptr, offset);
-                hashmap_put(&p->global_field_offsets, field_name, nullptr, offset);
-                hashmap_put(&p->global_field_sizes, field_name, nullptr, fsize);
-                
-                int total = (int)(fsize * arr_cnt);
-                if (tag[0]) {
-                    char key[512];
-                    snprintf(key, sizeof(key), "%s.%s", tag, field_name);
-                    const char *key_dup = arena_strdup(p->arena, key);
-                    
-                    hashmap_put(&p->global_struct_field_offsets_by_tag, key_dup, nullptr, offset);
-                    hashmap_put(&p->global_struct_field_sizes_by_tag, key_dup, nullptr, fsize);
-                    if (fstars > 0) {
-                        int field_elem_size = (fstars > 1) ? p->target_scale : fbase;
-                        hashmap_put(&p->global_struct_field_elem_sizes_by_tag, key_dup, nullptr, field_elem_size);
-                    }
-                    hashmap_put(&p->global_struct_field_total_sizes_by_tag, key_dup, nullptr, total);
-                    LongArray *dims_copy = malloc(sizeof(LongArray));
-                    long_array_init(dims_copy);
-                    for (int d_i = 0; d_i < field_dims.count; ++d_i) {
-                        long_array_push(dims_copy, field_dims.data[d_i]);
-                    }
-                    hashmap_put(&p->global_struct_field_dims_by_tag, key_dup, dims_copy, 0);
-                    ir_set_struct_field_dims(key_dup, field_dims);
-                }
-                
-                if (is_union_local) {
-                    if (total > union_max_sz) union_max_sz = total;
+                /* Detect bitfield */
+                const char *field_name;
+                int is_bf = 0;
+                int bf_width = 0;
+                if (strcmp(peek(p), ":") == 0) {
+                    /* anonymous bitfield */
+                    is_bf = 1;
+                    static int anon_bf2_id = 0;
+                    char tmp_name[128];
+                    snprintf(tmp_name, sizeof(tmp_name), "$anon_bf2_%d", anon_bf2_id++);
+                    field_name = arena_strdup(p->arena, tmp_name);
                 } else {
-                    offset += total;
+                    field_name = take(p, nullptr);
+                    if (strcmp(peek(p), ":") == 0) {
+                        is_bf = 1;
+                    }
+                }
+                if (is_bf) {
+                    take(p, ":");
+                    Node *bf_expr = expr(p);
+                    bf_width = (int)eval_const(p, bf_expr);
+                }
+
+                if (is_bf) {
+                    int w = bf_width;
+                    if (current_unit_size2 != fsize || bit_offset2 + w > fsize * 8 || w == 0) {
+                        if (bit_offset2 > 0) offset += current_unit_size2;
+                        int align = fsize; if (align > 8) align = 8;
+                        if (align > 1 && (offset % align) != 0)
+                            offset += align - (offset % align);
+                        bit_offset2 = 0;
+                        current_unit_size2 = fsize;
+                    }
+                    hashmap_put(&fields, field_name, nullptr, offset);
+                    hashmap_put(&p->global_field_offsets, field_name, nullptr, offset);
+                    hashmap_put(&p->global_field_sizes, field_name, nullptr, fsize);
+                    if (tag[0]) {
+                        char key[512];
+                        snprintf(key, sizeof(key), "%s.%s", tag, field_name);
+                        const char *key_dup = arena_strdup(p->arena, key);
+                        hashmap_put(&p->global_struct_field_offsets_by_tag, key_dup, nullptr, offset);
+                        hashmap_put(&p->global_struct_field_sizes_by_tag, key_dup, nullptr, fsize);
+                        hashmap_put(&p->global_struct_field_bit_offsets_by_tag, key_dup, nullptr, bit_offset2);
+                        hashmap_put(&p->global_struct_field_bit_widths_by_tag, key_dup, nullptr, w);
+                        ir_set_struct_field_bit_offset(key_dup, bit_offset2);
+                        ir_set_struct_field_bit_width(key_dup, w);
+                    }
+                    bit_offset2 += w;
+                } else {
+                    if (bit_offset2 > 0) {
+                        offset += current_unit_size2;
+                        bit_offset2 = 0;
+                        current_unit_size2 = 0;
+                    }
+                    long arr_cnt = 1;
+                    LongArray field_dims;
+                    long_array_init(&field_dims);
+                    if (strcmp(peek(p), "[") == 0) {
+                        while (strcmp(peek(p), "[") == 0) {
+                            take(p, "[");
+                            long dim = 0;
+                            if (strcmp(peek(p), "]") != 0) {
+                                Node *sz = expr(p);
+                                dim = eval_const(p, sz);
+                                arr_cnt *= dim;
+                            }
+                            take(p, "]");
+                            long_array_push(&field_dims, dim);
+                        }
+                    }
+                    int align = fsize;
+                    if (align > 8) align = 8;
+                    if (!is_union_local && align > 1 && (offset % align) != 0) {
+                        offset += align - (offset % align);
+                    }
+                    
+                    if (tag[0] && f_tag[0]) {
+                        char field_key[512];
+                        snprintf(field_key, sizeof(field_key), "%s.%s", tag, field_name);
+                        hashmap_put(&p->global_struct_field_tags, arena_strdup(p->arena, field_key), (void *)f_tag, 0);
+                    }
+                    
+                    hashmap_put(&fields, field_name, nullptr, offset);
+                    hashmap_put(&p->global_field_offsets, field_name, nullptr, offset);
+                    hashmap_put(&p->global_field_sizes, field_name, nullptr, fsize);
+                    
+                    int total = (int)(fsize * arr_cnt);
+                    if (tag[0]) {
+                        char key[512];
+                        snprintf(key, sizeof(key), "%s.%s", tag, field_name);
+                        const char *key_dup = arena_strdup(p->arena, key);
+                        
+                        hashmap_put(&p->global_struct_field_offsets_by_tag, key_dup, nullptr, offset);
+                        hashmap_put(&p->global_struct_field_sizes_by_tag, key_dup, nullptr, fsize);
+                        if (fstars > 0) {
+                            int field_elem_size = (fstars > 1) ? p->target_scale : fbase;
+                            hashmap_put(&p->global_struct_field_elem_sizes_by_tag, key_dup, nullptr, field_elem_size);
+                        }
+                        hashmap_put(&p->global_struct_field_total_sizes_by_tag, key_dup, nullptr, total);
+                        LongArray *dims_copy = malloc(sizeof(LongArray));
+                        long_array_init(dims_copy);
+                        for (int d_i = 0; d_i < field_dims.count; ++d_i) {
+                            long_array_push(dims_copy, field_dims.data[d_i]);
+                        }
+                        hashmap_put(&p->global_struct_field_dims_by_tag, key_dup, dims_copy, 0);
+                        ir_set_struct_field_dims(key_dup, field_dims);
+                    }
+                    
+                    if (is_union_local) {
+                        if (total > union_max_sz) union_max_sz = total;
+                    } else {
+                        offset += total;
+                    }
+                    long_array_free(&field_dims);
                 }
                 
                 if (strcmp(peek(p), ",") == 0) {
@@ -1981,6 +2113,7 @@ static Node *stmt(ParserState *p) {
         }
         take(p, "}");
         take(p, ";");
+        if (bit_offset2 > 0) offset += current_unit_size2;
         int struct_byte_size = is_union_local ? union_max_sz : offset;
         if (struct_byte_size > 0 && !is_union_local && (struct_byte_size % p->target_scale) != 0) {
             struct_byte_size += p->target_scale - (struct_byte_size % p->target_scale);
@@ -3113,6 +3246,8 @@ static void parser_state_cleanup(ParserState *state) {
     hashmap_free(&state->global_struct_field_sizes_by_tag);
     hashmap_free(&state->global_struct_field_elem_sizes_by_tag);
     hashmap_free(&state->global_struct_field_total_sizes_by_tag);
+    hashmap_free(&state->global_struct_field_bit_offsets_by_tag);
+    hashmap_free(&state->global_struct_field_bit_widths_by_tag);
 
     for (int b = 0; b < state->global_struct_field_dims_by_tag.bucket_count; ++b) {
         HashMapEntry *curr = state->global_struct_field_dims_by_tag.buckets[b];
@@ -3164,6 +3299,8 @@ NodeArray parser_parse(const TokenArray *tokens, int target_scale, Arena *arena)
     hashmap_init(&state.global_struct_field_elem_sizes_by_tag, 64);
     hashmap_init(&state.global_struct_field_total_sizes_by_tag, 64);
     hashmap_init(&state.global_struct_field_dims_by_tag, 64);
+    hashmap_init(&state.global_struct_field_bit_offsets_by_tag, 64);
+    hashmap_init(&state.global_struct_field_bit_widths_by_tag, 64);
 
     state.last_parsed_struct_tag = "";
     state.arena = arena;
@@ -3348,6 +3485,20 @@ NodeArray parser_parse(const TokenArray *tokens, int target_scale, Arena *arena)
         HashMapEntry *curr = state.global_struct_field_tags.buckets[b];
         while (curr) {
             ir_set_struct_field_tag(curr->key, (const char *)curr->val_ptr);
+            curr = curr->next;
+        }
+    }
+    for (int b = 0; b < state.global_struct_field_bit_offsets_by_tag.bucket_count; ++b) {
+        HashMapEntry *curr = state.global_struct_field_bit_offsets_by_tag.buckets[b];
+        while (curr) {
+            ir_set_struct_field_bit_offset(curr->key, curr->val_int);
+            curr = curr->next;
+        }
+    }
+    for (int b = 0; b < state.global_struct_field_bit_widths_by_tag.bucket_count; ++b) {
+        HashMapEntry *curr = state.global_struct_field_bit_widths_by_tag.buckets[b];
+        while (curr) {
+            ir_set_struct_field_bit_width(curr->key, curr->val_int);
             curr = curr->next;
         }
     }

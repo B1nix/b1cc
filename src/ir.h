@@ -29,6 +29,8 @@ typedef struct {
     const char *op;
     const char *arg;
     long value;
+    int line;
+    int col;
 } IrInst;
 
 typedef struct {
@@ -112,6 +114,8 @@ void ir_set_struct_field_size(const char *key, int val);
 void ir_set_struct_field_total_size(const char *key, int val);
 void ir_set_struct_field_dims(const char *key, LongArray dims);
 void ir_set_struct_field_tag(const char *key, const char *tag);
+void ir_set_struct_field_bit_offset(const char *key, int val);
+void ir_set_struct_field_bit_width(const char *key, int val);
 
 int ir_get_var_unsigned(const char *name);
 int ir_get_var_bool(const char *name);
@@ -122,6 +126,8 @@ int ir_get_struct_field_size(const char *key);
 int ir_get_struct_field_total_size(const char *key);
 LongArray *ir_get_struct_field_dims(const char *key);
 const char *ir_get_struct_field_tag(const char *key);
+int ir_get_struct_field_bit_offset(const char *key);
+int ir_get_struct_field_bit_width(const char *key);
 
 extern IrGlobalVarArray ir_global_decls;
 extern HashMap ir_global_vars;

@@ -338,13 +338,21 @@ TokenArray lex(const char *src, HashMap *macros, HashMap *active_macros, Arena *
                             int p_idx = find_param(&m->params, body_tokens.data[k].text);
                             if (p_idx != -1) {
                                 const char *arg_val = (p_idx < args.count) ? args.data[p_idx] : "";
-                                TokenArray arg_tokens = lex(arg_val, macros, active_macros, arena);
-                                for (int tok_idx = 0; tok_idx < arg_tokens.count; ++tok_idx) {
-                                    if (strcmp(arg_tokens.data[tok_idx].text, "EOF") != 0) {
-                                        token_array_push(&expanded, &arg_tokens.data[tok_idx]);
+                                if (arg_val[0] == '\0') {
+                                    Token placemarker;
+                                    placemarker.text = "";
+                                    placemarker.line = body_tokens.data[k].line;
+                                    placemarker.col = body_tokens.data[k].col;
+                                    token_array_push(&expanded, &placemarker);
+                                } else {
+                                    TokenArray arg_tokens = lex(arg_val, macros, active_macros, arena);
+                                    for (int tok_idx = 0; tok_idx < arg_tokens.count; ++tok_idx) {
+                                        if (strcmp(arg_tokens.data[tok_idx].text, "EOF") != 0) {
+                                            token_array_push(&expanded, &arg_tokens.data[tok_idx]);
+                                        }
                                     }
+                                    token_array_free(&arg_tokens);
                                 }
-                                token_array_free(&arg_tokens);
                                 continue;
                             }
 
@@ -357,11 +365,20 @@ TokenArray lex(const char *src, HashMap *macros, HashMap *active_macros, Arena *
                         for (int k = 0; k < expanded.count; ++k) {
                             if (strcmp(expanded.data[k].text, "##") == 0) {
                                 if (pasted.count > 0 && k + 1 < expanded.count) {
-                                    size_t len1 = strlen(pasted.data[pasted.count - 1].text);
-                                    size_t len2 = strlen(expanded.data[k + 1].text);
-                                    char *pasted_text = arena_alloc(arena, len1 + len2 + 1);
-                                    strcpy(pasted_text, pasted.data[pasted.count - 1].text);
-                                    strcat(pasted_text, expanded.data[k + 1].text);
+                                    const char *left = pasted.data[pasted.count - 1].text;
+                                    const char *right = expanded.data[k + 1].text;
+                                    char *pasted_text;
+                                    if (left[0] == '\0') {
+                                        pasted_text = arena_strdup(arena, right);
+                                    } else if (right[0] == '\0') {
+                                        pasted_text = arena_strdup(arena, left);
+                                    } else {
+                                        size_t len1 = strlen(left);
+                                        size_t len2 = strlen(right);
+                                        pasted_text = arena_alloc(arena, len1 + len2 + 1);
+                                        strcpy(pasted_text, left);
+                                        strcat(pasted_text, right);
+                                    }
                                     pasted.data[pasted.count - 1].text = pasted_text;
                                     k++;
                                 }
@@ -374,8 +391,10 @@ TokenArray lex(const char *src, HashMap *macros, HashMap *active_macros, Arena *
                         StringBuilder concatenated;
                         sb_init(&concatenated);
                         for (int k = 0; k < pasted.count; ++k) {
-                            sb_append(&concatenated, pasted.data[k].text);
-                            sb_append(&concatenated, " ");
+                            if (pasted.data[k].text[0] != '\0') {
+                                sb_append(&concatenated, pasted.data[k].text);
+                                sb_append(&concatenated, " ");
+                            }
                         }
                         token_array_free(&pasted);
 

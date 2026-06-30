@@ -368,6 +368,14 @@ set -e
 test "$rc" = 0
 echo "ok m18_aggregate_abi"
 
+./build/b1cc tests/m18_bitfields.c -o "$tmp/m18_bitfields"
+set +e
+"$tmp/m18_bitfields"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok m18_bitfields"
+
 ./build/b1cc tests/m19_integer_typing.c -o "$tmp/m19_integer_typing"
 set +e
 "$tmp/m19_integer_typing"
@@ -463,6 +471,38 @@ rc=$?
 set -e
 test "$rc" = 0
 echo "ok c23_empty_init"
+
+./build/b1cc tests/m14_promotions.c -o "$tmp/m14_promotions"
+set +e
+"$tmp/m14_promotions"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok m14_promotions"
+
+./build/b1cc tests/m15_debug.c -S -o "$tmp/m15_debug.s"
+grep -q '\.file 1 "tests/m15_debug.c"' "$tmp/m15_debug.s"
+grep -q '\.loc 1 ' "$tmp/m15_debug.s"
+echo "ok m15_debug"
+
+./build/b1cc --target=x86_64-b1nix tests/m15_debug.c -S -o "$tmp/m15_debug_x86_64.s"
+grep -q '\.file 1 "tests/m15_debug.c"' "$tmp/m15_debug_x86_64.s"
+grep -q '\.loc 1 ' "$tmp/m15_debug_x86_64.s"
+echo "ok m15_debug_x86_64"
+
+./build/b1cc --target=i386-b1nix tests/m15_debug.c -S -o "$tmp/m15_debug_i386.s"
+grep -q '\.file 1 "tests/m15_debug.c"' "$tmp/m15_debug_i386.s"
+grep -q '\.loc 1 ' "$tmp/m15_debug_i386.s"
+echo "ok m15_debug_i386"
+
+./build/b1cc tests/m17_preproc_edge.c -o "$tmp/m17_preproc_edge"
+set +e
+"$tmp/m17_preproc_edge"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok m17_preproc_edge"
+
 
 
 

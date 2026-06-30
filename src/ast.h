@@ -49,6 +49,8 @@ struct Node {
     int is_unsigned;
     int type_size;
     int is_bool;
+    int bit_offset;
+    int bit_width;
     int line;
     int col;
 };

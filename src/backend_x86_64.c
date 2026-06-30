@@ -152,8 +152,15 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
         }
     }
 
+    int last_loc_line = -1;
+    int last_loc_col = -1;
     for (int i_i = 0; i_i < fn->code.count; ++i_i) {
         const IrInst *inst = &fn->code.data[i_i];
+        if (inst->line > 0 && (inst->line != last_loc_line || inst->col != last_loc_col)) {
+            sb_appendf(&out, "    .loc 1 %d %d\n", inst->line, inst->col);
+            last_loc_line = inst->line;
+            last_loc_col = inst->col;
+        }
         if (strcmp(inst->op, "const") == 0) {
             sb_appendf(&out, "    movq $%ld, %%rax\n", inst->value);
             sb_append(&out, "    pushq %rax\n");
@@ -476,6 +483,31 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                 sb_append(&out, "    leave\n");
             }
             sb_append(&out, "    ret\n");
+        } else if (strcmp(inst->op, "extract_bits") == 0) {
+            int bf_offset = (int)(inst->value & 0xFFFF);
+            int bf_width  = (int)((inst->value >> 16) & 0xFFFF);
+            sb_append(&out, "    popq %rax\n");
+            if (bf_offset > 0) {
+                sb_appendf(&out, "    shrq $%d, %%rax\n", bf_offset);
+            }
+            long mask = (bf_width < 64) ? ((1L << bf_width) - 1) : -1L;
+            sb_appendf(&out, "    andq $%ld, %%rax\n", mask);
+            sb_append(&out, "    pushq %rax\n");
+        } else if (strcmp(inst->op, "insert_bits") == 0) {
+            int bf_offset = (int)(inst->value & 0xFFFF);
+            int bf_width  = (int)((inst->value >> 16) & 0xFFFF);
+            long mask = (bf_width < 64) ? ((1L << bf_width) - 1) : -1L;
+            sb_append(&out, "    popq %rdi\n");  /* dest_addr */
+            sb_append(&out, "    popq %rsi\n");  /* index (==0) */
+            sb_append(&out, "    popq %rax\n");  /* new value */
+            sb_appendf(&out, "    andq $%ld, %%rax\n", mask);
+            if (bf_offset > 0) {
+                sb_appendf(&out, "    shlq $%d, %%rax\n", bf_offset);
+            }
+            sb_append(&out, "    movq (%rdi), %rcx\n");
+            sb_appendf(&out, "    andq $%ld, %%rcx\n", ~(mask << bf_offset));
+            sb_append(&out, "    orq %rax, %rcx\n");
+            sb_append(&out, "    movq %rcx, (%rdi)\n");
         } else {
             char msg[128];
             snprintf(msg, sizeof(msg), "unknown IR op %s", inst->op);
@@ -504,10 +536,28 @@ static void x86_64_free(TargetBackend *self) {
     free(self);
 }
 
+static int x86_64_get_target_scale(TargetBackend *self) {
+    (void)self;
+    return 8;
+}
+
+static int x86_64_get_stack_slot_size(TargetBackend *self) {
+    (void)self;
+    return 16;
+}
+
+static int x86_64_get_aggregate_slots(TargetBackend *self, int size) {
+    (void)self;
+    return (size + 15) / 16;
+}
+
 TargetBackend* backend_create_x86_64(void) {
     X86_64Target *b = malloc(sizeof(X86_64Target));
     b->base.emit_globals = x86_64_emit_globals;
     b->base.emit_function = x86_64_emit_function;
     b->base.free = x86_64_free;
+    b->base.get_target_scale = x86_64_get_target_scale;
+    b->base.get_stack_slot_size = x86_64_get_stack_slot_size;
+    b->base.get_aggregate_slots = x86_64_get_aggregate_slots;
     return &b->base;
 }

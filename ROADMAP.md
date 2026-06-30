@@ -134,9 +134,10 @@
 ## M18: Conforming Aggregates & ABI
 
 - [x] Support integer/pointer struct passing and return by value with stack/register splitting.
-- [ ] Support full target ABI aggregate classification, including large returns, float/vector aggregates, and bitfields.
+- [ ] Support full target ABI aggregate classification, including large returns and float/vector aggregates.
 - [x] Support designated initializers (e.g., `struct Point p = { .x = 1 }`).
 - [x] Support nested brace initializers for multidimensional arrays and structures.
+- [x] Support bitfield member declarations with packing (`type name : bits`) and pack/unpack via `bfi`/`ubfx` (ARM64) and shift/mask patterns (x86_64, i386).
 
 ## Honest M14-M18 Gaps
 
@@ -144,7 +145,7 @@
 - M15 still does not have a native object/ELF writer; object/ELF production is driver-assisted through host tools or `b1nix-cc`.
 - M16 still lacks a written/enforced backend contract for type legalization, calling convention lowering, instruction selection, and register allocation.
 - M17 still only covers the tested C99 preprocessor operator subset; obscure expansion/rescan/placemarker edge cases remain future work.
-- M18 aggregate ABI support is intentionally limited to covered integer/pointer aggregates; large returns, float/vector aggregates, and bitfields are not complete.
+- M18 large returns (structs >16 bytes) and float/vector aggregates are not yet supported by the ABI lowering.
 
 ## M19: Complete Type System & Math
 
@@ -152,7 +153,7 @@
 - [ ] Support `long long` 64-bit integer operations on 32-bit platforms (register pairs on i386).
 - [x] Add integer-only typing foundation for scalar C11 `_Bool`, C23 `bool`/`true`/`false`, tolerated `const`/`volatile`/`restrict` qualifiers, and usual integer promotions/conversions across current scalar integer types.
 - [ ] Complete qualifier semantics beyond parsing/tolerance, including const-correct diagnostics and volatile access semantics.
-- [ ] Implement bitfields packing/unpacking in aggregates.
+- [x] Implement bitfields packing/unpacking in aggregates (ARM64 `bfi`/`ubfx`, x86_64/i386 shift+mask; named and anonymous bitfields in top-level and local struct/union definitions).
 
 ## M20: Callee-Side Varargs & Self-Hosting
 
