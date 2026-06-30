@@ -336,6 +336,38 @@ set -e
 test "$rc" = 42
 echo "ok m15_driver_modes"
 
+# M15: native ELF object output for x86_64-b1nix
+./build/b1cc --target=x86_64-b1nix -c tests/return_42.c -o "$tmp/m15_elf_x86_64.o"
+test -s "$tmp/m15_elf_x86_64.o"
+# Check ELF magic (bytes 0-3: 7f 45 4c 46)
+elf_magic=$(od -A n -N 4 -t x1 "$tmp/m15_elf_x86_64.o" | tr -d ' \n')
+test "$elf_magic" = "7f454c46"
+# Check ELF class = 2 (ELFCLASS64)
+elf_class=$(od -A n -j 4 -N 1 -t u1 "$tmp/m15_elf_x86_64.o" | tr -d ' \n')
+test "$elf_class" = "2"
+echo "ok m15_elf_obj_x86_64"
+
+# Check that nm can find 'main' in native ELF
+nm "$tmp/m15_elf_x86_64.o" 2>/dev/null | grep -q "main"
+echo "ok m15_elf_symbols_x86_64"
+
+# Check DWARF Line Info section presence in native ELF
+./build/b1cc --target=x86_64-b1nix -c -fdump-sections tests/return_42.c -o "$tmp/m15_elf_x86_64_debug.o" > "$tmp/m15_elf_x86_64_debug.txt" 2>&1
+grep -q ".debug_line" "$tmp/m15_elf_x86_64_debug.txt"
+grep -q ".rela.debug_line" "$tmp/m15_elf_x86_64_debug.txt"
+echo "ok m15_elf_debug_line_x86_64"
+
+# M15: native ELF object output for i386-b1nix
+./build/b1cc --target=i386-b1nix -c tests/return_42.c -o "$tmp/m15_elf_i386.o"
+test -s "$tmp/m15_elf_i386.o"
+# Check ELF magic
+elf_magic_i=$(od -A n -N 4 -t x1 "$tmp/m15_elf_i386.o" | tr -d ' \n')
+test "$elf_magic_i" = "7f454c46"
+# Check ELF class = 1 (ELFCLASS32)
+elf_class_i=$(od -A n -j 4 -N 1 -t u1 "$tmp/m15_elf_i386.o" | tr -d ' \n')
+test "$elf_class_i" = "1"
+echo "ok m15_elf_obj_i386"
+
 ./build/b1cc tests/m17_preprocessor_full.c -o "$tmp/m17_preprocessor_full"
 set +e
 "$tmp/m17_preprocessor_full"

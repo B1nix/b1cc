@@ -4,6 +4,7 @@
 #include "parser.h"
 #include "ir.h"
 #include "backend.h"
+#include "elf_writer.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -333,6 +334,11 @@ int main(int argc, char **argv) {
     }
 
     if (compile_only) {
+        /* Determine whether to use native ELF writer or host assembler */
+        bool use_native_elf = (strcmp(target, "x86_64-b1nix") == 0 ||
+                               strcmp(target, "i386-b1nix")   == 0 ||
+                               strcmp(target, "x86-b1nix")    == 0);
+
         for (int idx = 0; idx < inputs.count; ++idx) {
             const char *inp = inputs.data[idx];
             size_t inp_len = strlen(inp);
@@ -342,12 +348,6 @@ int main(int argc, char **argv) {
             }
             diagnostics_filepath = inp;
             const char *asm_text = backend_compile_asm(read_file(inp, &arena), target, dump_ast, dump_ir, &arena);
-            
-            char tmp_asm[] = "/tmp/b1cc-XXXXXX.s";
-            int fd = mkstemps(tmp_asm, 2);
-            if (fd < 0) diagnostics_fatal("cannot create temporary file");
-            close(fd);
-            write_file(tmp_asm, asm_text);
 
             const char *dest_obj = output;
             if (!dest_obj || !dest_obj[0] || inputs.count > 1) {
@@ -362,23 +362,46 @@ int main(int argc, char **argv) {
                 dest_obj = arena_strdup(&arena, dest_buf);
             }
 
-            StringBuilder cmd;
-            sb_init(&cmd);
-            sb_append(&cmd, prefix);
-            sb_append(&cmd, shell_quote(cc, &arena));
-            sb_append(&cmd, " -c ");
-            sb_append(&cmd, shell_quote(tmp_asm, &arena));
-            sb_append(&cmd, " -o ");
-            sb_append(&cmd, shell_quote(dest_obj, &arena));
+            if (use_native_elf) {
+                /* Native ELF writer path — no external assembler needed */
+                ElfObject obj = elf_write_object(asm_text, target, inp, &arena);
+                if (!obj.data || obj.size == 0) {
+                    diagnostics_fatal("elf_write_object: failed to produce ELF object");
+                }
+                FILE *of = fopen(dest_obj, "wb");
+                if (!of) {
+                    char msg[512];
+                    snprintf(msg, sizeof(msg), "cannot write %s", dest_obj);
+                    diagnostics_fatal(msg);
+                }
+                fwrite(obj.data, 1, obj.size, of);
+                fclose(of);
+            } else {
+                /* Host assembler path (arm64-darwin, etc.) */
+                char tmp_asm[] = "/tmp/b1cc-XXXXXX.s";
+                int fd = mkstemps(tmp_asm, 2);
+                if (fd < 0) diagnostics_fatal("cannot create temporary file");
+                close(fd);
+                write_file(tmp_asm, asm_text);
 
-            const char *cmd_str = sb_to_string(&cmd, &arena);
-            sb_free(&cmd);
+                StringBuilder cmd;
+                sb_init(&cmd);
+                sb_append(&cmd, prefix);
+                sb_append(&cmd, shell_quote(cc, &arena));
+                sb_append(&cmd, " -c ");
+                sb_append(&cmd, shell_quote(tmp_asm, &arena));
+                sb_append(&cmd, " -o ");
+                sb_append(&cmd, shell_quote(dest_obj, &arena));
 
-            int rc = system(cmd_str);
-            unlink(tmp_asm);
-            if (rc != 0) {
-                arena_free(&arena);
-                return 1;
+                const char *cmd_str = sb_to_string(&cmd, &arena);
+                sb_free(&cmd);
+
+                int rc = system(cmd_str);
+                unlink(tmp_asm);
+                if (rc != 0) {
+                    arena_free(&arena);
+                    return 1;
+                }
             }
             dump_object(dest_obj, dump_symbols, dump_sections, dump_relocs, &arena);
         }

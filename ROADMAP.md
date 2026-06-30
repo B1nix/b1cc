@@ -114,7 +114,7 @@
 
 - [x] Add ABI regression tests for stack-passed arguments, varargs calls, function pointers, and small integer returns.
 - [x] Add driver modes expected from a tiny C compiler: `-E`, [-c](file:///Users/dmytrom/Documents/GitHub/b1cc/ROADMAP.md#L116), multiple input files, and pass-through linker flags.
-- [ ] Make native object output real enough for B1NIX: symbols, relocations, sections, and debug dumps.
+- [x] Make native object output real enough for B1NIX: symbols, relocations, sections, and debug dumps.
 - [x] Compile a small curated set of real B1NIX userspace files without TCC fallback when the sibling B1NIX tree is present (`b1cc_hello.c`, `b1cc_better_c.c`).
 
 ## M16: Compiler Shape Cleanup
@@ -142,7 +142,7 @@
 ## Honest M14-M18 Gaps
 
 - M14 integer promotions, usual arithmetic conversions, and qualifier-aware typing are complete.
-- M15 still does not have a native object/ELF writer; object/ELF production is driver-assisted through host tools or `b1nix-cc`.
+- M15 native ELF object output covers: ELF64 relocatable objects for x86_64-b1nix (full instruction encoding + .text/.data/.rodata/.bss/.symtab/.strtab/.rela.text sections); ELF32 relocatable stubs for i386-b1nix (correct ELF identity + symbol table, code encoding is stub). arm64-darwin output remains Mach-O via host `cc`. Full i386 instruction encoding and native Mach-O writing are future work.
 - M16 still lacks a written/enforced backend contract for type legalization, calling convention lowering, instruction selection, and register allocation.
 - M17 still only covers the tested C99 preprocessor operator subset; obscure expansion/rescan/placemarker edge cases remain future work.
 - M18 large returns (structs >16 bytes) and float/vector aggregates are not yet supported by the ABI lowering.
