@@ -24,6 +24,8 @@ typedef struct {
     int last_type_bool;
 
     HashMap global_typedefs;
+    HashMap global_typedef_sizes;
+    HashMap global_typedef_struct_tags;
     HashMap global_enums;
     HashMap constexpr_vars;
     HashMap global_structs;
@@ -34,6 +36,7 @@ typedef struct {
     HashMap global_struct_field_tags;
     HashMap global_struct_field_offsets_by_tag;
     HashMap global_struct_field_sizes_by_tag;
+    HashMap global_struct_field_elem_sizes_by_tag;
     HashMap global_struct_field_total_sizes_by_tag;
     HashMap global_struct_field_dims_by_tag;
 
@@ -41,6 +44,6 @@ typedef struct {
     Arena *arena;
 } ParserState;
 
-NodeArray parser_parse(TokenArray tokens, int target_scale, Arena *arena);
+NodeArray parser_parse(const TokenArray *tokens, int target_scale, Arena *arena);
 
 #endif // PARSER_H

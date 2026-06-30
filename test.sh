@@ -424,6 +424,14 @@ set -e
 test "$rc" = 0
 echo "ok c23_nullptr"
 
+./build/b1cc tests/c23_bool.c -o "$tmp/c23_bool"
+set +e
+"$tmp/c23_bool"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok c23_bool"
+
 ./build/b1cc tests/c23_static_assert.c -o "$tmp/c23_static_assert"
 set +e
 "$tmp/c23_static_assert"
@@ -465,6 +473,10 @@ grep -q "IDENT: int" "$tmp/lexer_output.txt"
 grep -q "NUM: 9" "$tmp/lexer_output.txt"
 grep -q "EOF" "$tmp/lexer_output.txt"
 echo "ok self_hosting_lexer"
+
+./build/b1cc src/ast.c -c -o "$tmp/ast_self.o"
+test -s "$tmp/ast_self.o"
+echo "ok self_hosting_ast"
 
 ./build/b1cc --target=x86_64-b1nix tests/return_42.c -S -o "$tmp/return_42_x86_64.s"
 grep -q '^main:' "$tmp/return_42_x86_64.s"

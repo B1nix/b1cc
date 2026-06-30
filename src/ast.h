@@ -16,7 +16,7 @@ typedef struct TokenArray {
 } TokenArray;
 
 void token_array_init(TokenArray *arr);
-void token_array_push(TokenArray *arr, Token val);
+void token_array_push(TokenArray *arr, const Token *val);
 void token_array_free(TokenArray *arr);
 
 typedef struct Node Node;
@@ -45,6 +45,7 @@ struct Node {
     const char *type_tag;
     LongArray array_dims;
     int elem_size;
+    int pointee_size;
     int is_unsigned;
     int type_size;
     int is_bool;

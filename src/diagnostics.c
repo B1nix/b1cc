@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-const char *diagnostics_filepath = "input.c";
+const char *diagnostics_filepath = nullptr;
 
 void diagnostics_error(int line, int col, const char *msg) {
     fprintf(stderr, "%s:%d:%d: error: %s\n", diagnostics_filepath, line, col, msg);

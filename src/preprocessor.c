@@ -14,12 +14,14 @@ void cond_state_array_init(CondStateArray *arr) {
     arr->capacity = 0;
 }
 
-void cond_state_array_push(CondStateArray *arr, CondState val) {
+void cond_state_array_push(CondStateArray *arr, const CondState *val) {
     if (arr->count >= arr->capacity) {
         arr->capacity = arr->capacity * 2 + 8;
         arr->data = realloc(arr->data, arr->capacity * sizeof(CondState));
     }
-    arr->data[arr->count++] = val;
+    arr->data[arr->count].condition_met = val->condition_met;
+    arr->data[arr->count].active = val->active;
+    arr->count = arr->count + 1;
 }
 
 void cond_state_array_free(CondStateArray *arr) {
@@ -27,6 +29,22 @@ void cond_state_array_free(CondStateArray *arr) {
     arr->data = nullptr;
     arr->count = 0;
     arr->capacity = 0;
+}
+
+static bool is_active(const CondStateArray *cond_stack) {
+    for (int idx = 0; idx < cond_stack->count; ++idx) {
+        if (!cond_stack->data[idx].active) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void push_cond(CondStateArray *arr, bool condition_met, bool active) {
+    CondState cs;
+    cs.condition_met = condition_met;
+    cs.active = active;
+    cond_state_array_push(arr, &cs);
 }
 
 static int exists(const char *path) {
@@ -98,7 +116,7 @@ static const char *ep_peek(ExprParser *ep) {
 
 static const char *ep_take(ExprParser *ep) {
     const char *t = ep_peek(ep);
-    ep->pos++;
+    ep->pos = ep->pos + 1;
     return t;
 }
 
@@ -269,6 +287,10 @@ static long eval_preproc_expr(const char *expr_str, const HashMap *macros, Arena
                 } else {
                     sb_append(&res, "0");
                 }
+            } else if (strcmp(ident, "true") == 0) {
+                sb_append(&res, "1");
+            } else if (strcmp(ident, "false") == 0) {
+                sb_append(&res, "0");
             } else {
                 sb_append(&res, "0");
             }
@@ -288,7 +310,7 @@ static long eval_preproc_expr(const char *expr_str, const HashMap *macros, Arena
     return val;
 }
 
-static const char *find_include_file(const char *name, int is_angled, const char *current_file_dir, const StringArray *include_dirs, Arena *arena) {
+static const char *find_include_file(const char *name, bool is_angled, const char *current_file_dir, const StringArray *include_dirs, Arena *arena) {
     char path[1024];
     if (!is_angled) {
         snprintf(path, sizeof(path), "%s/%s", current_file_dir, name);
@@ -329,16 +351,7 @@ const char *preprocessor_preprocess(const char *raw_src, const char *filepath, S
     CondStateArray cond_stack;
     cond_state_array_init(&cond_stack);
 
-    #define IS_ACTIVE() ({ \
-        int _act = 1; \
-        for (int _idx = 0; _idx < cond_stack.count; ++_idx) { \
-            if (!cond_stack.data[_idx].active) { \
-                _act = 0; \
-                break; \
-            } \
-        } \
-        _act; \
-    })
+    #define IS_ACTIVE() is_active(&cond_stack)
 
     char current_file_dir[512] = ".";
     const char *last_slash1 = strrchr(filepath, '/');
@@ -382,38 +395,38 @@ const char *preprocessor_preprocess(const char *raw_src, const char *filepath, S
                 size_t name_start = p;
                 while (p < line_len && (is_alnum(line[p]) || line[p] == '_')) p++;
                 const char *name = arena_strndup(arena, line + name_start, p - name_start);
-                int cond = hashmap_has(macros, name);
-                int parent_active = IS_ACTIVE();
-                cond_state_array_push(&cond_stack, (CondState){cond, cond && parent_active});
+                bool cond = hashmap_has(macros, name);
+                bool parent_active = IS_ACTIVE();
+                push_cond(&cond_stack, cond, cond && parent_active);
                 sb_append(&out, "\n");
             } else if (strcmp(directive, "ifndef") == 0) {
                 size_t name_start = p;
                 while (p < line_len && (is_alnum(line[p]) || line[p] == '_')) p++;
                 const char *name = arena_strndup(arena, line + name_start, p - name_start);
-                int cond = !hashmap_has(macros, name);
-                int parent_active = IS_ACTIVE();
-                cond_state_array_push(&cond_stack, (CondState){cond, cond && parent_active});
+                bool cond = !hashmap_has(macros, name);
+                bool parent_active = IS_ACTIVE();
+                push_cond(&cond_stack, cond, cond && parent_active);
                 sb_append(&out, "\n");
             } else if (strcmp(directive, "if") == 0) {
-                int cond = eval_preproc_expr(line + p, macros, arena) != 0;
-                int parent_active = IS_ACTIVE();
-                cond_state_array_push(&cond_stack, (CondState){cond, cond && parent_active});
+                bool cond = eval_preproc_expr(line + p, macros, arena) != 0;
+                bool parent_active = IS_ACTIVE();
+                push_cond(&cond_stack, cond, cond && parent_active);
                 sb_append(&out, "\n");
             } else if (strcmp(directive, "elif") == 0) {
                 if (cond_stack.count == 0) {
                     diagnostics_fatal("unmatched #elif");
                 }
-                int parent_active = 1;
+                bool parent_active = true;
                 for (int idx = 0; idx + 1 < cond_stack.count; ++idx) {
-                    if (!cond_stack.data[idx].active) parent_active = 0;
+                    if (!cond_stack.data[idx].active) parent_active = false;
                 }
                 if (cond_stack.data[cond_stack.count - 1].condition_met) {
-                    cond_stack.data[cond_stack.count - 1].active = 0;
+                    cond_stack.data[cond_stack.count - 1].active = false;
                 } else {
-                    int cond = eval_preproc_expr(line + p, macros, arena) != 0;
+                    bool cond = eval_preproc_expr(line + p, macros, arena) != 0;
                     cond_stack.data[cond_stack.count - 1].active = cond && parent_active;
                     if (cond) {
-                        cond_stack.data[cond_stack.count - 1].condition_met = 1;
+                        cond_stack.data[cond_stack.count - 1].condition_met = true;
                     }
                 }
                 sb_append(&out, "\n");
@@ -421,18 +434,18 @@ const char *preprocessor_preprocess(const char *raw_src, const char *filepath, S
                 if (cond_stack.count == 0) {
                     diagnostics_fatal("unmatched #else");
                 }
-                int parent_active = 1;
+                bool parent_active = true;
                 for (int idx = 0; idx + 1 < cond_stack.count; ++idx) {
-                    if (!cond_stack.data[idx].active) parent_active = 0;
+                    if (!cond_stack.data[idx].active) parent_active = false;
                 }
                 cond_stack.data[cond_stack.count - 1].active = !cond_stack.data[cond_stack.count - 1].condition_met && parent_active;
-                cond_stack.data[cond_stack.count - 1].condition_met = 1;
+                cond_stack.data[cond_stack.count - 1].condition_met = true;
                 sb_append(&out, "\n");
             } else if (strcmp(directive, "endif") == 0) {
                 if (cond_stack.count == 0) {
                     diagnostics_fatal("unmatched #endif");
                 }
-                cond_stack.count--;
+                cond_stack.count = cond_stack.count - 1;
                 sb_append(&out, "\n");
             } else if (strcmp(directive, "define") == 0 && IS_ACTIVE()) {
                 size_t name_start = p;
@@ -440,11 +453,11 @@ const char *preprocessor_preprocess(const char *raw_src, const char *filepath, S
                 const char *name = arena_strndup(arena, line + name_start, p - name_start);
 
                 Macro *m = arena_alloc(arena, sizeof(Macro));
-                m->is_function_like = 0;
+                m->is_function_like = false;
                 string_array_init(&m->params);
 
                 if (p < line_len && line[p] == '(') {
-                    m->is_function_like = 1;
+                    m->is_function_like = true;
                     p++;
                     while (p < line_len && line[p] != ')') {
                         while (p < line_len && (line[p] == ' ' || line[p] == '\t')) p++;
@@ -487,10 +500,10 @@ const char *preprocessor_preprocess(const char *raw_src, const char *filepath, S
                 hashmap_remove(macros, name);
                 sb_append(&out, "\n");
             } else if (strcmp(directive, "include") == 0 && IS_ACTIVE()) {
-                int is_angled = 0;
+                bool is_angled = false;
                 const char *filename = "";
                 if (p < line_len && line[p] == '<') {
-                    is_angled = 1;
+                    is_angled = true;
                     p++;
                     size_t fn_start = p;
                     while (p < line_len && line[p] != '>') p++;

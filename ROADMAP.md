@@ -8,10 +8,10 @@
 - [x] Emit Darwin ARM64 assembly for host smoke tests.
 - [x] Add a tiny runnable test script.
 
-## M1: C++17 Compiler Core
+## M1: C Compiler Core
 
-- [x] Rewrite the prototype in C++17.
-- [x] Build with `-std=c++17 -fno-exceptions -fno-rtti`.
+- [x] Maintain the compiler implementation as C23.
+- [x] Build with `-std=c23`.
 - [x] Keep one binary: `b1cc`.
 - [x] Add lexer, parser, AST, diagnostics, IR, and backend as small modules.
 - [x] Preserve the current expression-return tests.
@@ -150,13 +150,24 @@
 
 - [ ] Support floating-point types (`float`, `double`) with vector/FPU backend instructions and registers.
 - [ ] Support `long long` 64-bit integer operations on 32-bit platforms (register pairs on i386).
-- [x] Add integer-only C99 typing foundation for scalar `_Bool`, tolerated `const`/`volatile`/`restrict` qualifiers, and usual integer promotions/conversions across current scalar integer types.
+- [x] Add integer-only typing foundation for scalar C11 `_Bool`, C23 `bool`/`true`/`false`, tolerated `const`/`volatile`/`restrict` qualifiers, and usual integer promotions/conversions across current scalar integer types.
 - [ ] Complete qualifier semantics beyond parsing/tolerance, including const-correct diagnostics and volatile access semantics.
 - [ ] Implement bitfields packing/unpacking in aggregates.
 
 ## M20: Callee-Side Varargs & Self-Hosting
 
 - [ ] Add compiler built-ins for writing vararg functions (`__builtin_va_list`, `__builtin_va_start`, etc.).
-- [ ] Support compilation of a clean-room C version of the compiler codebase (e.g., pure C variant of `b1cc` or C++ subsets).
+- [ ] Support full self-host roundtrip for the C compiler codebase: host-built `b1cc` builds `build/b1cc_self`, and `build/b1cc_self` can compile/link the covered test corpus, not only tiny smoke programs.
+- [ ] Add regression coverage for the current self-host smoke boundary: `build/b1cc_self` compiling `tests/return_42.c` and producing an executable that exits with 42.
+- [ ] Implement general aggregate assignment for structs/unions, including nested field assignment such as `state.tokens = tokens`, instead of relying on field-wise workaround code in compiler internals.
+- [ ] Replace remaining self-host workarounds for by-value aggregate copies with real aggregate copy lowering, or document each intentionally pointer-based API boundary.
+- [ ] Extend aggregate return/call lowering beyond the currently covered small integer/pointer aggregate subset; large struct returns and non-integer aggregates must have explicit ABI tests before being marked supported.
+- [ ] Add self-host regression tests for local string array initializers such as `char tmp[] = "/tmp/file-XXXXXX.s"` because the driver depends on them for temporary assembly/object paths.
+
+## Honest M20 Gaps
+
+- Current self-host progress is partial: `compile_self.sh` can build `build/b1cc_self`, and that binary can compile a minimal `return_42` program, but this is not yet a complete self-host milestone.
+- General C aggregate assignment is still incomplete; compiler sources avoid some cases by passing containers and IR objects by pointer or copying fields manually.
+- Aggregate ABI support remains pragmatic and test-driven. Do not claim full C struct passing/return support until large returns, nested aggregates, and target ABI classification are covered by regression tests.
 
 Skipped: full C/C++ upfront. Add features only when a test or B1NIX source needs them.

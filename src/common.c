@@ -8,13 +8,16 @@
 
 #define ARENA_CHUNK_DEFAULT_CAPACITY (64 * 1024)
 
+static size_t align_up(size_t value, size_t alignment) {
+    return (value + alignment - 1) & ~(alignment - 1);
+}
+
 void arena_init(Arena *a) {
     a->head = nullptr;
 }
 
 void *arena_alloc(Arena *a, size_t size) {
-    // Align size to 8 bytes
-    size = (size + 7) & ~7;
+    size = align_up(size, alignof(max_align_t));
 
     if (!a->head || a->head->offset + size > a->head->capacity) {
         size_t cap = ARENA_CHUNK_DEFAULT_CAPACITY;
@@ -30,7 +33,7 @@ void *arena_alloc(Arena *a, size_t size) {
     }
 
     void *ptr = &a->head->bytes[a->head->offset];
-    a->head->offset += size;
+    a->head->offset = a->head->offset + size;
     return ptr;
 }
 
@@ -77,7 +80,7 @@ void sb_append(StringBuilder *sb, const char *s) {
         sb->buf = realloc(sb->buf, sb->cap);
     }
     memcpy(sb->buf + sb->len, s, slen);
-    sb->len += slen;
+    sb->len = sb->len + slen;
     sb->buf[sb->len] = '\0';
 }
 
@@ -86,10 +89,20 @@ void sb_append_char(StringBuilder *sb, char c) {
         sb->cap = sb->cap * 2 + 16;
         sb->buf = realloc(sb->buf, sb->cap);
     }
-    sb->buf[sb->len++] = c;
+    sb->buf[sb->len] = c;
+    sb->len = sb->len + 1;
     sb->buf[sb->len] = '\0';
 }
 
+#ifdef __b1cc__
+void sb_appendf(StringBuilder *sb, const char *fmt, long a1, long a2, long a3, long a4, long a5, long a6) {
+    char temp[2048];
+    int needed = snprintf(temp, sizeof(temp), fmt, a1, a2, a3, a4, a5, a6);
+    if (needed > 0) {
+        sb_append(sb, temp);
+    }
+}
+#else
 void sb_appendf(StringBuilder *sb, const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
@@ -110,9 +123,10 @@ void sb_appendf(StringBuilder *sb, const char *fmt, ...) {
     }
 
     vsnprintf(sb->buf + sb->len, needed + 1, fmt, args);
-    sb->len += needed;
+    sb->len = sb->len + needed;
     va_end(args);
 }
+#endif
 
 char *sb_to_string(StringBuilder *sb, Arena *a) {
     if (!sb->buf) return arena_strdup(a, "");
@@ -178,7 +192,7 @@ void hashmap_put(HashMap *map, const char *key, void *val_ptr, long val_int) {
     entry->val_int = val_int;
     entry->next = map->buckets[h];
     map->buckets[h] = entry;
-    map->size++;
+    map->size = map->size + 1;
 }
 
 HashMapEntry *hashmap_get(HashMap *map, const char *key) {
@@ -211,7 +225,7 @@ void hashmap_remove(HashMap *map, const char *key) {
                 map->buckets[h] = curr->next;
             }
             free(curr);
-            map->size--;
+            map->size = map->size - 1;
             return;
         }
         prev = curr;
@@ -232,7 +246,8 @@ void string_array_push(StringArray *arr, const char *val) {
         arr->capacity = arr->capacity * 2 + 8;
         arr->data = realloc(arr->data, arr->capacity * sizeof(const char *));
     }
-    arr->data[arr->count++] = val;
+    arr->data[arr->count] = val;
+    arr->count = arr->count + 1;
 }
 
 void string_array_free(StringArray *arr) {
@@ -253,7 +268,8 @@ void int_array_push(IntArray *arr, int val) {
         arr->capacity = arr->capacity * 2 + 8;
         arr->data = realloc(arr->data, arr->capacity * sizeof(int));
     }
-    arr->data[arr->count++] = val;
+    arr->data[arr->count] = val;
+    arr->count = arr->count + 1;
 }
 
 void int_array_free(IntArray *arr) {
@@ -274,7 +290,8 @@ void long_array_push(LongArray *arr, long val) {
         arr->capacity = arr->capacity * 2 + 8;
         arr->data = realloc(arr->data, arr->capacity * sizeof(long));
     }
-    arr->data[arr->count++] = val;
+    arr->data[arr->count] = val;
+    arr->count = arr->count + 1;
 }
 
 void long_array_free(LongArray *arr) {

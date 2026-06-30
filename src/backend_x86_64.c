@@ -4,6 +4,34 @@
 #include <stdlib.h>
 #include <string.h>
 
+static void x86_64_emit_block_copy(StringBuilder *out, const char *src_reg, const char *dest_reg, int size) {
+    int offset = 0;
+    while (size >= 8) {
+        sb_appendf(out, "    movq %d(%s), %%r11\n", offset, src_reg);
+        sb_appendf(out, "    movq %%r11, %d(%s)\n", offset, dest_reg);
+        offset += 8;
+        size -= 8;
+    }
+    if (size >= 4) {
+        sb_appendf(out, "    movl %d(%s), %%r11d\n", offset, src_reg);
+        sb_appendf(out, "    movl %%r11d, %d(%s)\n", offset, dest_reg);
+        offset += 4;
+        size -= 4;
+    }
+    if (size >= 2) {
+        sb_appendf(out, "    movw %d(%s), %%r11w\n", offset, src_reg);
+        sb_appendf(out, "    movw %%r11w, %d(%s)\n", offset, dest_reg);
+        offset += 2;
+        size -= 2;
+    }
+    if (size >= 1) {
+        sb_appendf(out, "    movb %d(%s), %%r11b\n", offset, src_reg);
+        sb_appendf(out, "    movb %%r11b, %d(%s)\n", offset, dest_reg);
+        offset += 1;
+        size -= 1;
+    }
+}
+
 typedef struct {
     TargetBackend base;
 } X86_64Target;
@@ -18,46 +46,46 @@ static const char *x86_64_emit_globals(TargetBackend *self, const IrGlobalVarArr
     sb_append(&out, ".data\n");
 
     for (int i = 0; i < globals->count; ++i) {
-        IrGlobalVar g = globals->data[i];
-        if (g.is_extern && g.initializers.count == 0) {
+        const IrGlobalVar *g = &globals->data[i];
+        if (g->is_extern && g->initializers.count == 0) {
             continue;
         }
-        if (!g.is_static) {
-            sb_appendf(&out, ".globl %s\n", g.name);
+        if (!g->is_static) {
+            sb_appendf(&out, ".globl %s\n", g->name);
         }
-        int align = g.align;
+        int align = g->align;
         if (align == 0) {
-            align = (g.elem_size == 8) ? 3 : (g.elem_size == 4) ? 2 : (g.elem_size == 2) ? 1 : 0;
+            align = (g->elem_size == 8) ? 3 : (g->elem_size == 4) ? 2 : (g->elem_size == 2) ? 1 : 0;
         }
-        sb_appendf(&out, ".type %s, @object\n", g.name);
-        long total_bytes = g.is_array ? (g.size * g.elem_size) : ((g.initializers.count == 0 ? 1 : g.initializers.count) * g.elem_size);
-        sb_appendf(&out, ".size %s, %ld\n", g.name, total_bytes);
+        sb_appendf(&out, ".type %s, @object\n", g->name);
+        long total_bytes = g->is_array ? (g->size * g->elem_size) : ((g->initializers.count == 0 ? 1 : g->initializers.count) * g->elem_size);
+        sb_appendf(&out, ".size %s, %ld\n", g->name, total_bytes);
         sb_appendf(&out, ".p2align %d\n", align);
-        sb_appendf(&out, "%s:\n", g.name);
+        sb_appendf(&out, "%s:\n", g->name);
 
-        if (g.is_array || g.initializers.count > 1) {
-            for (int k = 0; k < g.initializers.count; ++k) {
-                long val = g.initializers.data[k];
-                if (g.elem_size == 1)
+        if (g->is_array || g->initializers.count > 1) {
+            for (int k = 0; k < g->initializers.count; ++k) {
+                long val = g->initializers.data[k];
+                if (g->elem_size == 1)
                     sb_appendf(&out, "    .byte %d\n", (int)(val & 0xff));
-                else if (g.elem_size == 2)
+                else if (g->elem_size == 2)
                     sb_appendf(&out, "    .short %d\n", (int)(val & 0xffff));
-                else if (g.elem_size == 4)
+                else if (g->elem_size == 4)
                     sb_appendf(&out, "    .long %ld\n", val);
                 else
                     sb_appendf(&out, "    .quad %ld\n", val);
             }
-            long remaining = g.size - g.initializers.count;
+            long remaining = g->size - g->initializers.count;
             if (remaining > 0) {
-                sb_appendf(&out, "    .zero %ld\n", remaining * g.elem_size);
+                sb_appendf(&out, "    .zero %ld\n", remaining * g->elem_size);
             }
         } else {
-            long val = (g.initializers.count == 0) ? 0 : g.initializers.data[0];
-            if (g.elem_size == 1)
+            long val = (g->initializers.count == 0) ? 0 : g->initializers.data[0];
+            if (g->elem_size == 1)
                 sb_appendf(&out, "    .byte %d\n", (int)(val & 0xff));
-            else if (g.elem_size == 2)
+            else if (g->elem_size == 2)
                 sb_appendf(&out, "    .short %d\n", (int)(val & 0xffff));
-            else if (g.elem_size == 4)
+            else if (g->elem_size == 4)
                 sb_appendf(&out, "    .long %ld\n", val);
             else
                 sb_appendf(&out, "    .quad %ld\n", val);
@@ -72,7 +100,7 @@ static const char *x86_64_emit_globals(TargetBackend *self, const IrGlobalVarArr
 
 static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *fn, Arena *arena) {
     (void)self;
-    static const char *regs[] = {"%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"};
+    const char *regs[6] = {"%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"};
     
     StringBuilder out;
     sb_init(&out);
@@ -102,9 +130,14 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
         for (int i = 0; i < fn->params.count; ++i) {
             int agg_size = (i < fn->param_aggregate_sizes.count) ? fn->param_aggregate_sizes.data[i] : 0;
             int words = (agg_size > 0) ? ((agg_size + 7) / 8) : 1;
+            int num_slots = (agg_size > 0) ? ((agg_size + 15) / 16) : 1;
             int in_regs = (abi_word + words <= 6);
+            
+            HashMapEntry *entry = hashmap_get((HashMap *)&fn->locals, fn->params.data[i]);
+            int slot_idx = entry ? entry->val_int : i;
+            
             for (int w = 0; w < words; ++w) {
-                int off = -((i + 1) * 16) + (w * 8);
+                int off = -((slot_idx + num_slots) * 16) + (w * 8);
                 if (in_regs) {
                     sb_appendf(&out, "    movq %s, %d(%%rbp)\n", regs[abi_word + w], off);
                 } else {
@@ -120,105 +153,108 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
     }
 
     for (int i_i = 0; i_i < fn->code.count; ++i_i) {
-        IrInst inst = fn->code.data[i_i];
-        if (strcmp(inst.op, "const") == 0) {
-            sb_appendf(&out, "    movq $%ld, %%rax\n", inst.value);
+        const IrInst *inst = &fn->code.data[i_i];
+        if (strcmp(inst->op, "const") == 0) {
+            sb_appendf(&out, "    movq $%ld, %%rax\n", inst->value);
             sb_append(&out, "    pushq %rax\n");
-        } else if (strcmp(inst.op, "load") == 0) {
-            sb_appendf(&out, "    movq -%ld(%%rbp), %%rax\n", (inst.value + 1) * 16);
+        } else if (strcmp(inst->op, "load") == 0) {
+            sb_appendf(&out, "    movq -%ld(%%rbp), %%rax\n", (inst->value + 1) * 16);
             sb_append(&out, "    pushq %rax\n");
-        } else if (strcmp(inst.op, "str") == 0) {
-            sb_appendf(&out, "    leaq %s(%%rip), %%rax\n", inst.arg);
+        } else if (strcmp(inst->op, "str") == 0) {
+            sb_appendf(&out, "    leaq %s(%%rip), %%rax\n", inst->arg);
             sb_append(&out, "    pushq %rax\n");
-        } else if (strcmp(inst.op, "store") == 0) {
+        } else if (strcmp(inst->op, "store") == 0) {
             sb_append(&out, "    popq %rax\n");
-            sb_appendf(&out, "    movq %%rax, -%ld(%%rbp)\n", (inst.value + 1) * 16);
-        } else if (strcmp(inst.op, "pop") == 0) {
+            sb_appendf(&out, "    movq %%rax, -%ld(%%rbp)\n", (inst->value + 1) * 16);
+        } else if (strcmp(inst->op, "dup") == 0) {
+            sb_append(&out, "    movq (%rsp), %rax\n");
+            sb_append(&out, "    pushq %rax\n");
+        } else if (strcmp(inst->op, "pop") == 0) {
             sb_append(&out, "    addq $8, %rsp\n");
-        } else if (strcmp(inst.op, "+") == 0 || strcmp(inst.op, "-") == 0 || strcmp(inst.op, "*") == 0 ||
-                   strcmp(inst.op, "/") == 0 || strcmp(inst.op, "%") == 0 || strcmp(inst.op, "==") == 0 || strcmp(inst.op, "!=") == 0 ||
-                   strcmp(inst.op, "<") == 0 || strcmp(inst.op, ">") == 0 || strcmp(inst.op, "<=") == 0 ||
-                   strcmp(inst.op, "u<") == 0 || strcmp(inst.op, "u>") == 0 || strcmp(inst.op, "u<=") == 0 ||
-                   strcmp(inst.op, "u>=") == 0 || strcmp(inst.op, "u>>") == 0 ||
-                   strcmp(inst.op, ">=") == 0 || strcmp(inst.op, "index") == 0 ||
-                   strcmp(inst.op, "&") == 0 || strcmp(inst.op, "|") == 0 || strcmp(inst.op, "^") == 0 ||
-                   strcmp(inst.op, "<<") == 0 || strcmp(inst.op, ">>") == 0) {
+        } else if (strcmp(inst->op, "+") == 0 || strcmp(inst->op, "-") == 0 || strcmp(inst->op, "*") == 0 ||
+                   strcmp(inst->op, "/") == 0 || strcmp(inst->op, "%") == 0 || strcmp(inst->op, "==") == 0 || strcmp(inst->op, "!=") == 0 ||
+                   strcmp(inst->op, "<") == 0 || strcmp(inst->op, ">") == 0 || strcmp(inst->op, "<=") == 0 ||
+                   strcmp(inst->op, "u<") == 0 || strcmp(inst->op, "u>") == 0 || strcmp(inst->op, "u<=") == 0 ||
+                   strcmp(inst->op, "u>=") == 0 || strcmp(inst->op, "u>>") == 0 ||
+                   strcmp(inst->op, ">=") == 0 || strcmp(inst->op, "index") == 0 ||
+                   strcmp(inst->op, "&") == 0 || strcmp(inst->op, "|") == 0 || strcmp(inst->op, "^") == 0 ||
+                   strcmp(inst->op, "<<") == 0 || strcmp(inst->op, ">>") == 0) {
             
             sb_append(&out, "    popq %rcx\n");
             sb_append(&out, "    popq %rax\n");
-            if (strcmp(inst.op, "index") == 0) {
-                if (inst.value == 1) {
+            if (strcmp(inst->op, "index") == 0) {
+                if (inst->value == 1) {
                     sb_append(&out, "    movsbq (%rax,%rcx,1), %rax\n");
-                } else if (inst.value == 2) {
+                } else if (inst->value == 2) {
                     sb_append(&out, "    movswq (%rax,%rcx,2), %rax\n");
-                } else if (inst.value == 4) {
+                } else if (inst->value == 4) {
                     sb_append(&out, "    movslq (%rax,%rcx,4), %rax\n");
                 } else {
                     sb_append(&out, "    movq (%rax,%rcx,8), %rax\n");
                 }
-            } else if (strcmp(inst.op, "+") == 0)
+            } else if (strcmp(inst->op, "+") == 0)
                 sb_append(&out, "    addq %rcx, %rax\n");
-            else if (strcmp(inst.op, "-") == 0)
+            else if (strcmp(inst->op, "-") == 0)
                 sb_append(&out, "    subq %rcx, %rax\n");
-            else if (strcmp(inst.op, "*") == 0)
+            else if (strcmp(inst->op, "*") == 0)
                 sb_append(&out, "    imulq %rcx, %rax\n");
-            else if (strcmp(inst.op, "/") == 0) {
+            else if (strcmp(inst->op, "/") == 0) {
                 sb_append(&out, "    cqto\n");
                 sb_append(&out, "    idivq %rcx\n");
-            } else if (strcmp(inst.op, "%") == 0) {
+            } else if (strcmp(inst->op, "%") == 0) {
                 sb_append(&out, "    cqto\n");
                 sb_append(&out, "    idivq %rcx\n");
                 sb_append(&out, "    movq %rdx, %rax\n");
-            } else if (strcmp(inst.op, "&") == 0)
+            } else if (strcmp(inst->op, "&") == 0)
                 sb_append(&out, "    andq %rcx, %rax\n");
-            else if (strcmp(inst.op, "|") == 0)
+            else if (strcmp(inst->op, "|") == 0)
                 sb_append(&out, "    orq %rcx, %rax\n");
-            else if (strcmp(inst.op, "^") == 0)
+            else if (strcmp(inst->op, "^") == 0)
                 sb_append(&out, "    xorq %rcx, %rax\n");
-            else if (strcmp(inst.op, "<<") == 0 || strcmp(inst.op, ">>") == 0 || strcmp(inst.op, "u>>") == 0) {
-                if (strcmp(inst.op, "<<") == 0)
+            else if (strcmp(inst->op, "<<") == 0 || strcmp(inst->op, ">>") == 0 || strcmp(inst->op, "u>>") == 0) {
+                if (strcmp(inst->op, "<<") == 0)
                     sb_append(&out, "    shlq %cl, %rax\n");
-                else if (strcmp(inst.op, ">>") == 0)
+                else if (strcmp(inst->op, ">>") == 0)
                     sb_append(&out, "    sarq %cl, %rax\n");
                 else
                     sb_append(&out, "    shrq %cl, %rax\n");
             } else {
                 sb_append(&out, "    cmpq %rcx, %rax\n");
-                if (strcmp(inst.op, "==") == 0)
+                if (strcmp(inst->op, "==") == 0)
                     sb_append(&out, "    sete %al\n");
-                else if (strcmp(inst.op, "!=") == 0)
+                else if (strcmp(inst->op, "!=") == 0)
                     sb_append(&out, "    setne %al\n");
-                else if (strcmp(inst.op, "<") == 0)
+                else if (strcmp(inst->op, "<") == 0)
                     sb_append(&out, "    setl %al\n");
-                else if (strcmp(inst.op, ">") == 0)
+                else if (strcmp(inst->op, ">") == 0)
                     sb_append(&out, "    setg %al\n");
-                else if (strcmp(inst.op, "<=") == 0)
+                else if (strcmp(inst->op, "<=") == 0)
                     sb_append(&out, "    setle %al\n");
-                else if (strcmp(inst.op, ">=") == 0)
+                else if (strcmp(inst->op, ">=") == 0)
                     sb_append(&out, "    setge %al\n");
-                else if (strcmp(inst.op, "u<") == 0)
+                else if (strcmp(inst->op, "u<") == 0)
                     sb_append(&out, "    setb %al\n");
-                else if (strcmp(inst.op, "u>") == 0)
+                else if (strcmp(inst->op, "u>") == 0)
                     sb_append(&out, "    seta %al\n");
-                else if (strcmp(inst.op, "u<=") == 0)
+                else if (strcmp(inst->op, "u<=") == 0)
                     sb_append(&out, "    setbe %al\n");
                 else
                     sb_append(&out, "    setae %al\n");
                 sb_append(&out, "    movzbq %al, %rax\n");
             }
             sb_append(&out, "    pushq %rax\n");
-        } else if (strcmp(inst.op, "~") == 0 || strcmp(inst.op, "!") == 0 || strcmp(inst.op, "neg") == 0 || strcmp(inst.op, "cast") == 0) {
+        } else if (strcmp(inst->op, "~") == 0 || strcmp(inst->op, "!") == 0 || strcmp(inst->op, "neg") == 0 || strcmp(inst->op, "cast") == 0) {
             sb_append(&out, "    popq %rax\n");
-            if (strcmp(inst.op, "~") == 0)
+            if (strcmp(inst->op, "~") == 0)
                 sb_append(&out, "    notq %rax\n");
-            else if (strcmp(inst.op, "neg") == 0)
+            else if (strcmp(inst->op, "neg") == 0)
                 sb_append(&out, "    negq %rax\n");
-            else if (strcmp(inst.op, "cast") == 0) {
-                if (inst.value == 1)
+            else if (strcmp(inst->op, "cast") == 0) {
+                if (inst->value == 1)
                     sb_append(&out, "    movsbq %al, %rax\n");
-                else if (inst.value == 2)
+                else if (inst->value == 2)
                     sb_append(&out, "    movswq %ax, %rax\n");
-                else if (inst.value == 4)
+                else if (inst->value == 4)
                     sb_append(&out, "    movslq %eax, %rax\n");
             } else {
                 sb_append(&out, "    cmpq $0, %rax\n");
@@ -226,19 +262,19 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                 sb_append(&out, "    movzbq %al, %rax\n");
             }
             sb_append(&out, "    pushq %rax\n");
-        } else if (strcmp(inst.op, "jz") == 0) {
+        } else if (strcmp(inst->op, "jz") == 0) {
             sb_append(&out, "    popq %rax\n");
             sb_append(&out, "    cmpq $0, %rax\n");
-            sb_appendf(&out, "    je %s\n", inst.arg);
-        } else if (strcmp(inst.op, "jmp") == 0) {
-            sb_appendf(&out, "    jmp %s\n", inst.arg);
-        } else if (strcmp(inst.op, "label") == 0) {
-            sb_appendf(&out, "%s:\n", inst.arg);
-        } else if (strcmp(inst.op, "call") == 0 || strcmp(inst.op, "icall") == 0) {
-            long num_args = inst.value;
+            sb_appendf(&out, "    je %s\n", inst->arg);
+        } else if (strcmp(inst->op, "jmp") == 0) {
+            sb_appendf(&out, "    jmp %s\n", inst->arg);
+        } else if (strcmp(inst->op, "label") == 0) {
+            sb_appendf(&out, "%s:\n", inst->arg);
+        } else if (strcmp(inst->op, "call") == 0 || strcmp(inst->op, "icall") == 0) {
+            long num_args = inst->value;
             IntArray *agg_sizes = nullptr;
-            if (strcmp(inst.op, "call") == 0) {
-                HashMapEntry *entry = hashmap_get(&ir_function_param_aggregate_sizes, inst.arg);
+            if (strcmp(inst->op, "call") == 0) {
+                HashMapEntry *entry = hashmap_get(&ir_function_param_aggregate_sizes, inst->arg);
                 if (entry) agg_sizes = (IntArray *)entry->val_ptr;
             }
             int has_aggregate_arg = 0;
@@ -292,32 +328,32 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                         }
                     }
                 }
-                if (strcmp(inst.op, "icall") == 0) {
+                if (strcmp(inst->op, "icall") == 0) {
                     sb_appendf(&out, "    movq %d(%%rsp), %%rax\n", stack_bytes + (int)num_args * 8);
                     sb_append(&out, "    movq %rax, %r11\n");
                     sb_append(&out, "    xorl %eax, %eax\n");
                     sb_append(&out, "    call *%r11\n");
                 } else {
                     sb_append(&out, "    xorl %eax, %eax\n");
-                    sb_appendf(&out, "    call %s\n", inst.arg);
+                    sb_appendf(&out, "    call %s\n", inst->arg);
                 }
-                sb_appendf(&out, "    addq $%d, %%rsp\n", stack_bytes + (int)num_args * 8 + (strcmp(inst.op, "icall") == 0 ? 8 : 0));
+                sb_appendf(&out, "    addq $%d, %%rsp\n", stack_bytes + (int)num_args * 8 + (strcmp(inst->op, "icall") == 0 ? 8 : 0));
             } else if (num_args <= 6) {
                 for (long i = num_args - 1; i >= 0; --i) {
                     sb_appendf(&out, "    popq %s\n", regs[i]);
                 }
-                if (strcmp(inst.op, "icall") == 0) {
+                if (strcmp(inst->op, "icall") == 0) {
                     sb_append(&out, "    popq %rax\n");
                     sb_append(&out, "    movq %rax, %r11\n");
                     sb_append(&out, "    xorl %eax, %eax\n");
                     sb_append(&out, "    call *%r11\n");
                 } else {
                     sb_append(&out, "    xorl %eax, %eax\n");
-                    sb_appendf(&out, "    call %s\n", inst.arg);
+                    sb_appendf(&out, "    call %s\n", inst->arg);
                 }
             } else {
                 long num_stack_args = num_args - 6;
-                static const char *temp_regs[] = {"%r10", "%r11", "%r12", "%r13", "%r14", "%r15"};
+                const char *temp_regs[6] = {"%r10", "%r11", "%r12", "%r13", "%r14", "%r15"};
                 for (long i = num_args - 1; i >= 6; --i) {
                     int t_idx = (int)(i - 6);
                     sb_appendf(&out, "    popq %s\n", temp_regs[t_idx % 6]);
@@ -325,20 +361,20 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                 for (long i = 5; i >= 0; --i) {
                     sb_appendf(&out, "    popq %s\n", regs[i]);
                 }
-                if (strcmp(inst.op, "icall") == 0) {
+                if (strcmp(inst->op, "icall") == 0) {
                     sb_append(&out, "    popq %rax\n");
                 }
                 for (long i = num_args - 1; i >= 6; --i) {
                     int t_idx = (int)(i - 6);
                     sb_appendf(&out, "    pushq %s\n", temp_regs[t_idx % 6]);
                 }
-                if (strcmp(inst.op, "icall") == 0) {
+                if (strcmp(inst->op, "icall") == 0) {
                     sb_append(&out, "    movq %rax, %r10\n");
                     sb_append(&out, "    xorl %eax, %eax\n");
                     sb_append(&out, "    call *%r10\n");
                 } else {
                     sb_append(&out, "    xorl %eax, %eax\n");
-                    sb_appendf(&out, "    call %s\n", inst.arg);
+                    sb_appendf(&out, "    call %s\n", inst->arg);
                 }
                 sb_appendf(&out, "    addq $%ld, %%rsp\n", num_stack_args * 8);
             }
@@ -348,80 +384,93 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
             free(arg_stack_word);
 
             int ret_agg_size = 0;
-            if (strcmp(inst.op, "call") == 0) {
-                HashMapEntry *entry = hashmap_get(&ir_function_return_aggregate_sizes, inst.arg);
+            if (strcmp(inst->op, "call") == 0) {
+                HashMapEntry *entry = hashmap_get(&ir_function_return_aggregate_sizes, inst->arg);
                 if (entry) ret_agg_size = entry->val_int;
             }
             sb_append(&out, "    pushq %rax\n");
             if (ret_agg_size > 8) {
                 sb_append(&out, "    pushq %rdx\n");
             }
-        } else if (strcmp(inst.op, "addr") == 0) {
-            sb_appendf(&out, "    leaq -%ld(%%rbp), %%rax\n", (inst.value + 1) * 16);
+        } else if (strcmp(inst->op, "addr") == 0) {
+            sb_appendf(&out, "    leaq -%ld(%%rbp), %%rax\n", (inst->value + 1) * 16);
             sb_append(&out, "    pushq %rax\n");
-        } else if (strcmp(inst.op, "gload") == 0) {
+        } else if (strcmp(inst->op, "gload") == 0) {
             int gsize = 8;
-            HashMapEntry *ge = hashmap_get(&ir_global_var_elem_scales, inst.arg);
+            HashMapEntry *ge = hashmap_get(&ir_global_var_elem_scales, inst->arg);
             if (ge) gsize = ge->val_int;
 
             if (gsize == 1)
-                sb_appendf(&out, "    movsbl %s(%%rip), %%eax\n", inst.arg);
+                sb_appendf(&out, "    movsbl %s(%%rip), %%eax\n", inst->arg);
             else if (gsize == 2)
-                sb_appendf(&out, "    movswq %s(%%rip), %%rax\n", inst.arg);
+                sb_appendf(&out, "    movswq %s(%%rip), %%rax\n", inst->arg);
             else if (gsize == 4)
-                sb_appendf(&out, "    movslq %s(%%rip), %%rax\n", inst.arg);
+                sb_appendf(&out, "    movslq %s(%%rip), %%rax\n", inst->arg);
             else
-                sb_appendf(&out, "    movq %s(%%rip), %%rax\n", inst.arg);
+                sb_appendf(&out, "    movq %s(%%rip), %%rax\n", inst->arg);
             sb_append(&out, "    pushq %rax\n");
-        } else if (strcmp(inst.op, "gstore") == 0) {
+        } else if (strcmp(inst->op, "gstore") == 0) {
             sb_append(&out, "    popq %rax\n");
             int gsize = 8;
-            HashMapEntry *ge = hashmap_get(&ir_global_var_elem_scales, inst.arg);
+            HashMapEntry *ge = hashmap_get(&ir_global_var_elem_scales, inst->arg);
             if (ge) gsize = ge->val_int;
 
             if (gsize == 1)
-                sb_appendf(&out, "    movb %%al, %s(%%rip)\n", inst.arg);
+                sb_appendf(&out, "    movb %%al, %s(%%rip)\n", inst->arg);
             else if (gsize == 2)
-                sb_appendf(&out, "    movw %%ax, %s(%%rip)\n", inst.arg);
+                sb_appendf(&out, "    movw %%ax, %s(%%rip)\n", inst->arg);
             else if (gsize == 4)
-                sb_appendf(&out, "    movl %%eax, %s(%%rip)\n", inst.arg);
+                sb_appendf(&out, "    movl %%eax, %s(%%rip)\n", inst->arg);
             else
-                sb_appendf(&out, "    movq %%rax, %s(%%rip)\n", inst.arg);
-        } else if (strcmp(inst.op, "gaddr") == 0) {
-            sb_appendf(&out, "    leaq %s(%%rip), %%rax\n", inst.arg);
+                sb_appendf(&out, "    movq %%rax, %s(%%rip)\n", inst->arg);
+        } else if (strcmp(inst->op, "gaddr") == 0) {
+            sb_appendf(&out, "    leaq %s(%%rip), %%rax\n", inst->arg);
             sb_append(&out, "    pushq %rax\n");
-        } else if (strcmp(inst.op, "store_index") == 0) {
-            sb_append(&out, "    popq %rax\n");
-            sb_append(&out, "    popq %rcx\n");
-            sb_append(&out, "    popq %rdx\n");
-            if (inst.value == 1) {
-                sb_append(&out, "    movb %dl, (%rax,%rcx,1)\n");
-            } else if (inst.value == 2) {
-                sb_append(&out, "    movw %dx, (%rax,%rcx,2)\n");
-            } else if (inst.value == 4) {
-                sb_append(&out, "    movl %edx, (%rax,%rcx,4)\n");
+        } else if (strcmp(inst->op, "store_index") == 0) {
+            sb_append(&out, "    popq %rax\n"); // dest_addr
+            sb_append(&out, "    popq %rcx\n"); // offset
+            if (inst->value > 8) {
+                sb_appendf(&out, "    imulq $%ld, %%rcx\n", inst->value);
+                sb_append(&out, "    addq %rcx, %rax\n");
+                sb_append(&out, "    popq %rdx\n"); // value 1
+                sb_append(&out, "    movq %rdx, 8(%rax)\n");
+                sb_append(&out, "    popq %rdx\n"); // value 0
+                sb_append(&out, "    movq %rdx, (%rax)\n");
             } else {
-                sb_append(&out, "    movq %rdx, (%rax,%rcx,8)\n");
+                sb_append(&out, "    popq %rdx\n"); // value 0
+                if (inst->value == 1) {
+                    sb_append(&out, "    movb %dl, (%rax,%rcx,1)\n");
+                } else if (inst->value == 2) {
+                    sb_append(&out, "    movw %dx, (%rax,%rcx,2)\n");
+                } else if (inst->value == 4) {
+                    sb_append(&out, "    movl %edx, (%rax,%rcx,4)\n");
+                } else {
+                    sb_append(&out, "    movq %rdx, (%rax,%rcx,8)\n");
+                }
             }
-        } else if (strcmp(inst.op, "store_agg") == 0) {
+        } else if (strcmp(inst->op, "store_agg") == 0) {
             sb_append(&out, "    popq %r10\n");
-            if (inst.value > 8) {
+            if (inst->value > 8) {
                 sb_append(&out, "    popq %rax\n");
                 sb_append(&out, "    movq %rax, 8(%r10)\n");
             }
             sb_append(&out, "    popq %rax\n");
             sb_append(&out, "    movq %rax, (%r10)\n");
-        } else if (strcmp(inst.op, "ret_agg") == 0) {
+        } else if (strcmp(inst->op, "copy") == 0) {
+            sb_append(&out, "    popq %r10\n"); // dest_addr
+            sb_append(&out, "    popq %rax\n"); // src_addr
+            x86_64_emit_block_copy(&out, "%rax", "%r10", inst->value);
+        } else if (strcmp(inst->op, "ret_agg") == 0) {
             sb_append(&out, "    popq %r10\n");
             sb_append(&out, "    movq (%r10), %rax\n");
-            if (inst.value > 8) {
+            if (inst->value > 8) {
                 sb_append(&out, "    movq 8(%r10), %rdx\n");
             }
             if (frame) {
                 sb_append(&out, "    leave\n");
             }
             sb_append(&out, "    ret\n");
-        } else if (strcmp(inst.op, "ret") == 0) {
+        } else if (strcmp(inst->op, "ret") == 0) {
             sb_append(&out, "    popq %rax\n");
             if (frame) {
                 sb_append(&out, "    leave\n");
@@ -429,9 +478,20 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
             sb_append(&out, "    ret\n");
         } else {
             char msg[128];
-            snprintf(msg, sizeof(msg), "unknown IR op %s", inst.op);
+            snprintf(msg, sizeof(msg), "unknown IR op %s", inst->op);
             diagnostics_fatal(msg);
         }
+    }
+    int has_explicit_ret = 0;
+    if (fn->code.count > 0) {
+        const char *last_op = fn->code.data[fn->code.count - 1].op;
+        has_explicit_ret = strcmp(last_op, "ret") == 0 || strcmp(last_op, "ret_agg") == 0;
+    }
+    if (!has_explicit_ret) {
+        if (frame) {
+            sb_append(&out, "    leave\n");
+        }
+        sb_append(&out, "    ret\n");
     }
     sb_appendf(&out, ".size %s, .-%s\n", fn->name, fn->name);
 

@@ -2,6 +2,18 @@
 #define COMMON_H
 
 #include <stddef.h>
+#include <stdbool.h>
+
+#ifdef __b1cc__
+#define B1CC_THREAD_LOCAL
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L
+#define B1CC_THREAD_LOCAL thread_local
+#else
+#define B1CC_THREAD_LOCAL _Thread_local
+#endif
+
+static_assert(sizeof(long) >= 8, "b1cc assumes a 64-bit or wider host long");
+static_assert(sizeof(void *) <= sizeof(long), "b1cc stores pointer-sized values in long slots");
 
 // --- Arena Allocator ---
 typedef struct ArenaChunk {
@@ -31,7 +43,11 @@ typedef struct StringBuilder {
 void sb_init(StringBuilder *sb);
 void sb_append(StringBuilder *sb, const char *s);
 void sb_append_char(StringBuilder *sb, char c);
+#ifdef __b1cc__
+void sb_appendf(StringBuilder *sb, const char *fmt, long a1, long a2, long a3, long a4, long a5, long a6);
+#else
 void sb_appendf(StringBuilder *sb, const char *fmt, ...);
+#endif
 char *sb_to_string(StringBuilder *sb, Arena *a);
 void sb_free(StringBuilder *sb);
 

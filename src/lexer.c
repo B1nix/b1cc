@@ -34,6 +34,14 @@ static int find_param(const StringArray *params, const char *name) {
     return -1;
 }
 
+static void push_token(TokenArray *arr, const char *text, int line, int col) {
+    Token t;
+    t.text = text;
+    t.line = line;
+    t.col = col;
+    token_array_push(arr, &t);
+}
+
 TokenArray lex(const char *src, HashMap *macros, HashMap *active_macros, Arena *arena) {
     TokenArray out;
     token_array_init(&out);
@@ -42,7 +50,7 @@ TokenArray lex(const char *src, HashMap *macros, HashMap *active_macros, Arena *
     size_t i = 0;
     size_t src_len = strlen(src);
 
-    #define CONSUME(count) do { \
+    #define CONSUME(count) { \
         size_t _cnt = (count); \
         for (size_t _k = 0; _k < _cnt && i < src_len; ++_k) { \
             if (src[i] == '\n') { \
@@ -53,7 +61,7 @@ TokenArray lex(const char *src, HashMap *macros, HashMap *active_macros, Arena *
             } \
             i++; \
         } \
-    } while (0)
+    }
 
     while (i < src_len) {
         char c = src[i];
@@ -74,10 +82,10 @@ TokenArray lex(const char *src, HashMap *macros, HashMap *active_macros, Arena *
             } else {
                 if (i + 1 < src_len && src[i + 1] == '#') {
                     CONSUME(2);
-                    token_array_push(&out, (Token){"##", tok_line, tok_col});
+                    push_token(&out, "##", tok_line, tok_col);
                 } else {
                     CONSUME(1);
-                    token_array_push(&out, (Token){"#", tok_line, tok_col});
+                    push_token(&out, "#", tok_line, tok_col);
                 }
             }
         } else if (i + 1 < src_len && src[i] == '/' && src[i + 1] == '/') {
@@ -111,7 +119,7 @@ TokenArray lex(const char *src, HashMap *macros, HashMap *active_macros, Arena *
             while (i < src_len && (src[i] == 'u' || src[i] == 'U' || src[i] == 'l' || src[i] == 'L')) {
                 CONSUME(1);
             }
-            token_array_push(&out, (Token){num_str, tok_line, tok_col});
+            push_token(&out, num_str, tok_line, tok_col);
         } else if (is_alpha(c)) {
             size_t start = i;
             CONSUME(1);
@@ -157,7 +165,7 @@ TokenArray lex(const char *src, HashMap *macros, HashMap *active_macros, Arena *
                                 k++;
                             }
                         } else {
-                            token_array_push(&pasted, body_tokens.data[k]);
+                            token_array_push(&pasted, &body_tokens.data[k]);
                         }
                     }
                     token_array_free(&body_tokens);
@@ -179,7 +187,7 @@ TokenArray lex(const char *src, HashMap *macros, HashMap *active_macros, Arena *
                             Token tok = macro_tokens.data[k];
                             tok.line = tok_line;
                             tok.col = tok_col;
-                            token_array_push(&out, tok);
+                            token_array_push(&out, &tok);
                         }
                     }
                     token_array_free(&macro_tokens);
@@ -271,7 +279,7 @@ TokenArray lex(const char *src, HashMap *macros, HashMap *active_macros, Arena *
                                             Token tok = body_tokens.data[k];
                                             tok.text = sb_to_string(&stringified, arena);
                                             sb_free(&stringified);
-                                            token_array_push(&expanded, tok);
+                                            token_array_push(&expanded, &tok);
                                             k++;
                                             continue;
                                         }
@@ -294,7 +302,7 @@ TokenArray lex(const char *src, HashMap *macros, HashMap *active_macros, Arena *
                                             Token tok = body_tokens.data[k];
                                             tok.text = sb_to_string(&stringified, arena);
                                             sb_free(&stringified);
-                                            token_array_push(&expanded, tok);
+                                            token_array_push(&expanded, &tok);
                                             k++;
                                             continue;
                                         }
@@ -318,7 +326,7 @@ TokenArray lex(const char *src, HashMap *macros, HashMap *active_macros, Arena *
                                     TokenArray arg_tokens = lex(va_str, macros, active_macros, arena);
                                     for (int tok_idx = 0; tok_idx < arg_tokens.count; ++tok_idx) {
                                         if (strcmp(arg_tokens.data[tok_idx].text, "EOF") != 0) {
-                                            token_array_push(&expanded, arg_tokens.data[tok_idx]);
+                                            token_array_push(&expanded, &arg_tokens.data[tok_idx]);
                                         }
                                     }
                                     token_array_free(&arg_tokens);
@@ -333,14 +341,14 @@ TokenArray lex(const char *src, HashMap *macros, HashMap *active_macros, Arena *
                                 TokenArray arg_tokens = lex(arg_val, macros, active_macros, arena);
                                 for (int tok_idx = 0; tok_idx < arg_tokens.count; ++tok_idx) {
                                     if (strcmp(arg_tokens.data[tok_idx].text, "EOF") != 0) {
-                                        token_array_push(&expanded, arg_tokens.data[tok_idx]);
+                                        token_array_push(&expanded, &arg_tokens.data[tok_idx]);
                                     }
                                 }
                                 token_array_free(&arg_tokens);
                                 continue;
                             }
 
-                            token_array_push(&expanded, body_tokens.data[k]);
+                            token_array_push(&expanded, &body_tokens.data[k]);
                         }
                         token_array_free(&body_tokens);
 
@@ -358,7 +366,7 @@ TokenArray lex(const char *src, HashMap *macros, HashMap *active_macros, Arena *
                                     k++;
                                 }
                             } else {
-                                token_array_push(&pasted, expanded.data[k]);
+                                token_array_push(&pasted, &expanded.data[k]);
                             }
                         }
                         token_array_free(&expanded);
@@ -380,19 +388,19 @@ TokenArray lex(const char *src, HashMap *macros, HashMap *active_macros, Arena *
                                 Token tok = macro_tokens.data[k];
                                 tok.line = tok_line;
                                 tok.col = tok_col;
-                                token_array_push(&out, tok);
+                                token_array_push(&out, &tok);
                             }
                         }
                         token_array_free(&macro_tokens);
                         string_array_free(&args);
                     } else {
-                        token_array_push(&out, (Token){ident, tok_line, tok_col});
+                        push_token(&out, ident, tok_line, tok_col);
                     }
                 }
 
                 hashmap_free(&next_active);
             } else {
-                token_array_push(&out, (Token){ident, tok_line, tok_col});
+                push_token(&out, ident, tok_line, tok_col);
             }
         } else if (c == '"') {
             size_t start = i;
@@ -409,7 +417,7 @@ TokenArray lex(const char *src, HashMap *macros, HashMap *active_macros, Arena *
             }
             CONSUME(1);
             const char *str_val = arena_strndup(arena, src + start, i - start);
-            token_array_push(&out, (Token){str_val, tok_line, tok_col});
+            push_token(&out, str_val, tok_line, tok_col);
         } else if (c == '\'') {
             size_t start = i;
             CONSUME(1);
@@ -425,10 +433,10 @@ TokenArray lex(const char *src, HashMap *macros, HashMap *active_macros, Arena *
             }
             CONSUME(1);
             const char *char_val = arena_strndup(arena, src + start, i - start);
-            token_array_push(&out, (Token){char_val, tok_line, tok_col});
+            push_token(&out, char_val, tok_line, tok_col);
         } else if (i + 2 < src_len && src[i] == '.' && src[i+1] == '.' && src[i+2] == '.') {
             CONSUME(3);
-            token_array_push(&out, (Token){"...", tok_line, tok_col});
+            push_token(&out, "...", tok_line, tok_col);
         } else if (i + 1 < src_len &&
                    ((src[i] == '=' && src[i + 1] == '=') ||
                     (src[i] == '!' && src[i + 1] == '=') ||
@@ -445,14 +453,17 @@ TokenArray lex(const char *src, HashMap *macros, HashMap *active_macros, Arena *
                     (src[i] == '-' && src[i + 1] == '=') ||
                     (src[i] == '*' && src[i + 1] == '=') ||
                     (src[i] == '/' && src[i + 1] == '=') ||
-                    (src[i] == '%' && src[i + 1] == '='))) {
+                    (src[i] == '%' && src[i + 1] == '=') ||
+                    (src[i] == '&' && src[i + 1] == '=') ||
+                    (src[i] == '^' && src[i + 1] == '=') ||
+                    (src[i] == '|' && src[i + 1] == '='))) {
             const char *text = arena_strndup(arena, src + i, 2);
             CONSUME(2);
-            token_array_push(&out, (Token){text, tok_line, tok_col});
+            push_token(&out, text, tok_line, tok_col);
         } else if (strchr("{}[](),;=+-*/%<>.&!|^~:?", c) != nullptr) {
             const char *text = arena_strndup(arena, src + i, 1);
             CONSUME(1);
-            token_array_push(&out, (Token){text, tok_line, tok_col});
+            push_token(&out, text, tok_line, tok_col);
         } else {
             char msg[64];
             snprintf(msg, sizeof(msg), "unexpected character '%c'", c);
@@ -460,6 +471,6 @@ TokenArray lex(const char *src, HashMap *macros, HashMap *active_macros, Arena *
         }
     }
 
-    token_array_push(&out, (Token){"EOF", current_line, current_col});
+    push_token(&out, "EOF", current_line, current_col);
     return out;
 }

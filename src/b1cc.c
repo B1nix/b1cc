@@ -102,15 +102,15 @@ static void dump_object(const char *path, int dump_symbols, int dump_sections, i
 int main(int argc, char **argv) {
     Arena arena;
     arena_init(&arena);
-
-    int emit_asm = 0;
-    int compile_only = 0;
-    int preprocess_only = 0;
-    int dump_ast = 0;
-    int dump_ir = 0;
-    int dump_symbols = 0;
-    int dump_sections = 0;
-    int dump_relocs = 0;
+    diagnostics_filepath = "input.c";
+    bool emit_asm = false;
+    bool compile_only = false;
+    bool preprocess_only = false;
+    bool dump_ast = false;
+    bool dump_ir = false;
+    bool dump_symbols = false;
+    bool dump_sections = false;
+    bool dump_relocs = false;
 
     StringArray inputs;
     string_array_init(&inputs);
@@ -129,21 +129,21 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; ++i) {
         const char *arg = argv[i];
         if (strcmp(arg, "-S") == 0) {
-            emit_asm = 1;
+            emit_asm = true;
         } else if (strcmp(arg, "-c") == 0) {
-            compile_only = 1;
+            compile_only = true;
         } else if (strcmp(arg, "-E") == 0) {
-            preprocess_only = 1;
+            preprocess_only = true;
         } else if (strcmp(arg, "-fdump-ast") == 0) {
-            dump_ast = 1;
+            dump_ast = true;
         } else if (strcmp(arg, "-fdump-ir") == 0) {
-            dump_ir = 1;
+            dump_ir = true;
         } else if (strcmp(arg, "-fdump-symbols") == 0) {
-            dump_symbols = 1;
+            dump_symbols = true;
         } else if (strcmp(arg, "-fdump-sections") == 0) {
-            dump_sections = 1;
+            dump_sections = true;
         } else if (strcmp(arg, "-fdump-relocs") == 0) {
-            dump_relocs = 1;
+            dump_relocs = true;
         } else if (strncmp(arg, "--target=", 9) == 0) {
             target = arg + 9;
         } else if (strcmp(arg, "-o") == 0) {
@@ -177,7 +177,7 @@ int main(int argc, char **argv) {
                 val = eq + 1;
             }
             Macro *m = arena_alloc(&arena, sizeof(Macro));
-            m->is_function_like = 0;
+            m->is_function_like = false;
             string_array_init(&m->params);
             m->body = val;
             hashmap_put(&preprocessor_driver_macros, name, m, 0);
@@ -193,19 +193,19 @@ int main(int argc, char **argv) {
 
     if (strcmp(target, "arm64-darwin") == 0) {
         Macro *m_in = arena_alloc(&arena, sizeof(Macro));
-        m_in->is_function_like = 0;
+        m_in->is_function_like = false;
         string_array_init(&m_in->params);
         m_in->body = "__stdinp";
         hashmap_put(&preprocessor_driver_macros, "stdin", m_in, 0);
 
         Macro *m_out = arena_alloc(&arena, sizeof(Macro));
-        m_out->is_function_like = 0;
+        m_out->is_function_like = false;
         string_array_init(&m_out->params);
         m_out->body = "__stdoutp";
         hashmap_put(&preprocessor_driver_macros, "stdout", m_out, 0);
 
         Macro *m_err = arena_alloc(&arena, sizeof(Macro));
-        m_err->is_function_like = 0;
+        m_err->is_function_like = false;
         string_array_init(&m_err->params);
         m_err->body = "__stderrp";
         hashmap_put(&preprocessor_driver_macros, "stderr", m_err, 0);
@@ -488,7 +488,7 @@ int main(int argc, char **argv) {
     StringArray link_cmd_args;
     string_array_init(&link_cmd_args);
 
-    int failed = 0;
+    bool failed = false;
     for (int idx = 0; idx < inputs.count; ++idx) {
         const char *inp = inputs.data[idx];
         size_t inp_len = strlen(inp);
@@ -529,7 +529,7 @@ int main(int argc, char **argv) {
         int rc = system(cmd_str);
         unlink(tmp_asm);
         if (rc != 0) {
-            failed = 1;
+            failed = true;
             break;
         }
     }

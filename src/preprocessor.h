@@ -4,14 +4,14 @@
 #include "common.h"
 
 typedef struct Macro {
-    int is_function_like;
+    bool is_function_like;
     StringArray params;
     const char *body;
 } Macro;
 
 typedef struct CondState {
-    int condition_met;
-    int active;
+    bool condition_met;
+    bool active;
 } CondState;
 
 typedef struct CondStateArray {
@@ -21,7 +21,7 @@ typedef struct CondStateArray {
 } CondStateArray;
 
 void cond_state_array_init(CondStateArray *arr);
-void cond_state_array_push(CondStateArray *arr, CondState val);
+void cond_state_array_push(CondStateArray *arr, const CondState *val);
 void cond_state_array_free(CondStateArray *arr);
 
 extern StringArray preprocessor_driver_include_dirs;

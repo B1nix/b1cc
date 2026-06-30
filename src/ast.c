@@ -7,12 +7,15 @@ void token_array_init(TokenArray *arr) {
     arr->capacity = 0;
 }
 
-void token_array_push(TokenArray *arr, Token val) {
+void token_array_push(TokenArray *arr, const Token *val) {
     if (arr->count >= arr->capacity) {
         arr->capacity = arr->capacity * 2 + 8;
         arr->data = realloc(arr->data, arr->capacity * sizeof(Token));
     }
-    arr->data[arr->count++] = val;
+    arr->data[arr->count].text = val->text;
+    arr->data[arr->count].line = val->line;
+    arr->data[arr->count].col = val->col;
+    arr->count = arr->count + 1;
 }
 
 void token_array_free(TokenArray *arr) {
@@ -33,7 +36,8 @@ void node_array_push(NodeArray *arr, Node *val) {
         arr->capacity = arr->capacity * 2 + 8;
         arr->data = realloc(arr->data, arr->capacity * sizeof(Node *));
     }
-    arr->data[arr->count++] = val;
+    arr->data[arr->count] = val;
+    arr->count = arr->count + 1;
 }
 
 void node_array_free(NodeArray *arr) {

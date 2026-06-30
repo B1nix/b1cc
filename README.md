@@ -14,13 +14,13 @@ Current scope:
 - fixed-argument function calls and function pointers
 - string literals, arrays, structs, unions, enums, typedefs, and casts
 - arrays inside structs and integer/pointer `.`/`->` field access for the covered aggregate subset
-- integer-only scalar typing foundation: `_Bool`, tolerated `const`/`volatile`/`restrict`, and usual integer promotions/conversions for current integer types
+- integer-only scalar typing foundation: C11 `_Bool`, C23 `bool`/`true`/`false`, tolerated `const`/`volatile`/`restrict`, and usual integer promotions/conversions for current integer types
 - pointer indexing and scale-aware pointer arithmetic
 - basic preprocessor support: includes, conditionals, object/function-like macros, `#`, and `##`
 - Darwin ARM64 assembly output on Apple Silicon
 - x86_64 B1NIX assembly output, plus ELF linking through `b1nix-cc`
 - i386 B1NIX assembly output, plus ELF linking through `b1nix-cc`
-- C++17 implementation
+- C23 implementation using standard C11 facilities where useful
 
 Run:
 
@@ -38,4 +38,4 @@ cc /tmp/return_42.s -o /tmp/return_42
 echo $?
 ```
 
-Still missing: full C, native object/ELF writer, full C99 preprocessing edge cases, floating point, bitfields, callee-side varargs, full qualifier semantics, full target ABI aggregate classification, and a clean-room C self-host path. Add each only when a real B1NIX smoke needs it.
+Still missing: full C, native object/ELF writer, full C99 preprocessing edge cases, floating point, bitfields, callee-side varargs, full qualifier semantics, full target ABI aggregate classification, complete aggregate assignment, and a complete C self-host roundtrip. Current self-hosting is partial: `build/b1cc_self` can be produced and can compile tiny smoke programs, but it is not yet the milestone closure.

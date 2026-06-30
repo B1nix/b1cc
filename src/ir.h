@@ -22,7 +22,7 @@ typedef struct {
 } IrGlobalVarArray;
 
 void ir_global_var_array_init(IrGlobalVarArray *arr);
-void ir_global_var_array_push(IrGlobalVarArray *arr, IrGlobalVar val);
+void ir_global_var_array_push(IrGlobalVarArray *arr, const IrGlobalVar *val);
 void ir_global_var_array_free(IrGlobalVarArray *arr);
 
 typedef struct {
@@ -38,7 +38,7 @@ typedef struct {
 } IrInstArray;
 
 void ir_inst_array_init(IrInstArray *arr);
-void ir_inst_array_push(IrInstArray *arr, IrInst val);
+void ir_inst_array_push(IrInstArray *arr, const IrInst *val);
 void ir_inst_array_free(IrInstArray *arr);
 
 typedef struct {
@@ -53,7 +53,7 @@ typedef struct {
 } StringPairArray;
 
 void string_pair_array_init(StringPairArray *arr);
-void string_pair_array_push(StringPairArray *arr, StringPair val);
+void string_pair_array_push(StringPairArray *arr, const StringPair *val);
 void string_pair_array_free(StringPairArray *arr);
 
 typedef struct {
@@ -76,7 +76,7 @@ typedef struct {
 } IrFunctionArray;
 
 void ir_function_array_init(IrFunctionArray *arr);
-void ir_function_array_push(IrFunctionArray *arr, IrFunction val);
+void ir_function_array_push(IrFunctionArray *arr, const IrFunction *val);
 void ir_function_array_free(IrFunctionArray *arr);
 
 typedef struct {
@@ -140,6 +140,6 @@ extern HashMap ir_function_param_aggregate_sizes;
 extern HashMap ir_function_vararg_fixed_counts;
 extern int ir_current_target_scale;
 
-IrFunctionArray ir_lower_program(NodeArray ast, const char *target, Arena *arena);
+IrFunctionArray ir_lower_program(const NodeArray *ast, const char *target, Arena *arena);
 
 #endif // IR_H

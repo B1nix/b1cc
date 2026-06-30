@@ -13,6 +13,8 @@ static void dump_ast_node(const Node *node, int indent) {
     fprintf(stderr, "Node(op=%s", node->op);
     if (node->name && node->name[0]) fprintf(stderr, ", name=%s", node->name);
     if (node->value != 0) fprintf(stderr, ", value=%ld", node->value);
+    if (node->elem_size != 0) fprintf(stderr, ", elem=%d", node->elem_size);
+    if (node->pointee_size != 0) fprintf(stderr, ", pointee=%d", node->pointee_size);
     fprintf(stderr, ")\n");
     if (node->lhs) dump_ast_node(node->lhs, indent + 1);
     if (node->rhs) dump_ast_node(node->rhs, indent + 1);
@@ -32,13 +34,13 @@ static void dump_ast(NodeArray ast) {
 static void dump_ir(IrFunctionArray funcs) {
     fprintf(stderr, "=== IR DUMP ===\n");
     for (int f_i = 0; f_i < funcs.count; ++f_i) {
-        IrFunction fn = funcs.data[f_i];
-        fprintf(stderr, "Function %s:\n", fn.name);
-        for (int i_i = 0; i_i < fn.code.count; ++i_i) {
-            IrInst inst = fn.code.data[i_i];
-            fprintf(stderr, "  %s", inst.op);
-            if (inst.arg && inst.arg[0]) fprintf(stderr, " %s", inst.arg);
-            if (inst.value != 0) fprintf(stderr, " %ld", inst.value);
+        const IrFunction *fn = &funcs.data[f_i];
+        fprintf(stderr, "Function %s:\n", fn->name);
+        for (int i_i = 0; i_i < fn->code.count; ++i_i) {
+            const IrInst *inst = &fn->code.data[i_i];
+            fprintf(stderr, "  %s", inst->op);
+            if (inst->arg && inst->arg[0]) fprintf(stderr, " %s", inst->arg);
+            if (inst->value != 0) fprintf(stderr, " %ld", inst->value);
             fprintf(stderr, "\n");
         }
     }
@@ -76,7 +78,7 @@ static const char *peephole_optimize(const char *asm_text, const char *target, A
             continue;
         }
 
-        int optimized = 0;
+        bool optimized = false;
         if (idx + 1 < lines.count) {
             const char *next = lines.data[idx + 1];
             
@@ -96,7 +98,7 @@ static const char *peephole_optimize(const char *asm_text, const char *target, A
                         size_t len2 = comma2 - (next_trim + 4);
                         if (len1 == len2 && strncmp(cur_trim + 4, next_trim + 4, len1) == 0) {
                             idx++;
-                            optimized = 1;
+                            optimized = true;
                         }
                     }
                 }
@@ -106,7 +108,7 @@ static const char *peephole_optimize(const char *asm_text, const char *target, A
                     const char *next_reg = next_trim + 5;
                     if (strcmp(cur_reg, next_reg) == 0) {
                         idx++;
-                        optimized = 1;
+                        optimized = true;
                     }
                 }
             } else if (strcmp(target, "i386-b1nix") == 0 || strcmp(target, "x86-b1nix") == 0) {
@@ -115,7 +117,7 @@ static const char *peephole_optimize(const char *asm_text, const char *target, A
                     const char *next_reg = next_trim + 5;
                     if (strcmp(cur_reg, next_reg) == 0) {
                         idx++;
-                        optimized = 1;
+                        optimized = true;
                     }
                 }
             }
@@ -133,7 +135,7 @@ static const char *peephole_optimize(const char *asm_text, const char *target, A
     return res;
 }
 
-const char *backend_compile_asm(const char *src, const char *target, int dump_ast_flag, int dump_ir_flag, Arena *arena) {
+const char *backend_compile_asm(const char *src, const char *target, bool dump_ast_flag, bool dump_ir_flag, Arena *arena) {
     ir_reset_state();
 
     int target_scale = (strcmp(target, "i386-b1nix") == 0 || strcmp(target, "x86-b1nix") == 0) ? 4 : 8;
@@ -158,14 +160,14 @@ const char *backend_compile_asm(const char *src, const char *target, int dump_as
     TokenArray tokens = lex(preprocessed_src, &macros, nullptr, arena);
     hashmap_free(&macros);
 
-    NodeArray ast = parser_parse(tokens, target_scale, arena);
+    NodeArray ast = parser_parse(&tokens, target_scale, arena);
     token_array_free(&tokens);
 
     if (dump_ast_flag) {
         dump_ast(ast);
     }
 
-    IrFunctionArray ir_functions = ir_lower_program(ast, target, arena);
+    IrFunctionArray ir_functions = ir_lower_program(&ast, target, arena);
     // free AST nodes array (since they are in arena we don't free individual nodes)
     node_array_free(&ast);
 
