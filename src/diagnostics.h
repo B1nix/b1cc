@@ -1,22 +1,9 @@
 #ifndef DIAGNOSTICS_H
 #define DIAGNOSTICS_H
 
-#include <string>
-#include <iostream>
-#include <cstdlib>
+extern const char *diagnostics_filepath;
 
-namespace Diagnostics {
-  inline std::string filepath = "input.c";
-
-  [[noreturn]] inline void error(int line, int col, const std::string &msg) {
-    std::cerr << filepath << ":" << line << ":" << col << ": error: " << msg << "\n";
-    std::exit(1);
-  }
-
-  [[noreturn]] inline void fatal(const std::string &msg) {
-    std::cerr << "b1cc: error: " << msg << "\n";
-    std::exit(1);
-  }
-}
+void diagnostics_error(int line, int col, const char *msg);
+void diagnostics_fatal(const char *msg);
 
 #endif // DIAGNOSTICS_H

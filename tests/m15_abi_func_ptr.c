@@ -1,4 +1,6 @@
 /* tests/m15_abi_func_ptr.c — test indirect function pointer calls */
+void qsort(void *base, long nmemb, long size, int (*compar)(const void *, const void *));
+
 int add(int a, int b) {
     return a + b;
 }

@@ -1,27 +1,32 @@
 #ifndef PREPROCESSOR_H
 #define PREPROCESSOR_H
 
-#include <string>
-#include <vector>
-#include <map>
-#include <set>
+#include "common.h"
 
-namespace Preprocessor {
-  struct Macro {
-    bool is_function_like = false;
-    std::vector<std::string> params;
-    std::string body;
-  };
+typedef struct Macro {
+    int is_function_like;
+    StringArray params;
+    const char *body;
+} Macro;
 
-  struct CondState {
-    bool condition_met;
-    bool active;
-  };
+typedef struct CondState {
+    int condition_met;
+    int active;
+} CondState;
 
-  extern std::vector<std::string> driver_include_dirs;
-  extern std::map<std::string, Macro> driver_macros;
+typedef struct CondStateArray {
+    CondState *data;
+    int count;
+    int capacity;
+} CondStateArray;
 
-  std::string preprocess(const std::string &src, const std::string &filepath, const std::vector<std::string> &include_dirs, std::map<std::string, Macro> &macros, std::set<std::string> &included_files);
-}
+void cond_state_array_init(CondStateArray *arr);
+void cond_state_array_push(CondStateArray *arr, CondState val);
+void cond_state_array_free(CondStateArray *arr);
+
+extern StringArray preprocessor_driver_include_dirs;
+extern HashMap preprocessor_driver_macros;
+
+const char *preprocessor_preprocess(const char *src, const char *filepath, StringArray *include_dirs, HashMap *macros, HashMap *included_files, Arena *arena);
 
 #endif // PREPROCESSOR_H

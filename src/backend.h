@@ -2,13 +2,8 @@
 #define BACKEND_H
 
 #include "ir.h"
-#include "preprocessor.h"
-#include <string>
-#include <vector>
-#include <map>
+#include "common.h"
 
-namespace Backend {
-  std::string compile_asm(const std::string &src, const std::string &target, bool dump_ast = false, bool dump_ir = false);
-}
+const char *backend_compile_asm(const char *src, const char *target, int dump_ast, int dump_ir, Arena *arena);
 
 #endif // BACKEND_H

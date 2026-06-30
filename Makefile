@@ -1,18 +1,18 @@
-CXX ?= c++
-CXXFLAGS ?= -std=c++17 -fno-exceptions -fno-rtti -Wall -Wextra -O2
+CC ?= cc
+CFLAGS ?= -std=c23 -Wall -Wextra -O2
 
-SRCS = $(wildcard src/*.cpp)
-OBJS = $(SRCS:src/%.cpp=build/%.o)
+SRCS = $(filter-out src/b1cc_token_lexer.c, $(wildcard src/*.c))
+OBJS = $(SRCS:src/%.c=build/%.o)
 
 all: build/b1cc
 
 build/b1cc: $(OBJS)
 	@mkdir -p build
-	$(CXX) $(CXXFLAGS) $(OBJS) -o $@
+	$(CC) $(CFLAGS) $(OBJS) -o $@
 
-build/%.o: src/%.cpp
+build/%.o: src/%.c
 	@mkdir -p build
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -c $< -o $@
 
 test: build/b1cc
 	./test.sh

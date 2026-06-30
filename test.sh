@@ -376,6 +376,88 @@ set -e
 test "$rc" = 0
 echo "ok m19_integer_typing"
 
+./build/b1cc tests/c11_alignof.c -o "$tmp/c11_alignof"
+set +e
+"$tmp/c11_alignof"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok c11_alignof"
+
+./build/b1cc tests/c11_static_assert.c -o "$tmp/c11_static_assert"
+set +e
+"$tmp/c11_static_assert"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok c11_static_assert"
+
+./build/b1cc tests/c11_noreturn.c -o "$tmp/c11_noreturn"
+set +e
+"$tmp/c11_noreturn"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok c11_noreturn"
+
+./build/b1cc tests/c11_generic.c -o "$tmp/c11_generic"
+set +e
+"$tmp/c11_generic"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok c11_generic"
+
+./build/b1cc tests/c11_anon_struct.c -o "$tmp/c11_anon_struct"
+set +e
+"$tmp/c11_anon_struct"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok c11_anon_struct"
+
+./build/b1cc tests/c23_nullptr.c -o "$tmp/c23_nullptr"
+set +e
+"$tmp/c23_nullptr"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok c23_nullptr"
+
+./build/b1cc tests/c23_static_assert.c -o "$tmp/c23_static_assert"
+set +e
+"$tmp/c23_static_assert"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok c23_static_assert"
+
+./build/b1cc tests/c23_constexpr.c -o "$tmp/c23_constexpr"
+set +e
+"$tmp/c23_constexpr"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok c23_constexpr"
+
+./build/b1cc tests/c23_attributes.c -o "$tmp/c23_attributes"
+set +e
+"$tmp/c23_attributes"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok c23_attributes"
+
+./build/b1cc tests/c23_empty_init.c -o "$tmp/c23_empty_init"
+set +e
+"$tmp/c23_empty_init"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok c23_empty_init"
+
+
+
 
 ./build/b1cc src/b1cc_token_lexer.c -o "$tmp/b1cc_token_lexer"
 "$tmp/b1cc_token_lexer" < tests/local.c > "$tmp/lexer_output.txt"

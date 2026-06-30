@@ -2,20 +2,17 @@
 #define BACKEND_TARGET_H
 
 #include "ir.h"
-#include <string>
-#include <vector>
+#include "common.h"
 
-namespace Backend {
-  class TargetBackend {
-  public:
-    virtual ~TargetBackend() = default;
-    virtual std::string emit_function(const IR::IrFunction &fn) = 0;
-    virtual std::string emit_globals(const std::vector<IR::IrGlobalVar> &globals) = 0;
-  };
+typedef struct TargetBackend TargetBackend;
+struct TargetBackend {
+    const char *(*emit_function)(TargetBackend *self, const IrFunction *fn, Arena *arena);
+    const char *(*emit_globals)(TargetBackend *self, const IrGlobalVarArray *globals, Arena *arena);
+    void (*free)(TargetBackend *self);
+};
 
-  TargetBackend* create_arm64_backend();
-  TargetBackend* create_x86_64_backend();
-  TargetBackend* create_i386_backend();
-}
+TargetBackend* backend_create_arm64(void);
+TargetBackend* backend_create_x86_64(void);
+TargetBackend* backend_create_i386(void);
 
 #endif // BACKEND_TARGET_H
