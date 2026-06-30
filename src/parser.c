@@ -399,6 +399,70 @@ static void skip_type_qualifiers(ParserState *p) {
 
 static int parse_base_type(ParserState *p);
 
+static void parse_function_pointer_param_floats(ParserState *p, IntArray *out) {
+    int_array_init(out);
+    take(p, "(");
+    if (strcmp(peek(p), "void") == 0 &&
+        p->pos + 1 < p->tokens.count &&
+        strcmp(p->tokens.data[p->pos + 1].text, ")") == 0) {
+        take(p, "void");
+        take(p, ")");
+        return;
+    }
+    if (strcmp(peek(p), ")") != 0) {
+        while (1) {
+            if (strcmp(peek(p), "...") == 0) {
+                take(p, "...");
+                int_array_push(out, 0);
+                break;
+            }
+            int base_size = parse_base_type(p);
+            int base_is_float = p->last_type_float;
+            int stars = 0;
+            while (strcmp(peek(p), "*") == 0) {
+                take(p, "*");
+                stars++;
+            }
+            skip_type_qualifiers(p);
+            if (strcmp(peek(p), "(") == 0 &&
+                p->pos + 1 < p->tokens.count &&
+                strcmp(p->tokens.data[p->pos + 1].text, "*") == 0) {
+                int depth = 0;
+                do {
+                    if (strcmp(peek(p), "(") == 0) depth++;
+                    else if (strcmp(peek(p), ")") == 0) depth--;
+                    take(p, nullptr);
+                } while (depth > 0 && p->pos < p->tokens.count);
+                if (strcmp(peek(p), "(") == 0) {
+                    IntArray nested;
+                    parse_function_pointer_param_floats(p, &nested);
+                    int_array_free(&nested);
+                }
+                int_array_push(out, 0);
+            } else {
+                if (strcmp(peek(p), ",") != 0 && strcmp(peek(p), ")") != 0) {
+                    take(p, nullptr);
+                }
+                while (strcmp(peek(p), "[") == 0) {
+                    take(p, "[");
+                    while (strcmp(peek(p), "]") != 0 && strcmp(peek(p), "EOF") != 0) {
+                        take(p, nullptr);
+                    }
+                    take(p, "]");
+                    stars = 1;
+                }
+                int_array_push(out, (base_is_float && stars == 0) ? base_size : 0);
+            }
+            if (strcmp(peek(p), ",") == 0) {
+                take(p, ",");
+            } else {
+                break;
+            }
+        }
+    }
+    take(p, ")");
+}
+
 static int parse_base_type(ParserState *p) {
     p->last_parsed_struct_tag = "";
     skip_attribute(p);
@@ -785,7 +849,7 @@ static int parse_base_type(ParserState *p) {
                 base_size = 8;
             } else {
                 if (strcmp(peek(p), "int") == 0) take(p, nullptr);
-                base_size = 8;
+                base_size = p->target_scale;
             }
         } else if (strcmp(t, "void") == 0) {
             base_size = 8;
@@ -2299,6 +2363,10 @@ static Node *stmt(ParserState *p) {
         
         const char *name = "";
         int is_func_ptr = 0;
+        IntArray func_ptr_param_floats;
+        int_array_init(&func_ptr_param_floats);
+        int has_func_ptr_signature = 0;
+        int func_ptr_return_float = base_float ? base_size : 0;
         if (strcmp(peek(p), "(") == 0) {
             take(p, "(");
             while (strcmp(peek(p), "*") == 0) {
@@ -2307,13 +2375,8 @@ static Node *stmt(ParserState *p) {
             skip_type_qualifiers(p);
             name = take(p, nullptr);
             take(p, ")");
-            take(p, "(");
-            int depth = 1;
-            while (depth > 0 && p->pos < p->tokens.count) {
-                if (strcmp(peek(p), "(") == 0) depth++;
-                else if (strcmp(peek(p), ")") == 0) depth--;
-                take(p, nullptr);
-            }
+            parse_function_pointer_param_floats(p, &func_ptr_param_floats);
+            has_func_ptr_signature = 1;
             is_func_ptr = 1;
         } else {
             name = take(p, nullptr);
@@ -2597,6 +2660,9 @@ static Node *stmt(ParserState *p) {
             hashmap_put(&p->const_vars, unique_name_dup, nullptr, is_const);
             hashmap_put(&p->volatile_vars, unique_name_dup, nullptr, is_volatile);
             hashmap_put(&p->float_vars, unique_name_dup, nullptr, base_float && !is_pointer);
+            if (has_func_ptr_signature) {
+                ir_set_function_pointer_signature(unique_name_dup, &func_ptr_param_floats, func_ptr_return_float);
+            }
             node->is_float = base_float && !is_pointer;
             node->type_size = is_pointer ? p->target_scale : base_size;
 
@@ -2623,6 +2689,9 @@ static Node *stmt(ParserState *p) {
                     
                     const char *next_name = "";
                     int next_is_func_ptr = 0;
+                    IntArray next_func_ptr_param_floats;
+                    int_array_init(&next_func_ptr_param_floats);
+                    int next_has_func_ptr_signature = 0;
                     if (strcmp(peek(p), "(") == 0) {
                         take(p, "(");
                         while (strcmp(peek(p), "*") == 0) {
@@ -2630,13 +2699,8 @@ static Node *stmt(ParserState *p) {
                         }
                         next_name = take(p, nullptr);
                         take(p, ")");
-                        take(p, "(");
-                        int depth = 1;
-                        while (depth > 0 && p->pos < p->tokens.count) {
-                            if (strcmp(peek(p), "(") == 0) depth++;
-                            else if (strcmp(peek(p), ")") == 0) depth--;
-                            take(p, nullptr);
-                        }
+                        parse_function_pointer_param_floats(p, &next_func_ptr_param_floats);
+                        next_has_func_ptr_signature = 1;
                         next_is_func_ptr = 1;
                     } else {
                         next_name = take(p, nullptr);
@@ -2669,6 +2733,9 @@ static Node *stmt(ParserState *p) {
                     hashmap_put(&p->bool_vars, next_unique_name_dup, nullptr, is_bool && !next_is_pointer);
                     hashmap_put(&p->value_sizes, next_unique_name_dup, nullptr, next_is_pointer ? p->target_scale : base_size);
                     hashmap_put(&p->float_vars, next_unique_name_dup, nullptr, base_float && !next_is_pointer);
+                    if (next_has_func_ptr_signature) {
+                        ir_set_function_pointer_signature(next_unique_name_dup, &next_func_ptr_param_floats, func_ptr_return_float);
+                    }
                     next_node->is_float = base_float && !next_is_pointer;
                     next_node->type_size = next_is_pointer ? p->target_scale : base_size;
 
@@ -2680,11 +2747,14 @@ static Node *stmt(ParserState *p) {
                         }
                     }
                     node_array_push(&block->body, next_node);
+                    int_array_free(&next_func_ptr_param_floats);
                 }
                 take(p, ";");
+                int_array_free(&func_ptr_param_floats);
                 return block;
             }
             take(p, ";");
+            int_array_free(&func_ptr_param_floats);
             return node;
         }
     }
@@ -2978,7 +3048,7 @@ static Node *function(ParserState *p, int is_static) {
     int ret_size = (ret_stars > 0) ? p->target_scale : ret_base;
     /* float/double returns are scalar FP (st0/xmm0/v0), never aggregates, even
        though a double is wider than the 32-bit i386 word. */
-    int ret_aggregate_size = (ret_stars == 0 && !ret_is_float && (ret_is_struct || ret_base > p->target_scale)) ? ret_base : 0;
+    int ret_aggregate_size = (ret_stars == 0 && !ret_is_float && ret_is_struct) ? ret_base : 0;
 
     const char *name = "";
     if (strcmp(peek(p), "(") == 0 &&
@@ -3042,6 +3112,10 @@ static Node *function(ParserState *p, int is_static) {
             skip_type_qualifiers(p);
             const char *param_name = "";
             int is_func_ptr = 0;
+            IntArray func_ptr_param_floats;
+            int_array_init(&func_ptr_param_floats);
+            int has_func_ptr_signature = 0;
+            int func_ptr_return_float = base_is_float ? base_size : 0;
             if (strcmp(peek(p), "(") == 0) {
                 take(p, "(");
                 while (strcmp(peek(p), "*") == 0) {
@@ -3050,13 +3124,8 @@ static Node *function(ParserState *p, int is_static) {
                 skip_type_qualifiers(p);
                 param_name = take(p, nullptr);
                 take(p, ")");
-                take(p, "(");
-                int depth = 1;
-                while (depth > 0 && p->pos < p->tokens.count) {
-                    if (strcmp(peek(p), "(") == 0) depth++;
-                    else if (strcmp(peek(p), ")") == 0) depth--;
-                    take(p, nullptr);
-                }
+                parse_function_pointer_param_floats(p, &func_ptr_param_floats);
+                has_func_ptr_signature = 1;
                 base_size = p->target_scale;
                 param_elem_scale = p->target_scale;
                 is_unsigned = 1;
@@ -3095,6 +3164,9 @@ static Node *function(ParserState *p, int is_static) {
             hashmap_put(&p->bool_vars, local_name_dup, nullptr, is_bool);
             hashmap_put(&p->float_vars, local_name_dup, nullptr, is_param_float);
             hashmap_put(&p->value_sizes, local_name_dup, nullptr, type_size);
+            if (has_func_ptr_signature) {
+                ir_set_function_pointer_signature(local_name_dup, &func_ptr_param_floats, func_ptr_return_float);
+            }
             char local_key[512];
             snprintf(local_key, sizeof(local_key), "%s$%s", p->current_func_name, local_name_dup);
             const char *local_key_dup = arena_strdup(p->arena, local_key);
@@ -3106,13 +3178,15 @@ static Node *function(ParserState *p, int is_static) {
 
             string_array_push(&fn_node->params, local_name_dup);
             int is_param_aggregate = !is_param_pointer && !is_param_arr && !is_func_ptr && !base_is_float &&
-                                     (struct_tag[0] || base_size > p->target_scale);
+                                     struct_tag[0];
             int_array_push(&fn_node->param_aggregate_sizes, is_param_aggregate ? base_size : 0);
             int_array_push(&fn_node->param_floats, is_param_float ? type_size : 0);
 
             if (strcmp(peek(p), ",") == 0) {
                 take(p, ",");
+                int_array_free(&func_ptr_param_floats);
             } else {
+                int_array_free(&func_ptr_param_floats);
                 break;
             }
         }
@@ -3139,6 +3213,8 @@ static Node *function(ParserState *p, int is_static) {
         hashmap_put(&ir_function_param_floats, fn_node->name, param_fl, 0);
         hashmap_put(&ir_function_return_floats, fn_node->name, nullptr,
                     fn_node->is_float ? (int)fn_node->value : 0);
+        hashmap_put(&ir_function_return_int_sizes, fn_node->name, nullptr,
+                    (!fn_node->is_float && fn_node->aggregate_size == 0) ? (int)fn_node->value : 0);
 
         int is_vararg = 0;
         if (fn_node->params.count > 0 && strcmp(fn_node->params.data[fn_node->params.count - 1], "...") == 0) {

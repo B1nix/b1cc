@@ -148,7 +148,13 @@ extern HashMap ir_function_param_aggregate_sizes;
 extern HashMap ir_function_vararg_fixed_counts;
 extern HashMap ir_function_param_floats;
 extern HashMap ir_function_return_floats;
+extern HashMap ir_function_pointer_param_floats;
+extern HashMap ir_function_pointer_return_floats;
+extern HashMap ir_function_return_int_sizes;
+extern HashMap ir_function_param_int_sizes;
 extern int ir_current_target_scale;
+
+void ir_set_function_pointer_signature(const char *name, const IntArray *param_floats, int return_float);
 
 IrFunctionArray ir_lower_program(const NodeArray *ast, const char *target, Arena *arena);
 

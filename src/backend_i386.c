@@ -133,12 +133,24 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
             HashMapEntry *pfe = hashmap_get(&ir_function_param_floats, fn->name);
             if (pfe) prologue_floats = (IntArray *)pfe->val_ptr;
         }
+        IntArray *prologue_int_sizes = nullptr;
+        {
+            HashMapEntry *pie = hashmap_get(&ir_function_param_int_sizes, fn->name);
+            if (pie) prologue_int_sizes = (IntArray *)pie->val_ptr;
+        }
         int in_off = param_offset;
         for (int i = 0; i < fn->params.count; ++i) {
             int pf = (prologue_floats && i < prologue_floats->count) ? prologue_floats->data[i] : 0;
+            int isz = (prologue_int_sizes && i < prologue_int_sizes->count) ? prologue_int_sizes->data[i] : 4;
             int slot = -((i + 1) * 16);
             if (pf == 8) {
                 /* double parameter: copy 8 bytes from the incoming stack */
+                sb_appendf(&out, "    movl %d(%%ebp), %%eax\n", in_off);
+                sb_appendf(&out, "    movl %%eax, %d(%%ebp)\n", slot);
+                sb_appendf(&out, "    movl %d(%%ebp), %%eax\n", in_off + 4);
+                sb_appendf(&out, "    movl %%eax, %d(%%ebp)\n", slot + 4);
+                in_off += 8;
+            } else if (pf == 0 && isz == 8) {
                 sb_appendf(&out, "    movl %d(%%ebp), %%eax\n", in_off);
                 sb_appendf(&out, "    movl %%eax, %d(%%ebp)\n", slot);
                 sb_appendf(&out, "    movl %d(%%ebp), %%eax\n", in_off + 4);
@@ -165,8 +177,20 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
         if (strcmp(inst->op, "const") == 0) {
             sb_appendf(&out, "    movl $%ld, %%eax\n", inst->value);
             sb_append(&out, "    pushl %eax\n");
+        } else if (strcmp(inst->op, "const64") == 0) {
+            unsigned long long v = (unsigned long long)inst->value;
+            sb_appendf(&out, "    movl $%u, %%eax\n", (unsigned)((v >> 32) & 0xffffffffu));
+            sb_append(&out, "    pushl %eax\n");
+            sb_appendf(&out, "    movl $%u, %%eax\n", (unsigned)(v & 0xffffffffu));
+            sb_append(&out, "    pushl %eax\n");
         } else if (strcmp(inst->op, "load") == 0) {
             sb_appendf(&out, "    movl -%ld(%%ebp), %%eax\n", (inst->value + 1) * 16);
+            sb_append(&out, "    pushl %eax\n");
+        } else if (strcmp(inst->op, "load64") == 0) {
+            long off = (inst->value + 1) * 16;
+            sb_appendf(&out, "    movl -%ld(%%ebp), %%eax\n", off - 4);
+            sb_append(&out, "    pushl %eax\n");
+            sb_appendf(&out, "    movl -%ld(%%ebp), %%eax\n", off);
             sb_append(&out, "    pushl %eax\n");
         } else if (strcmp(inst->op, "str") == 0) {
             sb_appendf(&out, "    movl $%s, %%eax\n", inst->arg);
@@ -174,11 +198,170 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
         } else if (strcmp(inst->op, "store") == 0) {
             sb_append(&out, "    popl %eax\n");
             sb_appendf(&out, "    movl %%eax, -%ld(%%ebp)\n", (inst->value + 1) * 16);
+        } else if (strcmp(inst->op, "store64") == 0) {
+            long off = (inst->value + 1) * 16;
+            sb_append(&out, "    popl %eax\n");
+            sb_appendf(&out, "    movl %%eax, -%ld(%%ebp)\n", off);
+            sb_append(&out, "    popl %eax\n");
+            sb_appendf(&out, "    movl %%eax, -%ld(%%ebp)\n", off - 4);
         } else if (strcmp(inst->op, "dup") == 0) {
             sb_append(&out, "    movl (%esp), %eax\n");
             sb_append(&out, "    pushl %eax\n");
         } else if (strcmp(inst->op, "pop") == 0) {
             sb_append(&out, "    addl $4, %esp\n");
+        } else if (strcmp(inst->op, "pop64") == 0) {
+            sb_append(&out, "    addl $8, %esp\n");
+        } else if (strcmp(inst->op, "sext64") == 0 || strcmp(inst->op, "zext64") == 0) {
+            sb_append(&out, "    popl %eax\n");
+            if (strcmp(inst->op, "sext64") == 0)
+                sb_append(&out, "    cltd\n");
+            else
+                sb_append(&out, "    xorl %edx, %edx\n");
+            sb_append(&out, "    pushl %edx\n");
+            sb_append(&out, "    pushl %eax\n");
+        } else if (strcmp(inst->op, "trunc32") == 0) {
+            sb_append(&out, "    popl %eax\n");
+            sb_append(&out, "    addl $4, %esp\n");
+            if (inst->value == 1)
+                sb_append(&out, "    movsbl %al, %eax\n");
+            else if (inst->value == 2)
+                sb_append(&out, "    movswl %ax, %eax\n");
+            sb_append(&out, "    pushl %eax\n");
+        } else if (strcmp(inst->op, "+64") == 0 || strcmp(inst->op, "-64") == 0 ||
+                   strcmp(inst->op, "&64") == 0 || strcmp(inst->op, "|64") == 0 ||
+                   strcmp(inst->op, "^64") == 0 || strcmp(inst->op, "*64") == 0) {
+            sb_append(&out, "    popl %ecx\n");  /* rhs low */
+            sb_append(&out, "    popl %ebx\n");  /* rhs high */
+            sb_append(&out, "    popl %eax\n");  /* lhs low */
+            sb_append(&out, "    popl %edx\n");  /* lhs high */
+            if (strcmp(inst->op, "+64") == 0) {
+                sb_append(&out, "    addl %ecx, %eax\n");
+                sb_append(&out, "    adcl %ebx, %edx\n");
+            } else if (strcmp(inst->op, "-64") == 0) {
+                sb_append(&out, "    subl %ecx, %eax\n");
+                sb_append(&out, "    sbbl %ebx, %edx\n");
+            } else if (strcmp(inst->op, "&64") == 0) {
+                sb_append(&out, "    andl %ecx, %eax\n");
+                sb_append(&out, "    andl %ebx, %edx\n");
+            } else if (strcmp(inst->op, "|64") == 0) {
+                sb_append(&out, "    orl %ecx, %eax\n");
+                sb_append(&out, "    orl %ebx, %edx\n");
+            } else if (strcmp(inst->op, "^64") == 0) {
+                sb_append(&out, "    xorl %ecx, %eax\n");
+                sb_append(&out, "    xorl %ebx, %edx\n");
+            } else {
+                sb_append(&out, "    movl %eax, %esi\n");
+                sb_append(&out, "    imull %ecx, %edx\n");
+                sb_append(&out, "    imull %ebx, %esi\n");
+                sb_append(&out, "    mull %ecx\n");
+                sb_append(&out, "    addl %esi, %edx\n");
+            }
+            sb_append(&out, "    pushl %edx\n");
+            sb_append(&out, "    pushl %eax\n");
+        } else if (strcmp(inst->op, "neg64") == 0 || strcmp(inst->op, "~64") == 0) {
+            sb_append(&out, "    popl %eax\n");
+            sb_append(&out, "    popl %edx\n");
+            if (strcmp(inst->op, "neg64") == 0) {
+                sb_append(&out, "    negl %eax\n");
+                sb_append(&out, "    adcl $0, %edx\n");
+                sb_append(&out, "    negl %edx\n");
+            } else {
+                sb_append(&out, "    notl %eax\n");
+                sb_append(&out, "    notl %edx\n");
+            }
+            sb_append(&out, "    pushl %edx\n");
+            sb_append(&out, "    pushl %eax\n");
+        } else if (strcmp(inst->op, "<<64") == 0 || strcmp(inst->op, ">>64") == 0 || strcmp(inst->op, "u>>64") == 0) {
+            int lid = i_i;
+            sb_append(&out, "    popl %ecx\n");
+            sb_append(&out, "    popl %eax\n");
+            sb_append(&out, "    popl %edx\n");
+            sb_append(&out, "    andl $63, %ecx\n");
+            sb_append(&out, "    cmpl $32, %ecx\n");
+            sb_appendf(&out, "    jae .Li386_shift_ge32_%d\n", lid);
+            if (strcmp(inst->op, "<<64") == 0) {
+                sb_append(&out, "    shldl %cl, %eax, %edx\n");
+                sb_append(&out, "    shll %cl, %eax\n");
+            } else {
+                sb_append(&out, "    shrdl %cl, %edx, %eax\n");
+                sb_append(&out, strcmp(inst->op, "u>>64") == 0 ? "    shrl %cl, %edx\n" : "    sarl %cl, %edx\n");
+            }
+            sb_appendf(&out, "    jmp .Li386_shift_done_%d\n", lid);
+            sb_appendf(&out, ".Li386_shift_ge32_%d:\n", lid);
+            sb_append(&out, "    subl $32, %ecx\n");
+            if (strcmp(inst->op, "<<64") == 0) {
+                sb_append(&out, "    movl %eax, %edx\n");
+                sb_append(&out, "    xorl %eax, %eax\n");
+                sb_append(&out, "    shll %cl, %edx\n");
+            } else {
+                sb_append(&out, "    movl %edx, %eax\n");
+                if (strcmp(inst->op, "u>>64") == 0) {
+                    sb_append(&out, "    xorl %edx, %edx\n");
+                    sb_append(&out, "    shrl %cl, %eax\n");
+                } else {
+                    sb_append(&out, "    sarl $31, %edx\n");
+                    sb_append(&out, "    sarl %cl, %eax\n");
+                }
+            }
+            sb_appendf(&out, ".Li386_shift_done_%d:\n", lid);
+            sb_append(&out, "    pushl %edx\n");
+            sb_append(&out, "    pushl %eax\n");
+        } else if (strcmp(inst->op, "==64") == 0 || strcmp(inst->op, "!=64") == 0 ||
+                   strcmp(inst->op, "<64") == 0 || strcmp(inst->op, ">64") == 0 ||
+                   strcmp(inst->op, "<=64") == 0 || strcmp(inst->op, ">=64") == 0 ||
+                   strcmp(inst->op, "u<64") == 0 || strcmp(inst->op, "u>64") == 0 ||
+                   strcmp(inst->op, "u<=64") == 0 || strcmp(inst->op, "u>=64") == 0) {
+            const char *setop = "sete";
+            sb_append(&out, "    popl %ecx\n");
+            sb_append(&out, "    popl %ebx\n");
+            sb_append(&out, "    popl %eax\n");
+            sb_append(&out, "    popl %edx\n");
+            sb_append(&out, "    cmpl %ebx, %edx\n");
+            sb_appendf(&out, "    jne .Li386_cmp_high_%d\n", i_i);
+            sb_append(&out, "    cmpl %ecx, %eax\n");
+            if (strcmp(inst->op, "==64") == 0) setop = "sete";
+            else if (strcmp(inst->op, "!=64") == 0) setop = "setne";
+            else if (strcmp(inst->op, "<64") == 0) setop = "setb";
+            else if (strcmp(inst->op, ">64") == 0) setop = "seta";
+            else if (strcmp(inst->op, "<=64") == 0) setop = "setbe";
+            else if (strcmp(inst->op, ">=64") == 0) setop = "setae";
+            else if (strcmp(inst->op, "u<64") == 0) setop = "setb";
+            else if (strcmp(inst->op, "u>64") == 0) setop = "seta";
+            else if (strcmp(inst->op, "u<=64") == 0) setop = "setbe";
+            else if (strcmp(inst->op, "u>=64") == 0) setop = "setae";
+            sb_appendf(&out, "    %s %%al\n", setop);
+            sb_appendf(&out, "    jmp .Li386_cmp_done_%d\n", i_i);
+            sb_appendf(&out, ".Li386_cmp_high_%d:\n", i_i);
+            if (strcmp(inst->op, "==64") == 0) setop = "sete";
+            else if (strcmp(inst->op, "!=64") == 0) setop = "setne";
+            else if (strncmp(inst->op, "u", 1) == 0) {
+                if (strstr(inst->op, "<")) setop = strstr(inst->op, "=") ? "setbe" : "setb";
+                else setop = strstr(inst->op, "=") ? "setae" : "seta";
+            } else {
+                if (strstr(inst->op, "<")) setop = strstr(inst->op, "=") ? "setle" : "setl";
+                else setop = strstr(inst->op, "=") ? "setge" : "setg";
+            }
+            sb_appendf(&out, "    %s %%al\n", setop);
+            sb_appendf(&out, ".Li386_cmp_done_%d:\n", i_i);
+            sb_append(&out, "    movzbl %al, %eax\n");
+            sb_append(&out, "    pushl %eax\n");
+        } else if (strcmp(inst->op, "/64") == 0 || strcmp(inst->op, "%64") == 0 ||
+                   strcmp(inst->op, "u/64") == 0 || strcmp(inst->op, "u%64") == 0) {
+            const char *helper = (inst->op[0] == 'u') ?
+                (strchr(inst->op, '%') ? "__umoddi3" : "__udivdi3") :
+                (strchr(inst->op, '%') ? "__moddi3" : "__divdi3");
+            sb_append(&out, "    popl %ecx\n");  /* rhs low */
+            sb_append(&out, "    popl %ebx\n");  /* rhs high */
+            sb_append(&out, "    popl %eax\n");  /* lhs low */
+            sb_append(&out, "    popl %edx\n");  /* lhs high */
+            sb_append(&out, "    pushl %ebx\n");
+            sb_append(&out, "    pushl %ecx\n");
+            sb_append(&out, "    pushl %edx\n");
+            sb_append(&out, "    pushl %eax\n");
+            sb_appendf(&out, "    call %s\n", helper);
+            sb_append(&out, "    addl $16, %esp\n");
+            sb_append(&out, "    pushl %edx\n");
+            sb_append(&out, "    pushl %eax\n");
         } else if (strcmp(inst->op, "+") == 0 || strcmp(inst->op, "-") == 0 || strcmp(inst->op, "*") == 0 ||
                    strcmp(inst->op, "/") == 0 || strcmp(inst->op, "%") == 0 || strcmp(inst->op, "==") == 0 || strcmp(inst->op, "!=") == 0 ||
                    strcmp(inst->op, "<") == 0 || strcmp(inst->op, ">") == 0 || strcmp(inst->op, "<=") == 0 ||
@@ -272,15 +455,25 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
             sb_append(&out, "    popl %eax\n");
             sb_append(&out, "    cmpl $0, %eax\n");
             sb_appendf(&out, "    je %s\n", inst->arg);
+        } else if (strcmp(inst->op, "jz64") == 0) {
+            sb_append(&out, "    popl %eax\n");
+            sb_append(&out, "    popl %edx\n");
+            sb_append(&out, "    orl %edx, %eax\n");
+            sb_appendf(&out, "    je %s\n", inst->arg);
         } else if (strcmp(inst->op, "jmp") == 0) {
             sb_appendf(&out, "    jmp %s\n", inst->arg);
         } else if (strcmp(inst->op, "label") == 0) {
             sb_appendf(&out, "%s:\n", inst->arg);
-        } else if (strcmp(inst->op, "call") == 0) {
+        } else if (strcmp(inst->op, "call") == 0 || strcmp(inst->op, "icall") == 0) {
             long num_args = inst->value;
             int ret_agg_size = 0;
-            HashMapEntry *entry = hashmap_get(&ir_function_return_aggregate_sizes, inst->arg);
-            if (entry) ret_agg_size = entry->val_int;
+            int ret_i64 = 0;
+            if (strcmp(inst->op, "call") == 0) {
+                HashMapEntry *entry = hashmap_get(&ir_function_return_aggregate_sizes, inst->arg);
+                if (entry) ret_agg_size = entry->val_int;
+                entry = hashmap_get(&ir_function_return_int_sizes, inst->arg);
+                if (entry && entry->val_int == 8) ret_i64 = 1;
+            }
 
             /* Float-aware i386 call (System V i386: all args on the stack, float
                and double returned in st0). Float/double eval values are 8 bytes;
@@ -288,9 +481,13 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
             {
                 IntArray *pf = nullptr;
                 int retf = 0;
-                HashMapEntry *pe = hashmap_get(&ir_function_param_floats, inst->arg);
+                HashMapEntry *pe = strcmp(inst->op, "call") == 0 ?
+                    hashmap_get(&ir_function_param_floats, inst->arg) :
+                    hashmap_get(&ir_function_pointer_param_floats, inst->arg);
                 if (pe) pf = (IntArray *)pe->val_ptr;
-                HashMapEntry *re = hashmap_get(&ir_function_return_floats, inst->arg);
+                HashMapEntry *re = strcmp(inst->op, "call") == 0 ?
+                    hashmap_get(&ir_function_return_floats, inst->arg) :
+                    hashmap_get(&ir_function_pointer_return_floats, inst->arg);
                 if (re) retf = re->val_int;
                 int any_f = 0;
                 for (long i = 0; i < num_args; ++i) {
@@ -328,8 +525,13 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
                             sb_appendf(&out, "    movl %%eax, %d(%%esp)\n", abioff[i]);
                         }
                     }
-                    sb_appendf(&out, "    call %s\n", inst->arg);
-                    sb_appendf(&out, "    addl $%d, %%esp\n", total_abi + total_ev);
+                    if (strcmp(inst->op, "icall") == 0) {
+                        sb_appendf(&out, "    movl %d(%%esp), %%eax\n", total_abi + total_ev);
+                        sb_append(&out, "    call *%eax\n");
+                    } else {
+                        sb_appendf(&out, "    call %s\n", inst->arg);
+                    }
+                    sb_appendf(&out, "    addl $%d, %%esp\n", total_abi + total_ev + (strcmp(inst->op, "icall") == 0 ? 4 : 0));
                     if (retf) {
                         sb_append(&out, "    subl $8, %esp\n");
                         sb_append(&out, "    fstpl (%esp)\n");
@@ -341,7 +543,17 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
                 }
             }
 
-            if (ret_agg_size > 0) {
+            if (strcmp(inst->op, "icall") == 0) {
+                sb_appendf(&out, "    subl $%ld, %%esp\n", num_args * 4);
+                for (long i = 0; i < num_args; ++i) {
+                    sb_appendf(&out, "    movl %ld(%%esp), %%eax\n", (2 * num_args - 1 - i) * 4);
+                    sb_appendf(&out, "    movl %%eax, %ld(%%esp)\n", i * 4);
+                }
+                sb_appendf(&out, "    movl %ld(%%esp), %%eax\n", (2 * num_args) * 4);
+                sb_append(&out, "    call *%eax\n");
+                sb_appendf(&out, "    addl $%ld, %%esp\n", (2 * num_args + 1) * 4);
+                sb_append(&out, "    pushl %eax\n");
+            } else if (ret_agg_size > 0) {
                 int ret_val_bytes = ((ret_agg_size + 15) / 16) * 16;
                 sb_appendf(&out, "    subl $%d, %%esp\n", ret_val_bytes);
                 int stack_bytes = (num_args + 1) * 4;
@@ -361,26 +573,50 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
                 sb_appendf(&out, "    addl $%ld, %%esp\n", num_args * 4);
                 // The return value buffer is now at the top of the stack. We do not push %eax.
             } else {
-                sb_appendf(&out, "    subl $%ld, %%esp\n", num_args * 4);
+                IntArray *pis = nullptr;
+                HashMapEntry *pie = hashmap_get(&ir_function_param_int_sizes, inst->arg);
+                if (pie) pis = (IntArray *)pie->val_ptr;
+                int any_i64_arg = 0;
+                int total_ev = 0;
+                int total_abi = 0;
+                int *evsz = calloc(num_args + 1, sizeof(int));
+                int *abisz = calloc(num_args + 1, sizeof(int));
+                int *abioff = calloc(num_args + 1, sizeof(int));
                 for (long i = 0; i < num_args; ++i) {
-                    sb_appendf(&out, "    movl %ld(%%esp), %%eax\n", (2 * num_args - 1 - i) * 4);
-                    sb_appendf(&out, "    movl %%eax, %ld(%%esp)\n", i * 4);
+                    int sz = (pis && i < pis->count) ? pis->data[i] : 4;
+                    evsz[i] = (sz == 8) ? 8 : 4;
+                    abisz[i] = (sz == 8) ? 8 : 4;
+                    abioff[i] = total_abi;
+                    total_ev += evsz[i];
+                    total_abi += abisz[i];
+                    if (sz == 8) any_i64_arg = 1;
+                }
+                sb_appendf(&out, "    subl $%d, %%esp\n", total_abi);
+                for (long i = 0; i < num_args; ++i) {
+                    int ev_above = 0;
+                    for (long j = i + 1; j < num_args; ++j) ev_above += evsz[j];
+                    int ev_src = total_abi + ev_above;
+                    if (abisz[i] == 8) {
+                        sb_appendf(&out, "    movl %d(%%esp), %%eax\n", ev_src);
+                        sb_appendf(&out, "    movl %%eax, %d(%%esp)\n", abioff[i]);
+                        sb_appendf(&out, "    movl %d(%%esp), %%eax\n", ev_src + 4);
+                        sb_appendf(&out, "    movl %%eax, %d(%%esp)\n", abioff[i] + 4);
+                    } else {
+                        sb_appendf(&out, "    movl %d(%%esp), %%eax\n", ev_src);
+                        sb_appendf(&out, "    movl %%eax, %d(%%esp)\n", abioff[i]);
+                    }
                 }
                 sb_appendf(&out, "    call %s\n", inst->arg);
-                sb_appendf(&out, "    addl $%ld, %%esp\n", 2 * num_args * 4);
-                sb_append(&out, "    pushl %eax\n");
+                sb_appendf(&out, "    addl $%d, %%esp\n", total_abi + total_ev);
+                if (ret_i64) {
+                    sb_append(&out, "    pushl %edx\n");
+                    sb_append(&out, "    pushl %eax\n");
+                } else {
+                    sb_append(&out, "    pushl %eax\n");
+                }
+                (void)any_i64_arg;
+                free(evsz); free(abisz); free(abioff);
             }
-        } else if (strcmp(inst->op, "icall") == 0) {
-            long num_args = inst->value;
-            sb_appendf(&out, "    subl $%ld, %%esp\n", num_args * 4);
-            for (long i = 0; i < num_args; ++i) {
-                sb_appendf(&out, "    movl %ld(%%esp), %%eax\n", (2 * num_args - 1 - i) * 4);
-                sb_appendf(&out, "    movl %%eax, %ld(%%esp)\n", i * 4);
-            }
-            sb_appendf(&out, "    movl %ld(%%esp), %%eax\n", (2 * num_args) * 4);
-            sb_append(&out, "    call *%eax\n");
-            sb_appendf(&out, "    addl $%ld, %%esp\n", (2 * num_args + 1) * 4);
-            sb_append(&out, "    pushl %eax\n");
         } else if (strcmp(inst->op, "addr") == 0) {
             sb_appendf(&out, "    leal -%ld(%%ebp), %%eax\n", (inst->value + 1) * 16);
             sb_append(&out, "    pushl %eax\n");
@@ -395,6 +631,11 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
             else
                 sb_appendf(&out, "    movl %s, %%eax\n", inst->arg);
             sb_append(&out, "    pushl %eax\n");
+        } else if (strcmp(inst->op, "gload64") == 0) {
+            sb_appendf(&out, "    movl %s+4, %%eax\n", inst->arg);
+            sb_append(&out, "    pushl %eax\n");
+            sb_appendf(&out, "    movl %s, %%eax\n", inst->arg);
+            sb_append(&out, "    pushl %eax\n");
         } else if (strcmp(inst->op, "gstore") == 0) {
             sb_append(&out, "    popl %eax\n");
             int gsize = 4;
@@ -406,6 +647,11 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
                 sb_appendf(&out, "    movw %%ax, %s\n", inst->arg);
             else
                 sb_appendf(&out, "    movl %%eax, %s\n", inst->arg);
+        } else if (strcmp(inst->op, "gstore64") == 0) {
+            sb_append(&out, "    popl %eax\n");
+            sb_appendf(&out, "    movl %%eax, %s\n", inst->arg);
+            sb_append(&out, "    popl %eax\n");
+            sb_appendf(&out, "    movl %%eax, %s+4\n", inst->arg);
         } else if (strcmp(inst->op, "gaddr") == 0) {
             sb_appendf(&out, "    movl $%s, %%eax\n", inst->arg);
             sb_append(&out, "    pushl %eax\n");
@@ -444,6 +690,12 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
             sb_append(&out, "    ret $4\n");
         } else if (strcmp(inst->op, "ret") == 0) {
             sb_append(&out, "    popl %eax\n");
+            if (frame)
+                sb_append(&out, "    leave\n");
+            sb_append(&out, "    ret\n");
+        } else if (strcmp(inst->op, "ret64") == 0) {
+            sb_append(&out, "    popl %eax\n");
+            sb_append(&out, "    popl %edx\n");
             if (frame)
                 sb_append(&out, "    leave\n");
             sb_append(&out, "    ret\n");

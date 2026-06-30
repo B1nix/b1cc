@@ -313,45 +313,82 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
             sb_appendf(&out, "%s:\n", inst->arg);
         } else if (strcmp(inst->op, "call") == 0 || strcmp(inst->op, "icall") == 0) {
             long num_args = inst->value;
-            /* Float-scalar call fast path (System V): scalar float/double args go
-               in XMM0-7, integer/pointer args in the GPR sequence, float/double
-               return comes back in XMM0. Only for direct calls without aggregates. */
-            if (strcmp(inst->op, "call") == 0) {
+            /* Float-scalar call path (System V): scalar float/double args go
+               in XMM0-7 then stack slots, integer/pointer args use the GPR
+               sequence then stack slots, and float/double returns come back in XMM0. */
+            if (strcmp(inst->op, "call") == 0 || strcmp(inst->op, "icall") == 0) {
                 IntArray *pf = nullptr;
                 int retf = 0;
-                HashMapEntry *pe = hashmap_get(&ir_function_param_floats, inst->arg);
+                HashMapEntry *pe = strcmp(inst->op, "call") == 0 ?
+                    hashmap_get(&ir_function_param_floats, inst->arg) :
+                    hashmap_get(&ir_function_pointer_param_floats, inst->arg);
                 if (pe) pf = (IntArray *)pe->val_ptr;
-                HashMapEntry *re = hashmap_get(&ir_function_return_floats, inst->arg);
+                HashMapEntry *re = strcmp(inst->op, "call") == 0 ?
+                    hashmap_get(&ir_function_return_floats, inst->arg) :
+                    hashmap_get(&ir_function_pointer_return_floats, inst->arg);
                 if (re) retf = re->val_int;
-                int any_f = 0, gpc = 0, ssec = 0;
+                int any_f = 0, ssec = 0;
                 for (long i = 0; i < num_args; ++i) {
                     int f = (pf && i < pf->count) ? pf->data[i] : 0;
-                    if (f) { any_f = 1; ssec++; } else gpc++;
+                    if (f) { any_f = 1; ssec++; }
                 }
-                if ((any_f || retf) && gpc <= 6 && ssec <= 8) {
-                    int g = 0, s = 0;
+                if (any_f || retf) {
+                    int g = 0, s = 0, stack_words = 0;
                     int *gi = calloc(num_args + 1, sizeof(int));
                     int *si = calloc(num_args + 1, sizeof(int));
                     int *isf = calloc(num_args + 1, sizeof(int));
+                    int *on_stack = calloc(num_args + 1, sizeof(int));
+                    int *stack_off = calloc(num_args + 1, sizeof(int));
                     for (long i = 0; i < num_args; ++i) {
                         int f = (pf && i < pf->count) ? pf->data[i] : 0;
                         isf[i] = f;
-                        if (f) si[i] = s++; else gi[i] = g++;
-                    }
-                    for (long i = num_args - 1; i >= 0; --i) {
-                        if (isf[i]) {
-                            sb_appendf(&out, "    movsd (%%rsp), %%xmm%d\n", si[i]);
-                            if (isf[i] == 4) {
-                                /* a float argument is passed as a 32-bit single */
-                                sb_appendf(&out, "    cvtsd2ss %%xmm%d, %%xmm%d\n", si[i], si[i]);
-                            }
-                            sb_append(&out, "    addq $8, %rsp\n");
+                        if (f) {
+                            if (s < 8) si[i] = s++;
+                            else { on_stack[i] = 1; stack_off[i] = stack_words++ * 8; }
                         } else {
-                            sb_appendf(&out, "    popq %s\n", regs[gi[i]]);
+                            if (g < 6) gi[i] = g++;
+                            else { on_stack[i] = 1; stack_off[i] = stack_words++ * 8; }
                         }
                     }
-                    sb_appendf(&out, "    movl $%d, %%eax\n", ssec);
-                    sb_appendf(&out, "    call %s\n", inst->arg);
+                    int stack_bytes = stack_words * 8;
+                    if (stack_bytes > 0) {
+                        sb_appendf(&out, "    subq $%d, %%rsp\n", stack_bytes);
+                    }
+                    for (long i = 0; i < num_args; ++i) {
+                        int src_off = stack_bytes + (int)(num_args - 1 - i) * 8;
+                        if (on_stack[i]) {
+                            if (isf[i]) {
+                                sb_appendf(&out, "    movsd %d(%%rsp), %%xmm15\n", src_off);
+                                if (isf[i] == 4) {
+                                    sb_append(&out, "    cvtsd2ss %xmm15, %xmm15\n");
+                                    sb_appendf(&out, "    movss %%xmm15, %d(%%rsp)\n", stack_off[i]);
+                                } else {
+                                    sb_appendf(&out, "    movsd %%xmm15, %d(%%rsp)\n", stack_off[i]);
+                                }
+                            } else {
+                                sb_appendf(&out, "    movq %d(%%rsp), %%r11\n", src_off);
+                                sb_appendf(&out, "    movq %%r11, %d(%%rsp)\n", stack_off[i]);
+                            }
+                        } else {
+                            if (isf[i]) {
+                                sb_appendf(&out, "    movsd %d(%%rsp), %%xmm%d\n", src_off, si[i]);
+                                if (isf[i] == 4) {
+                                    /* a float argument is passed as a 32-bit single */
+                                    sb_appendf(&out, "    cvtsd2ss %%xmm%d, %%xmm%d\n", si[i], si[i]);
+                                }
+                            } else {
+                                sb_appendf(&out, "    movq %d(%%rsp), %s\n", src_off, regs[gi[i]]);
+                            }
+                        }
+                    }
+                    sb_appendf(&out, "    movl $%d, %%eax\n", ssec > 8 ? 8 : ssec);
+                    if (strcmp(inst->op, "icall") == 0) {
+                        sb_appendf(&out, "    movq %d(%%rsp), %%r11\n", stack_bytes + (int)num_args * 8);
+                        sb_append(&out, "    call *%r11\n");
+                    } else {
+                        sb_appendf(&out, "    call %s\n", inst->arg);
+                    }
+                    sb_appendf(&out, "    addq $%d, %%rsp\n", stack_bytes + (int)num_args * 8 + (strcmp(inst->op, "icall") == 0 ? 8 : 0));
                     if (retf) {
                         sb_append(&out, "    subq $8, %rsp\n");
                         if (retf == 4) {
@@ -362,7 +399,7 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                     } else {
                         sb_append(&out, "    pushq %rax\n");
                     }
-                    free(gi); free(si); free(isf);
+                    free(gi); free(si); free(isf); free(on_stack); free(stack_off);
                     continue;
                 }
             }

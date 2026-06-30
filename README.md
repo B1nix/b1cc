@@ -38,4 +38,4 @@ cc /tmp/return_42.s -o /tmp/return_42
 echo $?
 ```
 
-Still missing: full C, native object/ELF writer, full C99 preprocessing edge cases, floating point, bitfields, callee-side varargs, full qualifier semantics, full target ABI aggregate classification, complete aggregate assignment, and a complete C self-host roundtrip. Current self-hosting is partial: `build/b1cc_self` can be produced and can compile tiny smoke programs, but it is not yet the milestone closure.
+Still missing: full C, native object/ELF writer, full C99 preprocessing edge cases, floating-point aggregate ABI classification, bitfields, callee-side varargs, full qualifier semantics, `long double`, complete aggregate assignment, and a complete C self-host roundtrip. Current self-hosting is partial: `build/b1cc_self` can be produced and can compile tiny smoke programs, but it is not yet the milestone closure.

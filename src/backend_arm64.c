@@ -392,39 +392,77 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
             long num_args = inst->value;
             /* Float-scalar call fast path (AAPCS64): float/double args -> V0-V7,
                integer/pointer args -> X0-X7, float/double return -> V0. */
-            if (strcmp(inst->op, "call") == 0) {
+            if (strcmp(inst->op, "call") == 0 || strcmp(inst->op, "icall") == 0) {
                 IntArray *pf = nullptr;
                 int retf = 0;
-                HashMapEntry *pe = hashmap_get(&ir_function_param_floats, inst->arg);
+                HashMapEntry *pe = strcmp(inst->op, "call") == 0 ?
+                    hashmap_get(&ir_function_param_floats, inst->arg) :
+                    hashmap_get(&ir_function_pointer_param_floats, inst->arg);
                 if (pe) pf = (IntArray *)pe->val_ptr;
-                HashMapEntry *re = hashmap_get(&ir_function_return_floats, inst->arg);
+                HashMapEntry *re = strcmp(inst->op, "call") == 0 ?
+                    hashmap_get(&ir_function_return_floats, inst->arg) :
+                    hashmap_get(&ir_function_pointer_return_floats, inst->arg);
                 if (re) retf = re->val_int;
-                int any_f = 0, gpc = 0, ssec = 0;
+                int any_f = 0;
                 for (long i = 0; i < num_args; ++i) {
                     int f = (pf && i < pf->count) ? pf->data[i] : 0;
-                    if (f) { any_f = 1; ssec++; } else gpc++;
+                    if (f) any_f = 1;
                 }
-                if ((any_f || retf) && gpc <= 8 && ssec <= 8) {
-                    int g = 0, s = 0;
+                if (any_f || retf) {
+                    int g = 0, s = 0, stack_words = 0;
                     int *gi = calloc(num_args + 1, sizeof(int));
                     int *si = calloc(num_args + 1, sizeof(int));
                     int *isf = calloc(num_args + 1, sizeof(int));
+                    int *on_stack = calloc(num_args + 1, sizeof(int));
+                    int *stack_off = calloc(num_args + 1, sizeof(int));
                     for (long i = 0; i < num_args; ++i) {
                         int f = (pf && i < pf->count) ? pf->data[i] : 0;
                         isf[i] = f;
-                        if (f) si[i] = s++; else gi[i] = g++;
-                    }
-                    for (long i = num_args - 1; i >= 0; --i) {
-                        if (isf[i]) {
-                            sb_appendf(&out, "    ldr d%d, [sp], #16\n", si[i]);
-                            if (isf[i] == 4) {
-                                sb_appendf(&out, "    fcvt s%d, d%d\n", si[i], si[i]);
-                            }
+                        if (f) {
+                            if (s < 8) si[i] = s++;
+                            else { on_stack[i] = 1; stack_off[i] = stack_words++ * 8; }
                         } else {
-                            sb_appendf(&out, "    ldr x%d, [sp], #16\n", gi[i]);
+                            if (g < 8) gi[i] = g++;
+                            else { on_stack[i] = 1; stack_off[i] = stack_words++ * 8; }
                         }
                     }
-                    sb_appendf(&out, "    bl _%s\n", inst->arg);
+                    long stack_bytes = ((stack_words * 8 + 15) / 16) * 16;
+                    if (stack_bytes > 0) {
+                        emit_sub_imm(&out, "sp", "sp", stack_bytes);
+                    }
+                    for (long i = 0; i < num_args; ++i) {
+                        long src_off = stack_bytes + (num_args - 1 - i) * 16;
+                        if (on_stack[i]) {
+                            if (isf[i]) {
+                                sb_appendf(&out, "    ldr d16, [sp, #%ld]\n", src_off);
+                                if (isf[i] == 4) {
+                                    sb_append(&out, "    fcvt s16, d16\n");
+                                    sb_appendf(&out, "    str s16, [sp, #%d]\n", stack_off[i]);
+                                } else {
+                                    sb_appendf(&out, "    str d16, [sp, #%d]\n", stack_off[i]);
+                                }
+                            } else {
+                                sb_appendf(&out, "    ldr x16, [sp, #%ld]\n", src_off);
+                                sb_appendf(&out, "    str x16, [sp, #%d]\n", stack_off[i]);
+                            }
+                        } else {
+                            if (isf[i]) {
+                                sb_appendf(&out, "    ldr d%d, [sp, #%ld]\n", si[i], src_off);
+                                if (isf[i] == 4) {
+                                    sb_appendf(&out, "    fcvt s%d, d%d\n", si[i], si[i]);
+                                }
+                            } else {
+                                sb_appendf(&out, "    ldr x%d, [sp, #%ld]\n", gi[i], src_off);
+                            }
+                        }
+                    }
+                    if (strcmp(inst->op, "icall") == 0) {
+                        sb_appendf(&out, "    ldr x16, [sp, #%ld]\n", stack_bytes + num_args * 16);
+                        sb_append(&out, "    blr x16\n");
+                    } else {
+                        sb_appendf(&out, "    bl _%s\n", inst->arg);
+                    }
+                    sb_appendf(&out, "    add sp, sp, #%ld\n", stack_bytes + num_args * 16 + (strcmp(inst->op, "icall") == 0 ? 16 : 0));
                     if (retf) {
                         if (retf == 4) {
                             sb_append(&out, "    fcvt d0, s0\n");
@@ -433,7 +471,7 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                     } else {
                         sb_append(&out, "    str x0, [sp, #-16]!\n");
                     }
-                    free(gi); free(si); free(isf);
+                    free(gi); free(si); free(isf); free(on_stack); free(stack_off);
                     continue;
                 }
             }

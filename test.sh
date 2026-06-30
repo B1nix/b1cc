@@ -538,6 +538,20 @@ echo "ok m19_float_scalar_x86_64_asm"
 grep -q 'fmulp\|faddp\|fildl' "$tmp/m19_float_scalar_i386.s"
 echo "ok m19_float_scalar_i386_asm"
 
+./build/b1cc tests/m19_long_long_i386.c -o "$tmp/m19_long_long_i386"
+set +e
+"$tmp/m19_long_long_i386"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok m19_long_long"
+
+./build/b1cc --target=i386-b1nix tests/m19_long_long_i386.c -S -o "$tmp/m19_long_long_i386.s"
+grep -q 'adcl' "$tmp/m19_long_long_i386.s"
+grep -q '__divdi3' "$tmp/m19_long_long_i386.s"
+grep -q '__moddi3' "$tmp/m19_long_long_i386.s"
+echo "ok m19_long_long_i386_asm"
+
 ./build/b1cc tests/m14_qualifiers.c -o "$tmp/m14_qualifiers"
 set +e
 "$tmp/m14_qualifiers"

@@ -173,11 +173,16 @@
       AAPCS64 (`fadd`/`fcvt*`/`scvtf`, D/S regs, V0-V7 args/ret), i386 x87 FPU
       (`fldl`/`faddp`/`fisttp`, st0 returns). Internally FP arithmetic is
       evaluated at double precision and narrowed to `float` on store/return
-      (compute-in-double model). Verified runnable on x86_64 and i386
-      (`tests/m19_float_scalar.c`); arm64 codegen is assembly-validated.
+      (compute-in-double model). Verified runnable on arm64-darwin
+      (`tests/m19_float_scalar.c`) with x86_64/i386 assembly coverage.
       Still pending: float/vector **aggregate** ABI (M18), `printf`-style
       vararg float promotion, and `long double` beyond 64-bit.
-- [ ] Support `long long` 64-bit integer operations on 32-bit platforms (register pairs on i386).
+- [x] Support `long long` 64-bit integer operations on 32-bit platforms:
+      i386 lowers 64-bit integer constants, locals, globals, casts, returns,
+      arithmetic (`+ - * / %`), bitwise operators, shifts, comparisons, and
+      truth tests through `edx:eax` register-pair/eval-stack code, using
+      `__divdi3`/`__moddi3` helpers for signed division/remainder. Covered by
+      `tests/m19_long_long_i386.c` with host execution and i386 assembly checks.
 - [x] Add integer-only typing foundation for scalar C11 `_Bool`, C23 `bool`/`true`/`false`, tolerated `const`/`volatile`/`restrict` qualifiers, and usual integer promotions/conversions across current scalar integer types.
 - [x] Complete qualifier semantics beyond parsing/tolerance: const-correct
       assignment diagnostics for top-level `const`-qualified named scalar/pointer

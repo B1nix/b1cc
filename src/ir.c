@@ -22,6 +22,10 @@ HashMap ir_function_param_aggregate_sizes;
 HashMap ir_function_vararg_fixed_counts;
 HashMap ir_function_param_floats;     /* fn name -> IntArray(0/1 per param) */
 HashMap ir_function_return_floats;    /* fn name -> 1 if returns float/double */
+HashMap ir_function_pointer_param_floats;
+HashMap ir_function_pointer_return_floats;
+HashMap ir_function_return_int_sizes;
+HashMap ir_function_param_int_sizes;
 int ir_current_target_scale = 8;
 static B1CC_THREAD_LOCAL int ir_current_line = 1;
 static B1CC_THREAD_LOCAL int ir_current_col = 1;
@@ -49,6 +53,16 @@ static HashMap ir_struct_field_dims;
 static HashMap ir_struct_field_tags;
 static HashMap ir_struct_field_bit_offsets;
 static HashMap ir_struct_field_bit_widths;
+
+void ir_set_function_pointer_signature(const char *name, const IntArray *param_floats, int return_float) {
+    IntArray *copy = malloc(sizeof(IntArray));
+    int_array_init(copy);
+    for (int i = 0; i < param_floats->count; ++i) {
+        int_array_push(copy, param_floats->data[i]);
+    }
+    hashmap_put(&ir_function_pointer_param_floats, name, copy, 0);
+    hashmap_put(&ir_function_pointer_return_floats, name, nullptr, return_float);
+}
 
 void ir_global_var_array_init(IrGlobalVarArray *arr) {
     arr->data = nullptr;
@@ -294,6 +308,36 @@ void ir_reset_state(void) {
 
     hashmap_free(&ir_function_return_floats);
     hashmap_init(&ir_function_return_floats, 64);
+
+    hashmap_free(&ir_function_return_int_sizes);
+    hashmap_init(&ir_function_return_int_sizes, 64);
+
+    for (int b = 0; b < ir_function_param_int_sizes.bucket_count; ++b) {
+        HashMapEntry *curr = ir_function_param_int_sizes.buckets[b];
+        while (curr) {
+            IntArray *arr = (IntArray *)curr->val_ptr;
+            int_array_free(arr);
+            free(arr);
+            curr = curr->next;
+        }
+    }
+    hashmap_free(&ir_function_param_int_sizes);
+    hashmap_init(&ir_function_param_int_sizes, 64);
+
+    for (int b = 0; b < ir_function_pointer_param_floats.bucket_count; ++b) {
+        HashMapEntry *curr = ir_function_pointer_param_floats.buckets[b];
+        while (curr) {
+            IntArray *arr = (IntArray *)curr->val_ptr;
+            int_array_free(arr);
+            free(arr);
+            curr = curr->next;
+        }
+    }
+    hashmap_free(&ir_function_pointer_param_floats);
+    hashmap_init(&ir_function_pointer_param_floats, 64);
+
+    hashmap_free(&ir_function_pointer_return_floats);
+    hashmap_init(&ir_function_pointer_return_floats, 64);
 
     hashmap_free(&ir_var_unsigned);
     hashmap_init(&ir_var_unsigned, 64);
@@ -667,9 +711,15 @@ static int ir_expr_is_float(const Node *n) {
         if (cn && cn[0]) {
             HashMapEntry *e = hashmap_get(&ir_function_return_floats, cn);
             if (e) return e->val_int;
+            e = hashmap_get(&ir_function_pointer_return_floats, cn);
+            if (e) return e->val_int;
         }
     }
     return 0;
+}
+
+static int ir_expr_is_i64(const Node *n, int target_scale) {
+    return target_scale == 4 && n && !ir_expr_is_float(n) && n->type_size == 8;
 }
 
 static void ir_push(IrFunction *fn, const char *op, const char *arg, long value) {
@@ -782,7 +832,7 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
     }
     int target_scale = backend->get_target_scale(backend);
     if (strcmp(node->op, "num") == 0) {
-        ir_push(fn, "const", "", node->value);
+        ir_push(fn, ir_expr_is_i64(node, target_scale) ? "const64" : "const", "", node->value);
         return;
     }
     if (strcmp(node->op, "fnum") == 0) {
@@ -804,6 +854,10 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
             if (node->value == 4) {
                 ir_push(fn, "d2f", "", 0);        /* round to float precision */
             }
+        } else if (target_scale == 4 && node->value == 8 && node->lhs->type_size < 8) {
+            ir_push(fn, node->lhs->is_unsigned ? "zext64" : "sext64", "", 0);
+        } else if (target_scale == 4 && node->lhs->type_size == 8 && node->value > 0 && node->value < 8) {
+            ir_push(fn, "trunc32", "", node->value);
         } else if (node->value > 0 && node->value < 8) {
             ir_push(fn, "cast", "", node->value);
         }
@@ -884,7 +938,7 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
     }
     if (strcmp(node->op, "unary_~") == 0) {
         lower_expr(node->lhs, fn, backend, arena);
-        ir_push(fn, "~", "", 0);
+        ir_push(fn, ir_expr_is_i64(node->lhs, target_scale) ? "~64" : "~", "", 0);
         return;
     }
     if (strcmp(node->op, "unary_!") == 0) {
@@ -894,7 +948,11 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
     }
     if (strcmp(node->op, "unary_-") == 0) {
         lower_expr(node->lhs, fn, backend, arena);
-        ir_push(fn, ir_expr_is_float(node->lhs) ? "fneg" : "neg", "", 0);
+        if (ir_expr_is_float(node->lhs)) {
+            ir_push(fn, "fneg", "", 0);
+        } else {
+            ir_push(fn, ir_expr_is_i64(node->lhs, target_scale) ? "neg64" : "neg", "", 0);
+        }
         return;
     }
     if (strcmp(node->op, "var") == 0) {
@@ -902,13 +960,13 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         const char *flop = (node->type_size == 4) ? "fload4" : "fload8";
         HashMapEntry *loc_entry = hashmap_get(&fn->locals, node->name);
         if (loc_entry) {
-            ir_push(fn, is_flt ? flop : "load", "", loc_entry->val_int);
+            ir_push(fn, is_flt ? flop : (ir_expr_is_i64(node, target_scale) ? "load64" : "load"), "", loc_entry->val_int);
         } else if (hashmap_has(&ir_global_struct_vars, node->name)) {
             ir_push(fn, "gaddr", node->name, 0);
         } else if (hashmap_has(&ir_global_arrays, node->name)) {
             ir_push(fn, "gaddr", node->name, 0);
         } else if (hashmap_has(&ir_global_vars, node->name)) {
-            ir_push(fn, is_flt ? "fgload" : "gload", node->name, 0);
+            ir_push(fn, is_flt ? "fgload" : (ir_expr_is_i64(node, target_scale) ? "gload64" : "gload"), node->name, 0);
         } else {
             ir_push(fn, "gaddr", node->name, 0);
         }
@@ -930,6 +988,7 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
     if (strcmp(node->op, "call") == 0) {
         const char *call_name = node->name;
         int indirect = (!call_name[0]) || hashmap_has(&fn->locals, call_name);
+        IntArray *param_floats = nullptr;
         if (node->lhs && strcmp(node->lhs->op, "var") == 0 &&
             !hashmap_has(&fn->locals, node->lhs->name) &&
             !hashmap_has(&ir_global_vars, node->lhs->name) &&
@@ -942,23 +1001,38 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
             if (strcmp(callee->op, "unary_*") == 0 && callee->lhs) {
                 callee = callee->lhs;
             }
+            if (strcmp(callee->op, "var") == 0) {
+                call_name = callee->name;
+                HashMapEntry *pfe = hashmap_get(&ir_function_pointer_param_floats, call_name);
+                if (pfe) param_floats = (IntArray *)pfe->val_ptr;
+            }
             lower_expr(callee, fn, backend, arena);
             indirect = 1;
         } else if (indirect) {
             HashMapEntry *entry = hashmap_get(&fn->locals, call_name);
             ir_push(fn, "load", "", entry->val_int);
+            HashMapEntry *pfe = hashmap_get(&ir_function_pointer_param_floats, call_name);
+            if (pfe) param_floats = (IntArray *)pfe->val_ptr;
         }
         IntArray *agg_sizes = nullptr;
         if (!indirect) {
             HashMapEntry *entry = hashmap_get(&ir_function_param_aggregate_sizes, call_name);
             if (entry) agg_sizes = (IntArray *)entry->val_ptr;
+            HashMapEntry *pfe = hashmap_get(&ir_function_param_floats, call_name);
+            if (pfe) param_floats = (IntArray *)pfe->val_ptr;
         }
         for (int k = 0; k < node->body.count; ++k) {
             int agg_size = (agg_sizes && k < agg_sizes->count) ? agg_sizes->data[k] : 0;
             if (agg_size > 0) {
                 lower_addr(node->body.data[k], fn, backend, arena);
             } else {
+                int param_float = (param_floats && k < param_floats->count) ? param_floats->data[k] : 0;
                 lower_expr(node->body.data[k], fn, backend, arena);
+                if (param_float && !ir_expr_is_float(node->body.data[k])) {
+                    ir_push(fn, "i2f", "", 0);
+                } else if (param_float == 4 && ir_expr_is_float(node->body.data[k])) {
+                    ir_push(fn, "d2f", "", 0);
+                }
             }
         }
         fn->has_call = 1;
@@ -1139,7 +1213,17 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
     if (strcmp(node->op, "+") == 0 || strcmp(node->op, "-") == 0) {
         int left_scale = get_expr_pointer_scale(node->lhs, fn);
         int right_scale = get_expr_pointer_scale(node->rhs, fn);
-        if (left_scale > 0 && right_scale == 0) {
+        if (ir_expr_is_i64(node, target_scale) && left_scale == 0 && right_scale == 0) {
+            lower_expr(node->lhs, fn, backend, arena);
+            if (!ir_expr_is_i64(node->lhs, target_scale)) {
+                ir_push(fn, node->lhs->is_unsigned ? "zext64" : "sext64", "", 0);
+            }
+            lower_expr(node->rhs, fn, backend, arena);
+            if (!ir_expr_is_i64(node->rhs, target_scale)) {
+                ir_push(fn, node->rhs->is_unsigned ? "zext64" : "sext64", "", 0);
+            }
+            ir_push(fn, strcmp(node->op, "+") == 0 ? "+64" : "-64", "", 0);
+        } else if (left_scale > 0 && right_scale == 0) {
             lower_expr(node->lhs, fn, backend, arena);
             lower_expr(node->rhs, fn, backend, arena);
             if (left_scale > 1) {
@@ -1186,13 +1270,36 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         return;
     }
     lower_expr(node->lhs, fn, backend, arena);
+    if (ir_expr_is_i64(node, target_scale) && !ir_expr_is_i64(node->lhs, target_scale) &&
+        strcmp(node->op, "<<") != 0 && strcmp(node->op, ">>") != 0) {
+        ir_push(fn, node->lhs->is_unsigned ? "zext64" : "sext64", "", 0);
+    }
     lower_expr(node->rhs, fn, backend, arena);
+    int wide_compare = target_scale == 4 && !ir_expr_is_float(node->lhs) && !ir_expr_is_float(node->rhs) &&
+        (node->lhs->type_size == 8 || node->rhs->type_size == 8) &&
+        (strcmp(node->op, "==") == 0 || strcmp(node->op, "!=") == 0 ||
+         strcmp(node->op, "<") == 0 || strcmp(node->op, ">") == 0 ||
+         strcmp(node->op, "<=") == 0 || strcmp(node->op, ">=") == 0);
+    if ((ir_expr_is_i64(node, target_scale) || wide_compare) &&
+        !ir_expr_is_i64(node->rhs, target_scale) &&
+        strcmp(node->op, "<<") != 0 && strcmp(node->op, ">>") != 0) {
+        ir_push(fn, node->rhs->is_unsigned ? "zext64" : "sext64", "", 0);
+    }
     const char *op = node->op;
     if (node->is_unsigned && (strcmp(op, "<") == 0 || strcmp(op, ">") == 0 || strcmp(op, "<=") == 0 || strcmp(op, ">=") == 0 || strcmp(op, ">>") == 0)) {
         char *uop = arena_alloc(arena, strlen(op) + 2);
         uop[0] = 'u';
         strcpy(uop + 1, op);
         op = uop;
+    }
+    if (target_scale == 4 &&
+        (ir_expr_is_i64(node, target_scale) || wide_compare ||
+         ((strcmp(op, "<<") == 0 || strcmp(op, ">>") == 0 || strcmp(op, "u>>") == 0) &&
+          node->lhs && node->lhs->type_size == 8))) {
+        char *op64 = arena_alloc(arena, strlen(op) + 3);
+        strcpy(op64, op);
+        strcat(op64, "64");
+        op = op64;
     }
     ir_push(fn, op, "", 0);
 }
@@ -1343,6 +1450,11 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
             if (stmt->is_float) {
                 if (!ir_expr_is_float(stmt->lhs)) ir_push(fn, "i2f", "", 0);
                 ir_push(fn, stmt->type_size == 4 ? "fstore4" : "fstore8", "", slot);
+            } else if (target_scale == 4 && stmt->type_size == 8) {
+                if (stmt->lhs->type_size < 8) {
+                    ir_push(fn, stmt->lhs->is_unsigned ? "zext64" : "sext64", "", 0);
+                }
+                ir_push(fn, "store64", "", slot);
             } else {
                 ir_push(fn, "store", "", slot);
             }
@@ -1363,9 +1475,14 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
                 ir_push(fn, size == 4 ? "fstore4" : "fstore8", "", loc_entry->val_int);
             } else {
                 lower_expr(stmt->lhs, fn, backend, arena);
+                if (target_scale == 4 && size == 8 && stmt->lhs->type_size < 8) {
+                    ir_push(fn, stmt->lhs->is_unsigned ? "zext64" : "sext64", "", 0);
+                }
                 if (size > 8) {
                     ir_push(fn, "load", "", loc_entry->val_int);
                     ir_push(fn, "store_agg", "", size);
+                } else if (target_scale == 4 && size == 8) {
+                    ir_push(fn, "store64", "", loc_entry->val_int);
                 } else {
                     ir_push(fn, "store", "", loc_entry->val_int);
                 }
@@ -1384,9 +1501,14 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
                 ir_push(fn, "fgstore", stmt->name, 0);
             } else {
                 lower_expr(stmt->lhs, fn, backend, arena);
+                if (target_scale == 4 && size == 8 && stmt->lhs->type_size < 8) {
+                    ir_push(fn, stmt->lhs->is_unsigned ? "zext64" : "sext64", "", 0);
+                }
                 if (size > 8) {
                     ir_push(fn, "gaddr", stmt->name, 0);
                     ir_push(fn, "store_agg", "", size);
+                } else if (target_scale == 4 && size == 8) {
+                    ir_push(fn, "gstore64", stmt->name, 0);
                 } else {
                     ir_push(fn, "gstore", stmt->name, 0);
                 }
@@ -1416,10 +1538,17 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
         if (current_func_ret_size > 0 && current_func_ret_size < 8) {
             ir_push(fn, "cast", "", current_func_ret_size);
         }
-        ir_push(fn, "ret", "", 0);
+        if (target_scale == 4 && current_func_ret_size == 8) {
+            if (stmt->lhs && stmt->lhs->type_size < 8) {
+                ir_push(fn, stmt->lhs->is_unsigned ? "zext64" : "sext64", "", 0);
+            }
+            ir_push(fn, "ret64", "", 0);
+        } else {
+            ir_push(fn, "ret", "", 0);
+        }
     } else if (strcmp(stmt->op, "expr") == 0) {
         lower_expr(stmt->lhs, fn, backend, arena);
-        ir_push(fn, "pop", "", 0);
+        ir_push(fn, ir_expr_is_i64(stmt->lhs, target_scale) ? "pop64" : "pop", "", 0);
     } else if (strcmp(stmt->op, "if") == 0) {
         char else_label[128];
         snprintf(else_label, sizeof(else_label), ".L%s_else%d", fn->name, fn->label_id++);
@@ -1430,7 +1559,7 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
         const char *endl_dup = arena_strdup(arena, end_label);
 
         lower_expr(stmt->lhs, fn, backend, arena);
-        ir_push(fn, "jz", el_dup, 0);
+        ir_push(fn, ir_expr_is_i64(stmt->lhs, target_scale) ? "jz64" : "jz", el_dup, 0);
         lower_stmt(stmt->body.data[0], fn, backend, arena);
         ir_push(fn, "jmp", endl_dup, 0);
         ir_push(fn, "label", el_dup, 0);
@@ -1449,7 +1578,7 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
 
         ir_push(fn, "label", sl_dup, 0);
         lower_expr(stmt->lhs, fn, backend, arena);
-        ir_push(fn, "jz", el_dup, 0);
+        ir_push(fn, ir_expr_is_i64(stmt->lhs, target_scale) ? "jz64" : "jz", el_dup, 0);
         
         push_loop_ctx(&loop_contexts, el_dup, sl_dup);
         lower_stmt(stmt->rhs, fn, backend, arena);
@@ -1476,7 +1605,7 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
         ir_push(fn, "label", sl_dup, 0);
         if (stmt->lhs) {
             lower_expr(stmt->lhs, fn, backend, arena);
-            ir_push(fn, "jz", el_dup, 0);
+            ir_push(fn, ir_expr_is_i64(stmt->lhs, target_scale) ? "jz64" : "jz", el_dup, 0);
         }
         
         push_loop_ctx(&loop_contexts, el_dup, stepl_dup);
@@ -1726,6 +1855,17 @@ IrFunctionArray ir_lower_program(const NodeArray *ast, const char *target, Arena
         hashmap_put(&ir_function_param_floats, ast->data[k]->name, param_fl, 0);
         hashmap_put(&ir_function_return_floats, ast->data[k]->name, nullptr,
                     ast->data[k]->is_float ? (int)ast->data[k]->value : 0);
+        hashmap_put(&ir_function_return_int_sizes, ast->data[k]->name, nullptr,
+                    (!ast->data[k]->is_float && ast->data[k]->aggregate_size == 0) ? (int)ast->data[k]->value : 0);
+
+        IntArray *param_int_sizes = malloc(sizeof(IntArray));
+        int_array_init(param_int_sizes);
+        for (int p_i = 0; p_i < ast->data[k]->params.count; ++p_i) {
+            const char *param = ast->data[k]->params.data[p_i];
+            int sz = strcmp(param, "...") == 0 ? 0 : ir_get_var_type_size(param);
+            int_array_push(param_int_sizes, sz);
+        }
+        hashmap_put(&ir_function_param_int_sizes, ast->data[k]->name, param_int_sizes, 0);
 
         int vararg_fixed = -1;
         for (int p_i = 0; p_i < ast->data[k]->params.count; ++p_i) {

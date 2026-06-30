@@ -10,6 +10,10 @@
 
 double dsq(double x) { return x * x; }
 float  fscale(float x, int n) { return x * n; }
+double sum9(double a, double b, double c, double d, double e,
+            double f, double g, double h, double i) {
+    return a + b + c + d + e + f + g + h + i;
+}
 
 double g_d = 1.5;
 float  g_f = 0.25f;
@@ -26,6 +30,7 @@ int main(void) {
     if (b == a) return 6;
 
     if ((int)dsq(4.0) != 16) return 7;          /* double arg + return */
+    if ((int)dsq(4) != 16) return 13;            /* int actual -> double formal */
 
     float f = 2.5f;
     if ((int)fscale(f, 4) != 10) return 8;      /* float + int args, float return */
@@ -39,6 +44,12 @@ int main(void) {
     int i = 7;
     double mixed = i + 0.5;                       /* int -> double */
     if ((int)mixed != 7) return 12;
+
+    if ((int)sum9(1.0, 2.0, 3.0, 4.0, 5.0,
+                  6.0, 7.0, 8.0, 9.0) != 45) return 14;
+
+    double (*fp)(double) = dsq;
+    if ((int)fp(5.0) != 25) return 15;
 
     return 0;
 }
