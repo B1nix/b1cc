@@ -368,6 +368,14 @@ elf_class_i=$(od -A n -j 4 -N 1 -t u1 "$tmp/m15_elf_i386.o" | tr -d ' \n')
 test "$elf_class_i" = "1"
 echo "ok m15_elf_obj_i386"
 
+./build/b1cc --target=i386-b1nix -c -fdump-sections tests/return_42.c -o "$tmp/m15_elf_i386_text.o" > "$tmp/m15_elf_i386_text.txt" 2>&1
+grep -Eq '\.text[[:space:]]+0*11[[:space:]]' "$tmp/m15_elf_i386_text.txt"
+
+./build/b1cc --target=i386-b1nix -c -fdump-relocs tests/puts.c -o "$tmp/m15_elf_i386_reloc.o" > "$tmp/m15_elf_i386_reloc.txt" 2>&1
+grep -q "R_386_PC32" "$tmp/m15_elf_i386_reloc.txt"
+grep -q "puts" "$tmp/m15_elf_i386_reloc.txt"
+echo "ok m15_elf_i386_encoding"
+
 ./build/b1cc tests/m17_preprocessor_full.c -o "$tmp/m17_preprocessor_full"
 set +e
 "$tmp/m17_preprocessor_full"

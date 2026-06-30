@@ -128,9 +128,9 @@
 - [x] Make native object output real enough for B1NIX: symbols, relocations, sections, and debug dumps.
 - [x] Compile a small curated set of real B1NIX userspace files without TCC fallback when the sibling B1NIX tree is present (`b1cc_hello.c`, `b1cc_better_c.c`).
 - [x] ELF64 relocatable objects for x86_64-b1nix (full instruction encoding + sections).
-- [x] ELF32 relocatable stubs for i386-b1nix (correct ELF identity + symbol table).
+- [x] ELF32 relocatable objects for i386-b1nix (instruction encoding for backend-emitted i386 assembly, sections, symbols, and SHT_REL relocations).
 - [ ] Native Mach-O object writer for arm64-darwin (currently uses host `cc` pass-through).
-- [ ] Full i386 binary instruction encoding.
+- [x] Full i386 binary instruction encoding for the assembly forms emitted by `backend_i386.c`.
 
 ## M16: Compiler Shape Cleanup
 
