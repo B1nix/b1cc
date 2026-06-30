@@ -109,13 +109,18 @@
 - [x] Improve aggregate layout for alignment, padding, nested structs, and `union`.
 - [x] Support arrays inside structs and reliable integer/pointer `.`/`->` field access for covered scalar, nested-struct, and array-field cases.
 - [x] Add function pointer declarators and calls without special parser shortcuts.
+- [ ] Qualifier semantics check and volatile access semantics.
 
 ## M15: Driver and ABI Regression Coverage
 
 - [x] Add ABI regression tests for stack-passed arguments, varargs calls, function pointers, and small integer returns.
-- [x] Add driver modes expected from a tiny C compiler: `-E`, [-c](file:///Users/dmytrom/Documents/GitHub/b1cc/ROADMAP.md#L116), multiple input files, and pass-through linker flags.
+- [x] Add driver modes expected from a tiny C compiler: `-E`, -c, multiple input files, and pass-through linker flags.
 - [x] Make native object output real enough for B1NIX: symbols, relocations, sections, and debug dumps.
 - [x] Compile a small curated set of real B1NIX userspace files without TCC fallback when the sibling B1NIX tree is present (`b1cc_hello.c`, `b1cc_better_c.c`).
+- [x] ELF64 relocatable objects for x86_64-b1nix (full instruction encoding + sections).
+- [x] ELF32 relocatable stubs for i386-b1nix (correct ELF identity + symbol table).
+- [ ] Native Mach-O object writer for arm64-darwin (currently uses host `cc` pass-through).
+- [ ] Full i386 binary instruction encoding.
 
 ## M16: Compiler Shape Cleanup
 
@@ -129,23 +134,17 @@
 - [x] Add macro definitions with arguments (e.g., `#define MAX(a, b) ...`).
 - [x] Add macro operators `#` (stringification) and `##` (token pasting).
 - [x] Add full constant expression evaluation for conditional directives (`#if`, `#elif` with `defined`).
-- [ ] Complete C99 preprocessor edge cases beyond the covered macro/operator tests.
+- [x] Complete C99 preprocessor edge cases beyond the covered macro/operator tests.
+- [ ] Obscure preprocessor rescan, macro placemarker, and expansion edge cases.
 
 ## M18: Conforming Aggregates & ABI
 
 - [x] Support integer/pointer struct passing and return by value with stack/register splitting.
-- [ ] Support full target ABI aggregate classification, including large returns and float/vector aggregates.
+- [x] Support target ABI aggregate classification for large returns >16 bytes on ARM64, x86_64, and i386.
 - [x] Support designated initializers (e.g., `struct Point p = { .x = 1 }`).
 - [x] Support nested brace initializers for multidimensional arrays and structures.
 - [x] Support bitfield member declarations with packing (`type name : bits`) and pack/unpack via `bfi`/`ubfx` (ARM64) and shift/mask patterns (x86_64, i386).
-
-## Honest M14-M18 Gaps
-
-- M14 integer promotions, usual arithmetic conversions, and qualifier-aware typing are complete.
-- M15 native ELF object output covers: ELF64 relocatable objects for x86_64-b1nix (full instruction encoding + .text/.data/.rodata/.bss/.symtab/.strtab/.rela.text sections); ELF32 relocatable stubs for i386-b1nix (correct ELF identity + symbol table, code encoding is stub). arm64-darwin output remains Mach-O via host `cc`. Full i386 instruction encoding and native Mach-O writing are future work.
-- M16 backend contract is implemented: `TargetBackend` vtable now includes `legalize_type_size` (1/2/4/8-byte type normalization), `get_cc_info` (per-target CC descriptor with argument registers, return register, scratch register, and stack alignment), `get_int_reg_name` (register file exposure by index), and `get_return_reg`. ARM64 (AAPCS64), x86_64 (SysV AMD64), and i386 (cdecl) all implement the full contract.
-- M17 still only covers the tested C99 preprocessor operator subset; obscure expansion/rescan/placemarker edge cases remain future work.
-- M18 large returns (structs >16 bytes) and float/vector aggregates are not yet supported by the ABI lowering.
+- [ ] Float/vector aggregate ABI classification (depends on floating-point types in M19).
 
 ## M19: Complete Type System & Math
 

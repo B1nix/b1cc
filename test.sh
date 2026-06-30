@@ -400,6 +400,15 @@ set -e
 test "$rc" = 0
 echo "ok m18_aggregate_abi"
 
+./build/b1cc tests/m18_large_aggregate_abi.c -o "$tmp/m18_large_aggregate_abi"
+set +e
+"$tmp/m18_large_aggregate_abi"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok m18_large_aggregate_abi"
+
+
 ./build/b1cc tests/m18_bitfields.c -o "$tmp/m18_bitfields"
 set +e
 "$tmp/m18_bitfields"
@@ -560,6 +569,11 @@ grep -q '^make_pair:' "$tmp/m18_aggregate_abi_x86_64.s"
 grep -q '^stack_pair:' "$tmp/m18_aggregate_abi_x86_64.s"
 echo "ok x86_64_b1nix_m18_aggregate_abi_asm"
 
+./build/b1cc --target=x86_64-b1nix tests/m18_large_aggregate_abi.c -S -o "$tmp/m18_large_aggregate_abi_x86_64.s"
+grep -q '^make_large:' "$tmp/m18_large_aggregate_abi_x86_64.s"
+grep -q '^stack_large:' "$tmp/m18_large_aggregate_abi_x86_64.s"
+echo "ok x86_64_b1nix_m18_large_aggregate_abi_asm"
+
 if [ -x ../b1nix/tools/toolchain/bin/b1nix-cc ]; then
   ./build/b1cc --target=x86_64-b1nix tests/return_42.c -o "$tmp/return_42.b1nix"
   test -s "$tmp/return_42.b1nix"
@@ -568,7 +582,12 @@ if [ -x ../b1nix/tools/toolchain/bin/b1nix-cc ]; then
   ./build/b1cc --target=x86_64-b1nix tests/m18_aggregate_abi.c -o "$tmp/m18_aggregate_abi.b1nix"
   test -s "$tmp/m18_aggregate_abi.b1nix"
   echo "ok x86_64_b1nix_m18_aggregate_abi_elf"
+
+  ./build/b1cc --target=x86_64-b1nix tests/m18_large_aggregate_abi.c -o "$tmp/m18_large_aggregate_abi.b1nix"
+  test -s "$tmp/m18_large_aggregate_abi.b1nix"
+  echo "ok x86_64_b1nix_m18_large_aggregate_abi_elf"
 fi
+
 
 ./build/b1cc --target=i386-b1nix tests/return_42.c -S -o "$tmp/return_42_i386.s"
 grep -q '^main:' "$tmp/return_42_i386.s"

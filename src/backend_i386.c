@@ -8,6 +8,28 @@ typedef struct {
     TargetBackend base;
 } I386Target;
 
+static void i386_emit_block_copy(StringBuilder *out, const char *src_reg, const char *dest_reg, int size) {
+    int offset = 0;
+    while (size >= 4) {
+        sb_appendf(out, "    movl %d(%s), %%ecx\n", offset, src_reg);
+        sb_appendf(out, "    movl %%ecx, %d(%s)\n", offset, dest_reg);
+        offset += 4;
+        size -= 4;
+    }
+    if (size >= 2) {
+        sb_appendf(out, "    movw %d(%s), %%cx\n", offset, src_reg);
+        sb_appendf(out, "    movw %%cx, %d(%s)\n", offset, dest_reg);
+        offset += 2;
+        size -= 2;
+    }
+    if (size >= 1) {
+        sb_appendf(out, "    movb %d(%s), %%cl\n", offset, src_reg);
+        sb_appendf(out, "    movb %%cl, %d(%s)\n", offset, dest_reg);
+        offset += 1;
+        size -= 1;
+    }
+}
+
 static const char *i386_emit_globals(TargetBackend *self, const IrGlobalVarArray *globals, Arena *arena) {
     (void)self;
     if (globals->count == 0)
@@ -88,15 +110,26 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
     sb_appendf(&out, ".type %s, @function\n", fn->name);
     sb_appendf(&out, "%s:\n", fn->name);
 
-    int frame = fn->has_call || (fn->locals.size > 0);
+    int indirect_ret = (fn->return_aggregate_size > 0);
+    int local_slots = fn->locals.size;
+    if (indirect_ret) {
+        local_slots++;
+    }
+    int frame = fn->has_call || (local_slots > 0);
     if (frame) {
         sb_append(&out, "    pushl %ebp\n");
         sb_append(&out, "    movl %esp, %ebp\n");
-        if (fn->locals.size > 0) {
-            sb_appendf(&out, "    subl $%d, %esp\n", fn->locals.size * 16);
+        if (local_slots > 0) {
+            sb_appendf(&out, "    subl $%d, %%esp\n", local_slots * 16);
         }
+        if (indirect_ret) {
+            int off = -(local_slots * 16);
+            sb_append(&out, "    movl 8(%ebp), %eax\n");
+            sb_appendf(&out, "    movl %%eax, %d(%%ebp)\n", off);
+        }
+        int param_offset = indirect_ret ? 12 : 8;
         for (int i = 0; i < fn->params.count; ++i) {
-            sb_appendf(&out, "    movl %d(%%ebp), %%eax\n", 8 + i * 4);
+            sb_appendf(&out, "    movl %d(%%ebp), %%eax\n", param_offset + i * 4);
             sb_appendf(&out, "    movl %%eax, -%d(%%ebp)\n", (i + 1) * 16);
         }
     }
@@ -226,14 +259,39 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
             sb_appendf(&out, "%s:\n", inst->arg);
         } else if (strcmp(inst->op, "call") == 0) {
             long num_args = inst->value;
-            sb_appendf(&out, "    subl $%ld, %%esp\n", num_args * 4);
-            for (long i = 0; i < num_args; ++i) {
-                sb_appendf(&out, "    movl %ld(%%esp), %%eax\n", (2 * num_args - 1 - i) * 4);
-                sb_appendf(&out, "    movl %%eax, %ld(%%esp)\n", i * 4);
+            int ret_agg_size = 0;
+            HashMapEntry *entry = hashmap_get(&ir_function_return_aggregate_sizes, inst->arg);
+            if (entry) ret_agg_size = entry->val_int;
+
+            if (ret_agg_size > 0) {
+                int ret_val_bytes = ((ret_agg_size + 15) / 16) * 16;
+                sb_appendf(&out, "    subl $%d, %%esp\n", ret_val_bytes);
+                int stack_bytes = (num_args + 1) * 4;
+                sb_appendf(&out, "    subl $%d, %%esp\n", stack_bytes);
+                
+                // Compute return buffer address and store in first slot
+                sb_appendf(&out, "    leal %d(%%esp), %%eax\n", stack_bytes);
+                sb_append(&out, "    movl %eax, (%esp)\n");
+
+                // Copy actual arguments
+                for (long i = 0; i < num_args; ++i) {
+                    sb_appendf(&out, "    movl %ld(%%esp), %%eax\n", stack_bytes + ret_val_bytes + (num_args - 1 - i) * 4);
+                    sb_appendf(&out, "    movl %%eax, %ld(%%esp)\n", (i + 1) * 4);
+                }
+                sb_appendf(&out, "    call %s\n", inst->arg);
+                // Callee pops hidden pointer, so we only pop num_args * 4
+                sb_appendf(&out, "    addl $%ld, %%esp\n", num_args * 4);
+                // The return value buffer is now at the top of the stack. We do not push %eax.
+            } else {
+                sb_appendf(&out, "    subl $%ld, %%esp\n", num_args * 4);
+                for (long i = 0; i < num_args; ++i) {
+                    sb_appendf(&out, "    movl %ld(%%esp), %%eax\n", (2 * num_args - 1 - i) * 4);
+                    sb_appendf(&out, "    movl %%eax, %ld(%%esp)\n", i * 4);
+                }
+                sb_appendf(&out, "    call %s\n", inst->arg);
+                sb_appendf(&out, "    addl $%ld, %%esp\n", 2 * num_args * 4);
+                sb_append(&out, "    pushl %eax\n");
             }
-            sb_appendf(&out, "    call %s\n", inst->arg);
-            sb_appendf(&out, "    addl $%ld, %%esp\n", 2 * num_args * 4);
-            sb_append(&out, "    pushl %eax\n");
         } else if (strcmp(inst->op, "icall") == 0) {
             long num_args = inst->value;
             sb_appendf(&out, "    subl $%ld, %%esp\n", num_args * 4);
@@ -286,6 +344,26 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
             } else {
                 sb_append(&out, "    movl %edx, (%eax,%ecx,8)\n");
             }
+        } else if (strcmp(inst->op, "store_agg") == 0) {
+            sb_append(&out, "    popl %edx\n"); // dest_addr
+            i386_emit_block_copy(&out, "%esp", "%edx", inst->value);
+            int ret_bytes = ((inst->value + 15) / 16) * 16;
+            sb_appendf(&out, "    addl $%d, %%esp\n", ret_bytes);
+        } else if (strcmp(inst->op, "copy") == 0) {
+            sb_append(&out, "    popl %edx\n"); // dest_addr
+            sb_append(&out, "    popl %eax\n"); // src_addr
+            i386_emit_block_copy(&out, "%eax", "%edx", inst->value);
+        } else if (strcmp(inst->op, "ret_agg") == 0) {
+            int ret_size = inst->value;
+            sb_append(&out, "    popl %ecx\n"); // src_addr
+            int off = -((fn->locals.size + 1) * 16);
+            sb_appendf(&out, "    movl %d(%%ebp), %%edx\n", off); // dest_addr (hidden pointer)
+            i386_emit_block_copy(&out, "%ecx", "%edx", ret_size);
+            sb_append(&out, "    movl %%edx, %%eax\n"); // Return hidden pointer in eax
+            if (frame) {
+                sb_append(&out, "    leave\n");
+            }
+            sb_append(&out, "    ret $4\n");
         } else if (strcmp(inst->op, "ret") == 0) {
             sb_append(&out, "    popl %eax\n");
             if (frame)
@@ -330,7 +408,11 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
     if (!has_explicit_ret) {
         if (frame)
             sb_append(&out, "    leave\n");
-        sb_append(&out, "    ret\n");
+        if (fn->return_aggregate_size > 0) {
+            sb_append(&out, "    ret $4\n");
+        } else {
+            sb_append(&out, "    ret\n");
+        }
     }
     sb_appendf(&out, ".size %s, .-%s\n", fn->name, fn->name);
 

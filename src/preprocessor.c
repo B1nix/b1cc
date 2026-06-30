@@ -90,10 +90,12 @@ static StringArray get_expr_tokens(const char *s, Arena *arena) {
                     (s[i] == '<' && s[i+1] == '=') ||
                     (s[i] == '>' && s[i+1] == '=') ||
                     (s[i] == '&' && s[i+1] == '&') ||
-                    (s[i] == '|' && s[i+1] == '|'))) {
+                    (s[i] == '|' && s[i+1] == '|') ||
+                    (s[i] == '<' && s[i+1] == '<') ||
+                    (s[i] == '>' && s[i+1] == '>'))) {
             string_array_push(&tokens, arena_strndup(arena, s + i, 2));
             i += 2;
-        } else if (strchr("+-*/<>()!~", s[i]) != nullptr) {
+        } else if (strchr("+-*/%<>()!~&|^", s[i]) != nullptr) {
             string_array_push(&tokens, arena_strndup(arena, s + i, 1));
             i++;
         } else {
@@ -145,19 +147,29 @@ static long ep_primary(ExprParser *ep) {
         ep_take(ep);
         return -ep_primary(ep);
     }
+    if (strcmp(t, "+") == 0) {
+        ep_take(ep);
+        return ep_primary(ep);
+    }
     return 0;
 }
 
 static long ep_mul(ExprParser *ep) {
     long val = ep_primary(ep);
-    while (strcmp(ep_peek(ep), "*") == 0 || strcmp(ep_peek(ep), "/") == 0) {
+    while (strcmp(ep_peek(ep), "*") == 0 || strcmp(ep_peek(ep), "/") == 0 || strcmp(ep_peek(ep), "%") == 0) {
         const char *op = ep_take(ep);
         long rhs = ep_primary(ep);
         if (strcmp(op, "*") == 0) {
             val *= rhs;
-        } else {
+        } else if (strcmp(op, "/") == 0) {
             if (rhs != 0) {
                 val /= rhs;
+            } else {
+                val = 0;
+            }
+        } else {
+            if (rhs != 0) {
+                val %= rhs;
             } else {
                 val = 0;
             }
@@ -180,12 +192,26 @@ static long ep_add(ExprParser *ep) {
     return val;
 }
 
-static long ep_relational(ExprParser *ep) {
+static long ep_shift(ExprParser *ep) {
     long val = ep_add(ep);
+    while (strcmp(ep_peek(ep), "<<") == 0 || strcmp(ep_peek(ep), ">>") == 0) {
+        const char *op = ep_take(ep);
+        long rhs = ep_add(ep);
+        if (strcmp(op, "<<") == 0) {
+            val <<= rhs;
+        } else {
+            val >>= rhs;
+        }
+    }
+    return val;
+}
+
+static long ep_relational(ExprParser *ep) {
+    long val = ep_shift(ep);
     while (strcmp(ep_peek(ep), "<") == 0 || strcmp(ep_peek(ep), ">") == 0 ||
            strcmp(ep_peek(ep), "<=") == 0 || strcmp(ep_peek(ep), ">=") == 0) {
         const char *op = ep_take(ep);
-        long rhs = ep_add(ep);
+        long rhs = ep_shift(ep);
         if (strcmp(op, "<") == 0) val = val < rhs;
         else if (strcmp(op, ">") == 0) val = val > rhs;
         else if (strcmp(op, "<=") == 0) val = val <= rhs;
@@ -205,11 +231,41 @@ static long ep_equality(ExprParser *ep) {
     return val;
 }
 
-static long ep_eval_and(ExprParser *ep) {
+static long ep_and(ExprParser *ep) {
     long val = ep_equality(ep);
-    while (strcmp(ep_peek(ep), "&&") == 0) {
+    while (strcmp(ep_peek(ep), "&") == 0) {
         ep_take(ep);
         long rhs = ep_equality(ep);
+        val &= rhs;
+    }
+    return val;
+}
+
+static long ep_xor(ExprParser *ep) {
+    long val = ep_and(ep);
+    while (strcmp(ep_peek(ep), "^") == 0) {
+        ep_take(ep);
+        long rhs = ep_and(ep);
+        val ^= rhs;
+    }
+    return val;
+}
+
+static long ep_or(ExprParser *ep) {
+    long val = ep_xor(ep);
+    while (strcmp(ep_peek(ep), "|") == 0) {
+        ep_take(ep);
+        long rhs = ep_xor(ep);
+        val |= rhs;
+    }
+    return val;
+}
+
+static long ep_eval_and(ExprParser *ep) {
+    long val = ep_or(ep);
+    while (strcmp(ep_peek(ep), "&&") == 0) {
+        ep_take(ep);
+        long rhs = ep_or(ep);
         val = val && rhs;
     }
     return val;

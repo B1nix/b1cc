@@ -118,20 +118,34 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
     sb_appendf(&out, ".type %s, @function\n", fn->name);
     sb_appendf(&out, "%s:\n", fn->name);
 
-    int frame = fn->has_call || (fn->locals.size > 0);
+    int indirect_ret = (fn->return_aggregate_size > 16);
+    int local_slots = fn->locals.size;
+    if (indirect_ret) {
+        local_slots++;
+    }
+    int frame = fn->has_call || (local_slots > 0);
     if (frame) {
         sb_append(&out, "    pushq %rbp\n");
         sb_append(&out, "    movq %rsp, %rbp\n");
-    if (fn->locals.size > 0) {
-        sb_appendf(&out, "    subq $%d, %%rsp\n", fn->locals.size * 16);
+        if (local_slots > 0) {
+            sb_appendf(&out, "    subq $%d, %%rsp\n", local_slots * 16);
         }
-        int abi_word = 0;
+        if (indirect_ret) {
+            int off = -(local_slots * 16);
+            sb_appendf(&out, "    movq %%rdi, %d(%%rbp)\n", off);
+        }
+        int abi_word = indirect_ret ? 1 : 0;
         int stack_word = 0;
         for (int i = 0; i < fn->params.count; ++i) {
             int agg_size = (i < fn->param_aggregate_sizes.count) ? fn->param_aggregate_sizes.data[i] : 0;
             int words = (agg_size > 0) ? ((agg_size + 7) / 8) : 1;
             int num_slots = (agg_size > 0) ? ((agg_size + 15) / 16) : 1;
-            int in_regs = (abi_word + words <= 6);
+            int in_regs = 0;
+            if (agg_size > 0 && agg_size <= 16) {
+                in_regs = (abi_word + words <= 6);
+            } else if (agg_size == 0) {
+                in_regs = (abi_word + 1 <= 6);
+            }
             
             HashMapEntry *entry = hashmap_get((HashMap *)&fn->locals, fn->params.data[i]);
             int slot_idx = entry ? entry->val_int : i;
@@ -289,7 +303,18 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
             int *arg_first_word = calloc(num_args + 1, sizeof(int));
             int *arg_stack_word = calloc(num_args + 1, sizeof(int));
 
-            int abi_words = 0;
+            int ret_agg_size = 0;
+            if (strcmp(inst->op, "call") == 0) {
+                HashMapEntry *entry = hashmap_get(&ir_function_return_aggregate_sizes, inst->arg);
+                if (entry) ret_agg_size = entry->val_int;
+            }
+            int ret_val_bytes = 0;
+            if (ret_agg_size > 16) {
+                ret_val_bytes = ((ret_agg_size + 15) / 16) * 16;
+                sb_appendf(&out, "    subq $%d, %%rsp\n", ret_val_bytes);
+            }
+
+            int abi_words = (ret_agg_size > 16) ? 1 : 0;
             int stack_words = 0;
             for (long i = 0; i < num_args; ++i) {
                 int agg_size = (agg_sizes && i < agg_sizes->count) ? agg_sizes->data[i] : 0;
@@ -297,7 +322,13 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                 if (agg_size > 0) {
                     has_aggregate_arg = 1;
                 }
-                if (abi_words + words <= 6) {
+                int in_regs = 0;
+                if (agg_size > 0 && agg_size <= 16) {
+                    in_regs = (abi_words + words <= 6);
+                } else if (agg_size == 0) {
+                    in_regs = (abi_words + 1 <= 6);
+                }
+                if (in_regs) {
                     arg_in_regs[i] = 1;
                     arg_first_word[i] = abi_words;
                     abi_words += words;
@@ -307,7 +338,7 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                 }
             }
 
-            if (has_aggregate_arg) {
+            if (has_aggregate_arg || ret_agg_size > 16) {
                 int stack_bytes = stack_words * 8;
                 if (stack_bytes > 0) {
                     sb_appendf(&out, "    subq $%d, %%rsp\n", stack_bytes);
@@ -315,15 +346,23 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                 for (long i = 0; i < num_args; ++i) {
                     int agg_size = (agg_sizes && i < agg_sizes->count) ? agg_sizes->data[i] : 0;
                     int words = (agg_size > 0) ? ((agg_size + 7) / 8) : 1;
-                    int src_off = stack_bytes + (int)(num_args - 1 - i) * 8;
+                    int src_off = stack_bytes + (int)(num_args - 1 - i) * 8 + ret_val_bytes;
                     if (agg_size > 0) {
                         sb_appendf(&out, "    movq %d(%%rsp), %%r10\n", src_off);
-                        for (int w = 0; w < words; ++w) {
-                            if (arg_in_regs[i]) {
-                                sb_appendf(&out, "    movq %d(%%r10), %s\n", w * 8, regs[arg_first_word[i] + w]);
-                            } else {
+                        if (agg_size > 16) {
+                            // Struct > 16 is classified as MEMORY: copy to the stack
+                            for (int w = 0; w < words; ++w) {
                                 sb_appendf(&out, "    movq %d(%%r10), %%r11\n", w * 8);
                                 sb_appendf(&out, "    movq %%r11, %d(%%rsp)\n", (arg_stack_word[i] + w) * 8);
+                            }
+                        } else {
+                            for (int w = 0; w < words; ++w) {
+                                if (arg_in_regs[i]) {
+                                    sb_appendf(&out, "    movq %d(%%r10), %s\n", w * 8, regs[arg_first_word[i] + w]);
+                                } else {
+                                    sb_appendf(&out, "    movq %d(%%r10), %%r11\n", w * 8);
+                                    sb_appendf(&out, "    movq %%r11, %d(%%rsp)\n", (arg_stack_word[i] + w) * 8);
+                                }
                             }
                         }
                     } else {
@@ -335,8 +374,13 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                         }
                     }
                 }
+                
+                if (ret_agg_size > 16) {
+                    sb_appendf(&out, "    leaq %d(%%rsp), %%rdi\n", stack_bytes);
+                }
+
                 if (strcmp(inst->op, "icall") == 0) {
-                    sb_appendf(&out, "    movq %d(%%rsp), %%rax\n", stack_bytes + (int)num_args * 8);
+                    sb_appendf(&out, "    movq %d(%%rsp), %%rax\n", stack_bytes + (int)num_args * 8 + ret_val_bytes);
                     sb_append(&out, "    movq %rax, %r11\n");
                     sb_append(&out, "    xorl %eax, %eax\n");
                     sb_append(&out, "    call *%r11\n");
@@ -390,14 +434,11 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
             free(arg_first_word);
             free(arg_stack_word);
 
-            int ret_agg_size = 0;
-            if (strcmp(inst->op, "call") == 0) {
-                HashMapEntry *entry = hashmap_get(&ir_function_return_aggregate_sizes, inst->arg);
-                if (entry) ret_agg_size = entry->val_int;
-            }
-            sb_append(&out, "    pushq %rax\n");
-            if (ret_agg_size > 8) {
-                sb_append(&out, "    pushq %rdx\n");
+            if (ret_agg_size <= 16) {
+                sb_append(&out, "    pushq %rax\n");
+                if (ret_agg_size > 8) {
+                    sb_append(&out, "    pushq %rdx\n");
+                }
             }
         } else if (strcmp(inst->op, "addr") == 0) {
             sb_appendf(&out, "    leaq -%ld(%%rbp), %%rax\n", (inst->value + 1) * 16);
@@ -456,22 +497,36 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                 }
             }
         } else if (strcmp(inst->op, "store_agg") == 0) {
-            sb_append(&out, "    popq %r10\n");
-            if (inst->value > 8) {
+            sb_append(&out, "    popq %r10\n"); // dest_addr
+            if (inst->value > 16) {
+                x86_64_emit_block_copy(&out, "%rsp", "%r10", inst->value);
+                int ret_bytes = ((inst->value + 15) / 16) * 16;
+                sb_appendf(&out, "    addq $%d, %%rsp\n", ret_bytes);
+            } else {
+                if (inst->value > 8) {
+                    sb_append(&out, "    popq %rax\n");
+                    sb_append(&out, "    movq %rax, 8(%r10)\n");
+                }
                 sb_append(&out, "    popq %rax\n");
-                sb_append(&out, "    movq %rax, 8(%r10)\n");
+                sb_append(&out, "    movq %rax, (%r10)\n");
             }
-            sb_append(&out, "    popq %rax\n");
-            sb_append(&out, "    movq %rax, (%r10)\n");
         } else if (strcmp(inst->op, "copy") == 0) {
             sb_append(&out, "    popq %r10\n"); // dest_addr
             sb_append(&out, "    popq %rax\n"); // src_addr
             x86_64_emit_block_copy(&out, "%rax", "%r10", inst->value);
         } else if (strcmp(inst->op, "ret_agg") == 0) {
-            sb_append(&out, "    popq %r10\n");
-            sb_append(&out, "    movq (%r10), %rax\n");
-            if (inst->value > 8) {
-                sb_append(&out, "    movq 8(%r10), %rdx\n");
+            int ret_size = inst->value;
+            sb_append(&out, "    popq %r10\n"); // src_addr
+            if (ret_size > 16) {
+                int off = -((fn->locals.size + 1) * 16);
+                sb_appendf(&out, "    movq %d(%%rbp), %%r11\n", off); // dest_addr (hidden pointer)
+                x86_64_emit_block_copy(&out, "%r10", "%r11", ret_size);
+                sb_append(&out, "    movq %r11, %rax\n"); // Return hidden pointer in rax
+            } else {
+                sb_append(&out, "    movq (%r10), %rax\n");
+                if (ret_size > 8) {
+                    sb_append(&out, "    movq 8(%r10), %rdx\n");
+                }
             }
             if (frame) {
                 sb_append(&out, "    leave\n");
