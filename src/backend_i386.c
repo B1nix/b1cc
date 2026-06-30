@@ -809,6 +809,18 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
             sb_append(&out, "    addl $8, %esp\n");
             if (gsize == 4) sb_appendf(&out, "    fstps %s\n", inst->arg);
             else sb_appendf(&out, "    fstpl %s\n", inst->arg);
+        } else if (strcmp(inst->op, "fload_addr4") == 0 || strcmp(inst->op, "fload_addr8") == 0) {
+            sb_append(&out, "    popl %eax\n");
+            if (strcmp(inst->op, "fload_addr4") == 0) sb_append(&out, "    flds (%eax)\n");
+            else sb_append(&out, "    fldl (%eax)\n");
+            sb_append(&out, "    subl $8, %esp\n");
+            sb_append(&out, "    fstpl (%esp)\n");
+        } else if (strcmp(inst->op, "fstore_addr4") == 0 || strcmp(inst->op, "fstore_addr8") == 0) {
+            sb_append(&out, "    popl %eax\n");
+            sb_append(&out, "    fldl (%esp)\n");
+            sb_append(&out, "    addl $8, %esp\n");
+            if (strcmp(inst->op, "fstore_addr4") == 0) sb_append(&out, "    fstps (%eax)\n");
+            else sb_append(&out, "    fstpl (%eax)\n");
         } else if (strcmp(inst->op, "fret") == 0) {
             /* return value in st0 (i386 returns float and double in st0) */
             sb_append(&out, "    fldl (%esp)\n");

@@ -62,6 +62,7 @@ typedef struct {
     const char *name;
     StringArray params;
     IntArray param_aggregate_sizes;
+    IntArray param_aggregate_float_classes;
     IrInstArray code;
     HashMap locals;
     StringPairArray strings;
@@ -69,6 +70,7 @@ typedef struct {
     int label_id;
     int is_static;
     int return_aggregate_size;
+    int return_aggregate_float_class;
 } IrFunction;
 
 typedef struct {
@@ -110,6 +112,8 @@ void ir_set_var_float(const char *name, int val);
 int ir_get_var_float(const char *name);
 void ir_set_var_type_size(const char *name, int val);
 void ir_set_var_struct_tag(const char *name, const char *tag);
+void ir_set_struct_float_aggregate_class(const char *tag, int val);
+int ir_get_struct_float_aggregate_class(const char *tag);
 
 void ir_set_struct_field_offset(const char *key, int val);
 void ir_set_struct_field_size(const char *key, int val);
@@ -145,6 +149,8 @@ extern HashMap ir_local_var_elem_scales;
 extern HashMap ir_local_var_is_pointer;
 extern HashMap ir_function_return_aggregate_sizes;
 extern HashMap ir_function_param_aggregate_sizes;
+extern HashMap ir_function_return_aggregate_float_classes;
+extern HashMap ir_function_param_aggregate_float_classes;
 extern HashMap ir_function_vararg_fixed_counts;
 extern HashMap ir_function_param_floats;
 extern HashMap ir_function_return_floats;

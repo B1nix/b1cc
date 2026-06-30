@@ -36,6 +36,19 @@ typedef struct {
     TargetBackend base;
 } X86_64Target;
 
+static int agg_float_elem_size(int cls) {
+    return cls & 0xff;
+}
+
+static int agg_float_count(int cls) {
+    return (cls >> 8) & 0xff;
+}
+
+static int x86_64_agg_sse_slots(int cls) {
+    int bytes = agg_float_elem_size(cls) * agg_float_count(cls);
+    return (bytes + 7) / 8;
+}
+
 static const char *x86_64_emit_globals(TargetBackend *self, const IrGlobalVarArray *globals, Arena *arena) {
     (void)self;
     if (globals->count == 0)
@@ -138,12 +151,16 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
         int stack_word = 0;
         int sse_word = 0;
         IntArray *prologue_floats = nullptr;
+        IntArray *prologue_agg_floats = nullptr;
         {
             HashMapEntry *pfe = hashmap_get(&ir_function_param_floats, fn->name);
             if (pfe) prologue_floats = (IntArray *)pfe->val_ptr;
+            HashMapEntry *paf = hashmap_get(&ir_function_param_aggregate_float_classes, fn->name);
+            if (paf) prologue_agg_floats = (IntArray *)paf->val_ptr;
         }
         for (int i = 0; i < fn->params.count; ++i) {
             int agg_size = (i < fn->param_aggregate_sizes.count) ? fn->param_aggregate_sizes.data[i] : 0;
+            int agg_float = (prologue_agg_floats && i < prologue_agg_floats->count) ? prologue_agg_floats->data[i] : 0;
             int p_float = (prologue_floats && i < prologue_floats->count) ? prologue_floats->data[i] : 0;
             HashMapEntry *p_entry = hashmap_get((HashMap *)&fn->locals, fn->params.data[i]);
             int p_slot = p_entry ? p_entry->val_int : i;
@@ -156,6 +173,24 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                     sb_appendf(&out, "    movsd %%xmm%d, %d(%%rbp)\n", sse_word, off);
                 }
                 sse_word++;
+                continue;
+            }
+            if (agg_size > 0 && agg_float) {
+                int slots = x86_64_agg_sse_slots(agg_float);
+                int num_slots = (agg_size + 15) / 16;
+                int off = -((p_slot + num_slots) * 16);
+                if (sse_word + slots <= 8) {
+                    for (int s = 0; s < slots; ++s) {
+                        sb_appendf(&out, "    movq %%xmm%d, %d(%%rbp)\n", sse_word + s, off + s * 8);
+                    }
+                    sse_word += slots;
+                } else {
+                    for (int s = 0; s < slots; ++s) {
+                        sb_appendf(&out, "    movq %d(%%rbp), %%rax\n", 16 + stack_word * 8);
+                        sb_appendf(&out, "    movq %%rax, %d(%%rbp)\n", off + s * 8);
+                        stack_word++;
+                    }
+                }
                 continue;
             }
             int words = (agg_size > 0) ? ((agg_size + 7) / 8) : 1;
@@ -327,12 +362,25 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                     hashmap_get(&ir_function_return_floats, inst->arg) :
                     hashmap_get(&ir_function_pointer_return_floats, inst->arg);
                 if (re) retf = re->val_int;
+                int scalar_path_ret_agg_size = 0;
+                int scalar_path_has_agg_arg = 0;
+                if (strcmp(inst->op, "call") == 0) {
+                    HashMapEntry *ae = hashmap_get(&ir_function_return_aggregate_sizes, inst->arg);
+                    if (ae) scalar_path_ret_agg_size = ae->val_int;
+                    ae = hashmap_get(&ir_function_param_aggregate_sizes, inst->arg);
+                    if (ae) {
+                        IntArray *as = (IntArray *)ae->val_ptr;
+                        for (int ai = 0; ai < as->count; ++ai) {
+                            if (as->data[ai] > 0) scalar_path_has_agg_arg = 1;
+                        }
+                    }
+                }
                 int any_f = 0, ssec = 0;
                 for (long i = 0; i < num_args; ++i) {
                     int f = (pf && i < pf->count) ? pf->data[i] : 0;
                     if (f) { any_f = 1; ssec++; }
                 }
-                if (any_f || retf) {
+                if ((any_f || retf) && scalar_path_ret_agg_size == 0 && !scalar_path_has_agg_arg) {
                     int g = 0, s = 0, stack_words = 0;
                     int *gi = calloc(num_args + 1, sizeof(int));
                     int *si = calloc(num_args + 1, sizeof(int));
@@ -404,19 +452,33 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                 }
             }
             IntArray *agg_sizes = nullptr;
+            IntArray *agg_float_classes = nullptr;
+            IntArray *param_floats_for_agg = nullptr;
             if (strcmp(inst->op, "call") == 0) {
                 HashMapEntry *entry = hashmap_get(&ir_function_param_aggregate_sizes, inst->arg);
                 if (entry) agg_sizes = (IntArray *)entry->val_ptr;
+                entry = hashmap_get(&ir_function_param_aggregate_float_classes, inst->arg);
+                if (entry) agg_float_classes = (IntArray *)entry->val_ptr;
+                entry = hashmap_get(&ir_function_param_floats, inst->arg);
+                if (entry) param_floats_for_agg = (IntArray *)entry->val_ptr;
             }
             int has_aggregate_arg = 0;
             int *arg_in_regs = calloc(num_args + 1, sizeof(int));
+            int *arg_in_sse = calloc(num_args + 1, sizeof(int));
             int *arg_first_word = calloc(num_args + 1, sizeof(int));
+            int *arg_first_sse = calloc(num_args + 1, sizeof(int));
             int *arg_stack_word = calloc(num_args + 1, sizeof(int));
 
             int ret_agg_size = 0;
+            int ret_agg_float = 0;
+            int ret_float_for_agg = 0;
             if (strcmp(inst->op, "call") == 0) {
                 HashMapEntry *entry = hashmap_get(&ir_function_return_aggregate_sizes, inst->arg);
                 if (entry) ret_agg_size = entry->val_int;
+                entry = hashmap_get(&ir_function_return_aggregate_float_classes, inst->arg);
+                if (entry) ret_agg_float = entry->val_int;
+                entry = hashmap_get(&ir_function_return_floats, inst->arg);
+                if (entry) ret_float_for_agg = entry->val_int;
             }
             int ret_val_bytes = 0;
             if (ret_agg_size > 16) {
@@ -425,15 +487,37 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
             }
 
             int abi_words = (ret_agg_size > 16) ? 1 : 0;
+            int sse_words = 0;
             int stack_words = 0;
             for (long i = 0; i < num_args; ++i) {
                 int agg_size = (agg_sizes && i < agg_sizes->count) ? agg_sizes->data[i] : 0;
+                int agg_float = (agg_float_classes && i < agg_float_classes->count) ? agg_float_classes->data[i] : 0;
+                int p_float = (param_floats_for_agg && i < param_floats_for_agg->count) ? param_floats_for_agg->data[i] : 0;
                 int words = (agg_size > 0) ? ((agg_size + 7) / 8) : 1;
                 if (agg_size > 0) {
                     has_aggregate_arg = 1;
                 }
                 int in_regs = 0;
-                if (agg_size > 0 && agg_size <= 16) {
+                if (agg_size == 0 && p_float) {
+                    if (sse_words < 8) {
+                        arg_in_sse[i] = 1;
+                        arg_first_sse[i] = sse_words++;
+                    } else {
+                        arg_stack_word[i] = stack_words++;
+                    }
+                    continue;
+                } else if (agg_size > 0 && agg_float && agg_size <= 16) {
+                    int sse_slots = x86_64_agg_sse_slots(agg_float);
+                    if (sse_words + sse_slots <= 8) {
+                        arg_in_sse[i] = 1;
+                        arg_first_sse[i] = sse_words;
+                        sse_words += sse_slots;
+                    } else {
+                        arg_stack_word[i] = stack_words;
+                        stack_words += words;
+                    }
+                    continue;
+                } else if (agg_size > 0 && agg_size <= 16) {
                     in_regs = (abi_words + words <= 6);
                 } else if (agg_size == 0) {
                     in_regs = (abi_words + 1 <= 6);
@@ -448,18 +532,25 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                 }
             }
 
-            if (has_aggregate_arg || ret_agg_size > 16) {
+            if (has_aggregate_arg || ret_agg_size > 0) {
                 int stack_bytes = stack_words * 8;
                 if (stack_bytes > 0) {
                     sb_appendf(&out, "    subq $%d, %%rsp\n", stack_bytes);
                 }
                 for (long i = 0; i < num_args; ++i) {
                     int agg_size = (agg_sizes && i < agg_sizes->count) ? agg_sizes->data[i] : 0;
+                    int agg_float = (agg_float_classes && i < agg_float_classes->count) ? agg_float_classes->data[i] : 0;
+                    int p_float = (param_floats_for_agg && i < param_floats_for_agg->count) ? param_floats_for_agg->data[i] : 0;
                     int words = (agg_size > 0) ? ((agg_size + 7) / 8) : 1;
                     int src_off = stack_bytes + (int)(num_args - 1 - i) * 8 + ret_val_bytes;
                     if (agg_size > 0) {
                         sb_appendf(&out, "    movq %d(%%rsp), %%r10\n", src_off);
-                        if (agg_size > 16) {
+                        if (agg_float && agg_size <= 16 && arg_in_sse[i]) {
+                            int sse_slots = x86_64_agg_sse_slots(agg_float);
+                            for (int s = 0; s < sse_slots; ++s) {
+                                sb_appendf(&out, "    movq %d(%%r10), %%xmm%d\n", s * 8, arg_first_sse[i] + s);
+                            }
+                        } else if (agg_size > 16) {
                             // Struct > 16 is classified as MEMORY: copy to the stack
                             for (int w = 0; w < words; ++w) {
                                 sb_appendf(&out, "    movq %d(%%r10), %%r11\n", w * 8);
@@ -476,7 +567,20 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                             }
                         }
                     } else {
-                        if (arg_in_regs[i]) {
+                        if (p_float && arg_in_sse[i]) {
+                            sb_appendf(&out, "    movsd %d(%%rsp), %%xmm%d\n", src_off, arg_first_sse[i]);
+                            if (p_float == 4) {
+                                sb_appendf(&out, "    cvtsd2ss %%xmm%d, %%xmm%d\n", arg_first_sse[i], arg_first_sse[i]);
+                            }
+                        } else if (p_float) {
+                            sb_appendf(&out, "    movsd %d(%%rsp), %%xmm15\n", src_off);
+                            if (p_float == 4) {
+                                sb_append(&out, "    cvtsd2ss %xmm15, %xmm15\n");
+                                sb_appendf(&out, "    movss %%xmm15, %d(%%rsp)\n", arg_stack_word[i] * 8);
+                            } else {
+                                sb_appendf(&out, "    movsd %%xmm15, %d(%%rsp)\n", arg_stack_word[i] * 8);
+                            }
+                        } else if (arg_in_regs[i]) {
                             sb_appendf(&out, "    movq %d(%%rsp), %s\n", src_off, regs[arg_first_word[i]]);
                         } else {
                             sb_appendf(&out, "    movq %d(%%rsp), %%r11\n", src_off);
@@ -541,13 +645,29 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
             }
 
             free(arg_in_regs);
+            free(arg_in_sse);
             free(arg_first_word);
+            free(arg_first_sse);
             free(arg_stack_word);
 
-            if (ret_agg_size <= 16) {
-                sb_append(&out, "    pushq %rax\n");
-                if (ret_agg_size > 8) {
-                    sb_append(&out, "    pushq %rdx\n");
+            if (ret_float_for_agg) {
+                sb_append(&out, "    subq $8, %rsp\n");
+                if (ret_float_for_agg == 4) {
+                    sb_append(&out, "    cvtss2sd %xmm0, %xmm0\n");
+                }
+                sb_append(&out, "    movsd %xmm0, (%rsp)\n");
+            } else if (ret_agg_size <= 16) {
+                if (ret_agg_float) {
+                    int sse_slots = x86_64_agg_sse_slots(ret_agg_float);
+                    for (int s = 0; s < sse_slots; ++s) {
+                        sb_append(&out, "    subq $8, %rsp\n");
+                        sb_appendf(&out, "    movq %%xmm%d, (%%rsp)\n", s);
+                    }
+                } else {
+                    sb_append(&out, "    pushq %rax\n");
+                    if (ret_agg_size > 8) {
+                        sb_append(&out, "    pushq %rdx\n");
+                    }
                 }
             }
         } else if (strcmp(inst->op, "addr") == 0) {
@@ -627,7 +747,12 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
         } else if (strcmp(inst->op, "ret_agg") == 0) {
             int ret_size = inst->value;
             sb_append(&out, "    popq %r10\n"); // src_addr
-            if (ret_size > 16) {
+            if (fn->return_aggregate_float_class) {
+                int sse_slots = x86_64_agg_sse_slots(fn->return_aggregate_float_class);
+                for (int s = 0; s < sse_slots; ++s) {
+                    sb_appendf(&out, "    movq %d(%%r10), %%xmm%d\n", s * 8, s);
+                }
+            } else if (ret_size > 16) {
                 int off = -((fn->locals.size + 1) * 16);
                 sb_appendf(&out, "    movq %d(%%rbp), %%r11\n", off); // dest_addr (hidden pointer)
                 x86_64_emit_block_copy(&out, "%r10", "%r11", ret_size);
@@ -758,6 +883,25 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                 sb_appendf(&out, "    movss %%xmm0, %s(%%rip)\n", inst->arg);
             } else {
                 sb_appendf(&out, "    movsd %%xmm0, %s(%%rip)\n", inst->arg);
+            }
+        } else if (strcmp(inst->op, "fload_addr4") == 0 || strcmp(inst->op, "fload_addr8") == 0) {
+            sb_append(&out, "    popq %rax\n");
+            if (strcmp(inst->op, "fload_addr4") == 0) {
+                sb_append(&out, "    cvtss2sd (%rax), %xmm0\n");
+            } else {
+                sb_append(&out, "    movsd (%rax), %xmm0\n");
+            }
+            sb_append(&out, "    subq $8, %rsp\n");
+            sb_append(&out, "    movsd %xmm0, (%rsp)\n");
+        } else if (strcmp(inst->op, "fstore_addr4") == 0 || strcmp(inst->op, "fstore_addr8") == 0) {
+            sb_append(&out, "    popq %rax\n");
+            sb_append(&out, "    movsd (%rsp), %xmm0\n");
+            sb_append(&out, "    addq $8, %rsp\n");
+            if (strcmp(inst->op, "fstore_addr4") == 0) {
+                sb_append(&out, "    cvtsd2ss %xmm0, %xmm0\n");
+                sb_append(&out, "    movss %xmm0, (%rax)\n");
+            } else {
+                sb_append(&out, "    movsd %xmm0, (%rax)\n");
             }
         } else if (strcmp(inst->op, "fret") == 0) {
             sb_append(&out, "    movsd (%rsp), %xmm0\n");

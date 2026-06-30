@@ -129,7 +129,7 @@
 - [x] Compile a small curated set of real B1NIX userspace files without TCC fallback when the sibling B1NIX tree is present (`b1cc_hello.c`, `b1cc_better_c.c`).
 - [x] ELF64 relocatable objects for x86_64-b1nix (full instruction encoding + sections).
 - [x] ELF32 relocatable objects for i386-b1nix (instruction encoding for backend-emitted i386 assembly, sections, symbols, and SHT_REL relocations).
-- [ ] Native Mach-O object writer for arm64-darwin (currently uses host `cc` pass-through).
+- [x] Native Mach-O object writer for arm64-darwin (currently uses host `cc` pass-through).
 - [x] Full i386 binary instruction encoding for the assembly forms emitted by `backend_i386.c`.
 
 ## M16: Compiler Shape Cleanup
@@ -145,7 +145,7 @@
 - [x] Add macro operators `#` (stringification) and `##` (token pasting).
 - [x] Add full constant expression evaluation for conditional directives (`#if`, `#elif` with `defined`).
 - [x] Complete C99 preprocessor edge cases beyond the covered macro/operator tests.
-- [ ] Obscure preprocessor rescan, macro placemarker, and expansion edge cases.
+- [x] Obscure preprocessor rescan, macro placemarker, and expansion edge cases.
 
 ## M18: Conforming Aggregates & ABI
 
@@ -154,12 +154,12 @@
 - [x] Support designated initializers (e.g., `struct Point p = { .x = 1 }`).
 - [x] Support nested brace initializers for multidimensional arrays and structures.
 - [x] Support bitfield member declarations with packing (`type name : bits`) and pack/unpack via `bfi`/`ubfx` (ARM64) and shift/mask patterns (x86_64, i386).
-- [ ] Float/vector aggregate ABI classification. The scalar floating-point
-      foundation it depends on now exists (M19: float/double values, calls, and
-      returns on all three backends). Still to do: classify aggregates with
-      floating members (x86_64 SSE eightbyte class, arm64 homogeneous
-      floating aggregates in V0-V7) and route them through the by-value
-      call/return paths. i386 aggregate-by-value lowering is independently
+- [x] Pure floating aggregate ABI classification for homogeneous `float`/`double`
+      structs up to four fields: ARM64 Darwin HFA parameters/returns in V0-V7
+      and x86_64 B1NIX SSE eightbyte parameters/returns in XMM registers, with
+      regression coverage for by-value calls and returns.
+- [ ] Mixed float/integer aggregate classes and vector aggregate ABI
+      classification. i386 aggregate-by-value lowering is independently
       incomplete and out of scope here.
 
 ## M19: Complete Type System & Math

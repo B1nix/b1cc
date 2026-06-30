@@ -86,8 +86,10 @@ static Node *create_node(ParserState *p, const char *op, int line, int col) {
     node_array_init(&node->body);
     string_array_init(&node->params);
     int_array_init(&node->param_aggregate_sizes);
+    int_array_init(&node->param_aggregate_float_classes);
     int_array_init(&node->param_floats);
     node->aggregate_size = 0;
+    node->aggregate_float_class = 0;
     node->type_tag = "";
     long_array_init(&node->array_dims);
     node->elem_size = 0;
@@ -102,6 +104,13 @@ static Node *create_node(ParserState *p, const char *op, int line, int col) {
     node->line = line;
     node->col = col;
     return node;
+}
+
+static void parser_set_struct_float_aggregate_class(ParserState *p, const char *tag, int hfa_valid, int hfa_count, int hfa_elem_size) {
+    if (!tag || !tag[0]) return;
+    int hfa_class = (hfa_valid && hfa_count > 0) ? ((hfa_count << 8) | hfa_elem_size) : 0;
+    hashmap_put(&p->global_struct_float_aggregate_classes, tag, nullptr, hfa_class);
+    ir_set_struct_float_aggregate_class(tag, hfa_class);
 }
 
 static const char *infer_struct_tag(const ParserState *p, const Node *node) {
@@ -528,10 +537,14 @@ static int parse_base_type(ParserState *p) {
             int struct_alignment = 1;
             int bit_offset = 0;
             int current_unit_size = 0;
+            int hfa_valid = !is_union;
+            int hfa_elem_size = 0;
+            int hfa_count = 0;
             HashMap *fields = malloc(sizeof(HashMap));
             hashmap_init(fields, 16);
             while (strcmp(peek(p), "}") != 0) {
                 int field_base_size = parse_base_type(p);
+                int field_base_is_float = p->last_type_float;
                 const char *f_tag = p->last_parsed_struct_tag;
                 while (1) {
                     int stars = 0;
@@ -583,6 +596,7 @@ static int parse_base_type(ParserState *p) {
                     
                     int is_anon = (strcmp(peek(p), ";") == 0 || strcmp(peek(p), ",") == 0);
                     if (is_anon && f_tag[0]) {
+                        hfa_valid = 0;
                         // Anonymous struct/union flattening!
                         HashMapEntry *f_entry = hashmap_get(&p->global_structs, f_tag);
                         if (f_entry) {
@@ -658,6 +672,7 @@ static int parse_base_type(ParserState *p) {
                     }
 
                     if (is_bitfield) {
+                        hfa_valid = 0;
                         take(p, ":");
                         Node *bf_expr = expr(p);
                         bit_width = (int)eval_const(p, bf_expr);
@@ -667,6 +682,7 @@ static int parse_base_type(ParserState *p) {
                     LongArray *field_dims = malloc(sizeof(LongArray));
                     long_array_init(field_dims);
                     if (!is_bitfield && strcmp(peek(p), "[") == 0) {
+                        hfa_valid = 0;
                         while (strcmp(peek(p), "[") == 0) {
                             take(p, "[");
                             long dim = 0;
@@ -721,9 +737,23 @@ static int parse_base_type(ParserState *p) {
                             offset += align - (offset % align);
                         }
                         if (tag[0] && f_tag[0]) {
+                            hfa_valid = 0;
                             char key[256];
                             snprintf(key, sizeof(key), "%s.%s", tag, field_name);
                             hashmap_put(&p->global_struct_field_tags, arena_strdup(p->arena, key), (void *)f_tag, 0);
+                        }
+                        if (stars > 0 || !field_base_is_float) {
+                            hfa_valid = 0;
+                        } else {
+                            if (hfa_elem_size == 0) {
+                                hfa_elem_size = field_size;
+                            } else if (hfa_elem_size != field_size) {
+                                hfa_valid = 0;
+                            }
+                            hfa_count++;
+                            if (hfa_count > 4) {
+                                hfa_valid = 0;
+                            }
                         }
                         hashmap_put(fields, field_name, nullptr, offset);
                         hashmap_put(&p->global_field_offsets, field_name, nullptr, offset);
@@ -735,6 +765,9 @@ static int parse_base_type(ParserState *p) {
                             const char *key_dup = arena_strdup(p->arena, key);
                             hashmap_put(&p->global_struct_field_offsets_by_tag, key_dup, nullptr, offset);
                             hashmap_put(&p->global_struct_field_sizes_by_tag, key_dup, nullptr, field_size);
+                            if (stars == 0 && field_base_is_float) {
+                                hashmap_put(&p->global_struct_field_float_sizes_by_tag, key_dup, nullptr, field_size);
+                            }
                             if (stars > 0) {
                                 int field_elem_size = (stars > 1) ? p->target_scale : field_base_size;
                                 hashmap_put(&p->global_struct_field_elem_sizes_by_tag, key_dup, nullptr, field_elem_size);
@@ -776,6 +809,7 @@ static int parse_base_type(ParserState *p) {
                 hashmap_put(&p->global_structs, tag, fields, 0);
                 hashmap_put(&p->global_struct_sizes, tag, nullptr, base_size);
                 hashmap_put(&p->global_struct_alignments, tag, nullptr, struct_alignment);
+                parser_set_struct_float_aggregate_class(p, tag, hfa_valid, hfa_count, hfa_elem_size);
             } else {
                 hashmap_free(fields);
                 free(fields);
@@ -1248,6 +1282,11 @@ static Node *factor(ParserState *p) {
                 byte_offset = off_entry->val_int;
                 HashMapEntry *sz_entry = hashmap_get(&p->global_struct_field_sizes_by_tag, field_key);
                 field_sz = sz_entry->val_int;
+                HashMapEntry *float_entry = hashmap_get(&p->global_struct_field_float_sizes_by_tag, field_key);
+                if (float_entry) {
+                    parent->is_float = 1;
+                    parent->type_size = float_entry->val_int;
+                }
                 HashMapEntry *elem_entry = hashmap_get(&p->global_struct_field_elem_sizes_by_tag, field_key);
                 if (elem_entry) {
                     parent->pointee_size = elem_entry->val_int;
@@ -2125,6 +2164,9 @@ static Node *stmt(ParserState *p) {
         int union_max_sz = 0;
         int bit_offset2 = 0;
         int current_unit_size2 = 0;
+        int hfa_valid = !is_union_local;
+        int hfa_elem_size = 0;
+        int hfa_count = 0;
         HashMap fields;
         hashmap_init(&fields, 16);
         while (strcmp(peek(p), "}") != 0) {
@@ -2135,6 +2177,7 @@ static Node *stmt(ParserState *p) {
                 }
             }
             int fbase = parse_base_type(p);
+            int fbase_is_float = p->last_type_float;
             if (!f_tag[0] && p->last_parsed_struct_tag && p->last_parsed_struct_tag[0]) {
                 f_tag = p->last_parsed_struct_tag;
             }
@@ -2164,6 +2207,7 @@ static Node *stmt(ParserState *p) {
                     }
                 }
                 if (is_bf) {
+                    hfa_valid = 0;
                     take(p, ":");
                     Node *bf_expr = expr(p);
                     bf_width = (int)eval_const(p, bf_expr);
@@ -2204,6 +2248,7 @@ static Node *stmt(ParserState *p) {
                     LongArray field_dims;
                     long_array_init(&field_dims);
                     if (strcmp(peek(p), "[") == 0) {
+                        hfa_valid = 0;
                         while (strcmp(peek(p), "[") == 0) {
                             take(p, "[");
                             long dim = 0;
@@ -2223,9 +2268,23 @@ static Node *stmt(ParserState *p) {
                     }
                     
                     if (tag[0] && f_tag[0]) {
+                        hfa_valid = 0;
                         char field_key[512];
                         snprintf(field_key, sizeof(field_key), "%s.%s", tag, field_name);
                         hashmap_put(&p->global_struct_field_tags, arena_strdup(p->arena, field_key), (void *)f_tag, 0);
+                    }
+                    if (fstars > 0 || !fbase_is_float) {
+                        hfa_valid = 0;
+                    } else {
+                        if (hfa_elem_size == 0) {
+                            hfa_elem_size = fsize;
+                        } else if (hfa_elem_size != fsize) {
+                            hfa_valid = 0;
+                        }
+                        hfa_count++;
+                        if (hfa_count > 4) {
+                            hfa_valid = 0;
+                        }
                     }
                     
                     hashmap_put(&fields, field_name, nullptr, offset);
@@ -2240,6 +2299,9 @@ static Node *stmt(ParserState *p) {
                         
                         hashmap_put(&p->global_struct_field_offsets_by_tag, key_dup, nullptr, offset);
                         hashmap_put(&p->global_struct_field_sizes_by_tag, key_dup, nullptr, fsize);
+                        if (fstars == 0 && fbase_is_float) {
+                            hashmap_put(&p->global_struct_field_float_sizes_by_tag, key_dup, nullptr, fsize);
+                        }
                         if (fstars > 0) {
                             int field_elem_size = (fstars > 1) ? p->target_scale : fbase;
                             hashmap_put(&p->global_struct_field_elem_sizes_by_tag, key_dup, nullptr, field_elem_size);
@@ -2282,6 +2344,7 @@ static Node *stmt(ParserState *p) {
             *fields_alloc = fields;
             hashmap_put(&p->global_structs, tag, fields_alloc, 0);
             hashmap_put(&p->global_struct_sizes, tag, nullptr, struct_byte_size);
+            parser_set_struct_float_aggregate_class(p, tag, hfa_valid, hfa_count, hfa_elem_size);
         } else {
             hashmap_free(&fields);
         }
@@ -3033,10 +3096,19 @@ static Node *function(ParserState *p, int is_static) {
         tok_col = p->tokens.data[p->pos].col;
     }
     int ret_is_struct = (strcmp(peek(p), "struct") == 0 || strcmp(peek(p), "union") == 0);
+    const char *ret_struct_tag = "";
+    if ((strcmp(peek(p), "struct") == 0 || strcmp(peek(p), "union") == 0) &&
+        p->pos + 1 < p->tokens.count &&
+        strcmp(p->tokens.data[p->pos + 1].text, "{") != 0) {
+        ret_struct_tag = p->tokens.data[p->pos + 1].text;
+    }
     int ret_base = parse_base_type(p);
     int ret_is_float = p->last_type_float;
     if (!ret_is_struct && p->last_parsed_struct_tag && p->last_parsed_struct_tag[0]) {
         ret_is_struct = 1;
+    }
+    if (!ret_struct_tag[0] && p->last_parsed_struct_tag && p->last_parsed_struct_tag[0]) {
+        ret_struct_tag = p->last_parsed_struct_tag;
     }
     int ret_stars = 0;
     while (strcmp(peek(p), "*") == 0) {
@@ -3049,6 +3121,7 @@ static Node *function(ParserState *p, int is_static) {
     /* float/double returns are scalar FP (st0/xmm0/v0), never aggregates, even
        though a double is wider than the 32-bit i386 word. */
     int ret_aggregate_size = (ret_stars == 0 && !ret_is_float && ret_is_struct) ? ret_base : 0;
+    int ret_aggregate_float_class = 0;
 
     const char *name = "";
     if (strcmp(peek(p), "(") == 0 &&
@@ -3068,6 +3141,11 @@ static Node *function(ParserState *p, int is_static) {
     fn_node->name = name;
     fn_node->value = ret_size;
     fn_node->aggregate_size = ret_aggregate_size;
+    if (ret_aggregate_size > 0 && ret_struct_tag[0]) {
+        HashMapEntry *hfa = hashmap_get(&p->global_struct_float_aggregate_classes, ret_struct_tag);
+        if (hfa) ret_aggregate_float_class = hfa->val_int;
+    }
+    fn_node->aggregate_float_class = ret_aggregate_float_class;
     fn_node->is_float = ret_is_float && ret_stars == 0;
     fn_node->is_static = is_static;
 
@@ -3081,6 +3159,7 @@ static Node *function(ParserState *p, int is_static) {
                 take(p, "...");
                 string_array_push(&fn_node->params, "...");
                 int_array_push(&fn_node->param_aggregate_sizes, 0);
+                int_array_push(&fn_node->param_aggregate_float_classes, 0);
                 int_array_push(&fn_node->param_floats, 0);
                 break;
             }
@@ -3180,6 +3259,12 @@ static Node *function(ParserState *p, int is_static) {
             int is_param_aggregate = !is_param_pointer && !is_param_arr && !is_func_ptr && !base_is_float &&
                                      struct_tag[0];
             int_array_push(&fn_node->param_aggregate_sizes, is_param_aggregate ? base_size : 0);
+            int param_hfa_class = 0;
+            if (is_param_aggregate) {
+                HashMapEntry *hfa = hashmap_get(&p->global_struct_float_aggregate_classes, struct_tag);
+                if (hfa) param_hfa_class = hfa->val_int;
+            }
+            int_array_push(&fn_node->param_aggregate_float_classes, param_hfa_class);
             int_array_push(&fn_node->param_floats, is_param_float ? type_size : 0);
 
             if (strcmp(peek(p), ",") == 0) {
@@ -3198,12 +3283,20 @@ static Node *function(ParserState *p, int is_static) {
     if (strcmp(peek(p), ";") == 0) {
         take(p, ";");
         hashmap_put(&ir_function_return_aggregate_sizes, fn_node->name, nullptr, fn_node->aggregate_size);
+        hashmap_put(&ir_function_return_aggregate_float_classes, fn_node->name, nullptr, fn_node->aggregate_float_class);
         IntArray *param_sizes = malloc(sizeof(IntArray));
         int_array_init(param_sizes);
         for (int p_i = 0; p_i < fn_node->param_aggregate_sizes.count; ++p_i) {
             int_array_push(param_sizes, fn_node->param_aggregate_sizes.data[p_i]);
         }
         hashmap_put(&ir_function_param_aggregate_sizes, fn_node->name, param_sizes, 0);
+
+        IntArray *param_hfa = malloc(sizeof(IntArray));
+        int_array_init(param_hfa);
+        for (int p_i = 0; p_i < fn_node->param_aggregate_float_classes.count; ++p_i) {
+            int_array_push(param_hfa, fn_node->param_aggregate_float_classes.data[p_i]);
+        }
+        hashmap_put(&ir_function_param_aggregate_float_classes, fn_node->name, param_hfa, 0);
 
         IntArray *param_fl = malloc(sizeof(IntArray));
         int_array_init(param_fl);
@@ -3489,10 +3582,12 @@ static void parser_state_cleanup(ParserState *state) {
     hashmap_free(&state->global_struct_field_tags);
     hashmap_free(&state->global_struct_field_offsets_by_tag);
     hashmap_free(&state->global_struct_field_sizes_by_tag);
+    hashmap_free(&state->global_struct_field_float_sizes_by_tag);
     hashmap_free(&state->global_struct_field_elem_sizes_by_tag);
     hashmap_free(&state->global_struct_field_total_sizes_by_tag);
     hashmap_free(&state->global_struct_field_bit_offsets_by_tag);
     hashmap_free(&state->global_struct_field_bit_widths_by_tag);
+    hashmap_free(&state->global_struct_float_aggregate_classes);
 
     for (int b = 0; b < state->global_struct_field_dims_by_tag.bucket_count; ++b) {
         HashMapEntry *curr = state->global_struct_field_dims_by_tag.buckets[b];
@@ -3544,11 +3639,13 @@ NodeArray parser_parse(const TokenArray *tokens, int target_scale, Arena *arena)
     hashmap_init(&state.global_struct_field_tags, 64);
     hashmap_init(&state.global_struct_field_offsets_by_tag, 64);
     hashmap_init(&state.global_struct_field_sizes_by_tag, 64);
+    hashmap_init(&state.global_struct_field_float_sizes_by_tag, 64);
     hashmap_init(&state.global_struct_field_elem_sizes_by_tag, 64);
     hashmap_init(&state.global_struct_field_total_sizes_by_tag, 64);
     hashmap_init(&state.global_struct_field_dims_by_tag, 64);
     hashmap_init(&state.global_struct_field_bit_offsets_by_tag, 64);
     hashmap_init(&state.global_struct_field_bit_widths_by_tag, 64);
+    hashmap_init(&state.global_struct_float_aggregate_classes, 64);
 
     state.last_parsed_struct_tag = "";
     state.arena = arena;

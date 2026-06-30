@@ -42,11 +42,13 @@ typedef struct {
     HashMap global_struct_field_tags;
     HashMap global_struct_field_offsets_by_tag;
     HashMap global_struct_field_sizes_by_tag;
+    HashMap global_struct_field_float_sizes_by_tag;
     HashMap global_struct_field_elem_sizes_by_tag;
     HashMap global_struct_field_total_sizes_by_tag;
     HashMap global_struct_field_dims_by_tag;
     HashMap global_struct_field_bit_offsets_by_tag;
     HashMap global_struct_field_bit_widths_by_tag;
+    HashMap global_struct_float_aggregate_classes;
 
     const char *last_parsed_struct_tag;
     Arena *arena;

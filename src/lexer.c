@@ -34,6 +34,16 @@ static int find_param(const StringArray *params, const char *name) {
     return -1;
 }
 
+static bool macro_body_token_is_paste_operand(const TokenArray *tokens, int idx) {
+    if (idx > 0 && strcmp(tokens->data[idx - 1].text, "##") == 0) {
+        return true;
+    }
+    if (idx + 1 < tokens->count && strcmp(tokens->data[idx + 1].text, "##") == 0) {
+        return true;
+    }
+    return false;
+}
+
 static void push_token(TokenArray *arr, const char *text, int line, int col) {
     Token t;
     t.text = text;
@@ -353,13 +363,23 @@ TokenArray lex(const char *src, HashMap *macros, HashMap *active_macros, Arena *
                                     const char *va_str = sb_to_string(&va_args_str, arena);
                                     sb_free(&va_args_str);
 
-                                    TokenArray arg_tokens = lex(va_str, macros, active_macros, arena);
-                                    for (int tok_idx = 0; tok_idx < arg_tokens.count; ++tok_idx) {
-                                        if (strcmp(arg_tokens.data[tok_idx].text, "EOF") != 0) {
-                                            token_array_push(&expanded, &arg_tokens.data[tok_idx]);
+                                    if (va_str[0] == '\0') {
+                                        Token placemarker;
+                                        placemarker.text = "";
+                                        placemarker.line = body_tokens.data[k].line;
+                                        placemarker.col = body_tokens.data[k].col;
+                                        token_array_push(&expanded, &placemarker);
+                                    } else {
+                                        HashMap *arg_macros = macro_body_token_is_paste_operand(&body_tokens, k) ? nullptr : macros;
+                                        HashMap *arg_active = macro_body_token_is_paste_operand(&body_tokens, k) ? nullptr : active_macros;
+                                        TokenArray arg_tokens = lex(va_str, arg_macros, arg_active, arena);
+                                        for (int tok_idx = 0; tok_idx < arg_tokens.count; ++tok_idx) {
+                                            if (strcmp(arg_tokens.data[tok_idx].text, "EOF") != 0) {
+                                                token_array_push(&expanded, &arg_tokens.data[tok_idx]);
+                                            }
                                         }
+                                        token_array_free(&arg_tokens);
                                     }
-                                    token_array_free(&arg_tokens);
                                     continue;
                                 }
                             }
@@ -375,7 +395,9 @@ TokenArray lex(const char *src, HashMap *macros, HashMap *active_macros, Arena *
                                     placemarker.col = body_tokens.data[k].col;
                                     token_array_push(&expanded, &placemarker);
                                 } else {
-                                    TokenArray arg_tokens = lex(arg_val, macros, active_macros, arena);
+                                    HashMap *arg_macros = macro_body_token_is_paste_operand(&body_tokens, k) ? nullptr : macros;
+                                    HashMap *arg_active = macro_body_token_is_paste_operand(&body_tokens, k) ? nullptr : active_macros;
+                                    TokenArray arg_tokens = lex(arg_val, arg_macros, arg_active, arena);
                                     for (int tok_idx = 0; tok_idx < arg_tokens.count; ++tok_idx) {
                                         if (strcmp(arg_tokens.data[tok_idx].text, "EOF") != 0) {
                                             token_array_push(&expanded, &arg_tokens.data[tok_idx]);

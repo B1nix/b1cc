@@ -41,8 +41,10 @@ struct Node {
     NodeArray body;
     StringArray params;
     IntArray param_aggregate_sizes;
+    IntArray param_aggregate_float_classes;
     IntArray param_floats;
     int aggregate_size;
+    int aggregate_float_class;
     const char *type_tag;
     LongArray array_dims;
     int elem_size;

@@ -202,6 +202,7 @@ const char *backend_compile_asm(const char *src, const char *target, bool dump_a
     for (int k = 0; k < ir_functions.count; ++k) {
         string_array_free(&ir_functions.data[k].params);
         int_array_free(&ir_functions.data[k].param_aggregate_sizes);
+        int_array_free(&ir_functions.data[k].param_aggregate_float_classes);
         ir_inst_array_free(&ir_functions.data[k].code);
         hashmap_free(&ir_functions.data[k].locals);
         string_pair_array_free(&ir_functions.data[k].strings);

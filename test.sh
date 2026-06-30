@@ -416,6 +416,13 @@ set -e
 test "$rc" = 0
 echo "ok m18_large_aggregate_abi"
 
+./build/b1cc tests/m18_float_aggregate_abi.c -o "$tmp/m18_float_aggregate_abi"
+set +e
+"$tmp/m18_float_aggregate_abi"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok m18_float_aggregate_abi"
 
 ./build/b1cc tests/m18_bitfields.c -o "$tmp/m18_bitfields"
 set +e
@@ -630,6 +637,11 @@ echo "ok x86_64_b1nix_m18_aggregate_abi_asm"
 grep -q '^make_large:' "$tmp/m18_large_aggregate_abi_x86_64.s"
 grep -q '^stack_large:' "$tmp/m18_large_aggregate_abi_x86_64.s"
 echo "ok x86_64_b1nix_m18_large_aggregate_abi_asm"
+
+./build/b1cc --target=x86_64-b1nix tests/m18_float_aggregate_abi.c -S -o "$tmp/m18_float_aggregate_abi_x86_64.s"
+grep -q '^make_f2:' "$tmp/m18_float_aggregate_abi_x86_64.s"
+grep -q 'xmm' "$tmp/m18_float_aggregate_abi_x86_64.s"
+echo "ok x86_64_b1nix_m18_float_aggregate_abi_asm"
 
 if [ -x ../b1nix/tools/toolchain/bin/b1nix-cc ]; then
   ./build/b1cc --target=x86_64-b1nix tests/return_42.c -o "$tmp/return_42.b1nix"

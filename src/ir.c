@@ -19,6 +19,8 @@ HashMap ir_local_var_elem_scales;
 HashMap ir_local_var_is_pointer;
 HashMap ir_function_return_aggregate_sizes;
 HashMap ir_function_param_aggregate_sizes;
+HashMap ir_function_return_aggregate_float_classes;
+HashMap ir_function_param_aggregate_float_classes;
 HashMap ir_function_vararg_fixed_counts;
 HashMap ir_function_param_floats;     /* fn name -> IntArray(0/1 per param) */
 HashMap ir_function_return_floats;    /* fn name -> 1 if returns float/double */
@@ -53,6 +55,7 @@ static HashMap ir_struct_field_dims;
 static HashMap ir_struct_field_tags;
 static HashMap ir_struct_field_bit_offsets;
 static HashMap ir_struct_field_bit_widths;
+static HashMap ir_struct_float_aggregate_classes;
 
 void ir_set_function_pointer_signature(const char *name, const IntArray *param_floats, int return_float) {
     IntArray *copy = malloc(sizeof(IntArray));
@@ -145,6 +148,7 @@ void ir_function_array_push(IrFunctionArray *arr, const IrFunction *val) {
     arr->data[arr->count].name = val->name;
     arr->data[arr->count].params = val->params;
     arr->data[arr->count].param_aggregate_sizes = val->param_aggregate_sizes;
+    arr->data[arr->count].param_aggregate_float_classes = val->param_aggregate_float_classes;
     arr->data[arr->count].code = val->code;
     arr->data[arr->count].locals = val->locals;
     arr->data[arr->count].strings = val->strings;
@@ -152,6 +156,7 @@ void ir_function_array_push(IrFunctionArray *arr, const IrFunction *val) {
     arr->data[arr->count].label_id = val->label_id;
     arr->data[arr->count].is_static = val->is_static;
     arr->data[arr->count].return_aggregate_size = val->return_aggregate_size;
+    arr->data[arr->count].return_aggregate_float_class = val->return_aggregate_float_class;
     arr->count = arr->count + 1;
 }
 void ir_function_array_free(IrFunctionArray *arr) {
@@ -291,6 +296,21 @@ void ir_reset_state(void) {
     hashmap_free(&ir_function_param_aggregate_sizes);
     hashmap_init(&ir_function_param_aggregate_sizes, 64);
 
+    hashmap_free(&ir_function_return_aggregate_float_classes);
+    hashmap_init(&ir_function_return_aggregate_float_classes, 64);
+
+    for (int b = 0; b < ir_function_param_aggregate_float_classes.bucket_count; ++b) {
+        HashMapEntry *curr = ir_function_param_aggregate_float_classes.buckets[b];
+        while (curr) {
+            IntArray *arr = (IntArray *)curr->val_ptr;
+            int_array_free(arr);
+            free(arr);
+            curr = curr->next;
+        }
+    }
+    hashmap_free(&ir_function_param_aggregate_float_classes);
+    hashmap_init(&ir_function_param_aggregate_float_classes, 64);
+
     hashmap_free(&ir_function_vararg_fixed_counts);
     hashmap_init(&ir_function_vararg_fixed_counts, 64);
 
@@ -383,6 +403,9 @@ void ir_reset_state(void) {
 
     hashmap_free(&ir_struct_field_bit_widths);
     hashmap_init(&ir_struct_field_bit_widths, 64);
+
+    hashmap_free(&ir_struct_float_aggregate_classes);
+    hashmap_init(&ir_struct_float_aggregate_classes, 64);
 }
 
 void ir_declare_global(const char *name, int is_array, long size, int is_static, int is_extern, int elem_size, int target_scale) {
@@ -518,6 +541,10 @@ void ir_set_var_struct_tag(const char *name, const char *tag) {
     hashmap_put(&ir_var_struct_tag, name, (void *)tag, 0);
 }
 
+void ir_set_struct_float_aggregate_class(const char *tag, int val) {
+    hashmap_put(&ir_struct_float_aggregate_classes, tag, nullptr, val);
+}
+
 void ir_set_struct_field_offset(const char *key, int val) {
     hashmap_put(&ir_struct_field_offsets, key, nullptr, val);
 }
@@ -550,6 +577,11 @@ int ir_get_var_bool(const char *name) {
 int ir_get_var_type_size(const char *name) {
     HashMapEntry *entry = hashmap_get(&ir_var_type_size, name);
     return entry ? entry->val_int : 8;
+}
+
+int ir_get_struct_float_aggregate_class(const char *tag) {
+    HashMapEntry *entry = hashmap_get(&ir_struct_float_aggregate_classes, tag);
+    return entry ? entry->val_int : 0;
 }
 const char *ir_get_var_struct_tag(const char *name) {
     HashMapEntry *entry = hashmap_get(&ir_var_struct_tag, name);
@@ -1141,6 +1173,10 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
                 return;
             }
             int field_sz = (node->value > 0) ? (int)node->value : target_scale;
+            if (node->is_float) {
+                ir_push(fn, field_sz == 4 ? "fload_addr4" : "fload_addr8", "", 0);
+                return;
+            }
             ir_push(fn, "const", "", 0);
             ir_push(fn, "index", "", field_sz);
             /* Bitfield read: extract bits */
@@ -1714,6 +1750,12 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
                     ir_push(fn, "const", "", offset);
                     ir_push(fn, "+", "", 0);
                     ir_push(fn, "store_agg", "", size);
+                } else if (ir_expr_is_float(stmt->body.data[k]->lhs)) {
+                    if (size == 4) ir_push(fn, "d2f", "", 0);
+                    ir_push(fn, "load", "", base_slot);
+                    ir_push(fn, "const", "", offset);
+                    ir_push(fn, "+", "", 0);
+                    ir_push(fn, size == 4 ? "fstore_addr4" : "fstore_addr8", "", 0);
                 } else {
                     ir_push(fn, "const", "", 0);
                     ir_push(fn, "load", "", base_slot);
@@ -1763,9 +1805,16 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
                 ir_push(fn, "insert_bits", "", packed);
             } else {
                 lower_expr(stmt->rhs, fn, backend, arena);
-                ir_push(fn, "const", "", 0);
-                lower_addr(stmt->lhs, fn, backend, arena);
-                ir_push(fn, "store_index", "", scale);
+                if (stmt->lhs->is_float) {
+                    if (!ir_expr_is_float(stmt->rhs)) ir_push(fn, "i2f", "", 0);
+                    if (scale == 4) ir_push(fn, "d2f", "", 0);
+                    lower_addr(stmt->lhs, fn, backend, arena);
+                    ir_push(fn, scale == 4 ? "fstore_addr4" : "fstore_addr8", "", 0);
+                } else {
+                    ir_push(fn, "const", "", 0);
+                    lower_addr(stmt->lhs, fn, backend, arena);
+                    ir_push(fn, "store_index", "", scale);
+                }
             }
         }
     } else if (strcmp(stmt->op, "empty") == 0) {
@@ -1794,6 +1843,11 @@ static void lower_func(const Node *ast, TargetBackend *backend, Arena *arena, Ir
         int_array_push(&fn->param_aggregate_sizes, ast->param_aggregate_sizes.data[k]);
     }
 
+    int_array_init(&fn->param_aggregate_float_classes);
+    for (int k = 0; k < ast->param_aggregate_float_classes.count; ++k) {
+        int_array_push(&fn->param_aggregate_float_classes, ast->param_aggregate_float_classes.data[k]);
+    }
+
     ir_inst_array_init(&fn->code);
     hashmap_init(&fn->locals, 32);
     string_pair_array_init(&fn->strings);
@@ -1801,6 +1855,7 @@ static void lower_func(const Node *ast, TargetBackend *backend, Arena *arena, Ir
     fn->label_id = 0;
     fn->is_static = ast->is_static;
     fn->return_aggregate_size = ast->aggregate_size;
+    fn->return_aggregate_float_class = ast->aggregate_float_class;
 
     for (int k = 0; k < fn->params.count; ++k) {
         const char *param = fn->params.data[k];
@@ -1839,6 +1894,7 @@ IrFunctionArray ir_lower_program(const NodeArray *ast, const char *target, Arena
 
     for (int k = 0; k < ast->count; ++k) {
         hashmap_put(&ir_function_return_aggregate_sizes, ast->data[k]->name, nullptr, ast->data[k]->aggregate_size);
+        hashmap_put(&ir_function_return_aggregate_float_classes, ast->data[k]->name, nullptr, ast->data[k]->aggregate_float_class);
         
         IntArray *param_sizes = malloc(sizeof(IntArray));
         int_array_init(param_sizes);
@@ -1846,6 +1902,13 @@ IrFunctionArray ir_lower_program(const NodeArray *ast, const char *target, Arena
             int_array_push(param_sizes, ast->data[k]->param_aggregate_sizes.data[p_i]);
         }
         hashmap_put(&ir_function_param_aggregate_sizes, ast->data[k]->name, param_sizes, 0);
+
+        IntArray *param_hfa = malloc(sizeof(IntArray));
+        int_array_init(param_hfa);
+        for (int p_i = 0; p_i < ast->data[k]->param_aggregate_float_classes.count; ++p_i) {
+            int_array_push(param_hfa, ast->data[k]->param_aggregate_float_classes.data[p_i]);
+        }
+        hashmap_put(&ir_function_param_aggregate_float_classes, ast->data[k]->name, param_hfa, 0);
 
         IntArray *param_fl = malloc(sizeof(IntArray));
         int_array_init(param_fl);

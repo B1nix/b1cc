@@ -73,6 +73,14 @@ typedef struct {
     TargetBackend base;
 } Arm64Target;
 
+static int agg_float_elem_size(int cls) {
+    return cls & 0xff;
+}
+
+static int agg_float_count(int cls) {
+    return (cls >> 8) & 0xff;
+}
+
 static int get_max_call_ret_size(const IrFunction *fn, int threshold) {
     int max_size = 0;
     for (int i = 0; i < fn->code.count; ++i) {
@@ -198,12 +206,16 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
         int stack_word = 0;
         int v_word = 0;
         IntArray *prologue_floats = nullptr;
+        IntArray *prologue_agg_floats = nullptr;
         {
             HashMapEntry *pfe = hashmap_get(&ir_function_param_floats, fn->name);
             if (pfe) prologue_floats = (IntArray *)pfe->val_ptr;
+            HashMapEntry *paf = hashmap_get(&ir_function_param_aggregate_float_classes, fn->name);
+            if (paf) prologue_agg_floats = (IntArray *)paf->val_ptr;
         }
         for (int i = 0; i < fn->params.count; ++i) {
             int agg_size = (i < fn->param_aggregate_sizes.count) ? fn->param_aggregate_sizes.data[i] : 0;
+            int agg_float = (prologue_agg_floats && i < prologue_agg_floats->count) ? prologue_agg_floats->data[i] : 0;
             int num_slots = (agg_size > 0) ? ((agg_size + 15) / 16) : 1;
 
             HashMapEntry *entry = hashmap_get((HashMap *)&fn->locals, fn->params.data[i]);
@@ -220,6 +232,29 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                     sb_appendf(&out, "    str d%d, [x9]\n", v_word);
                 }
                 v_word++;
+                continue;
+            }
+            if (agg_size > 0 && agg_float) {
+                int elem = agg_float_elem_size(agg_float);
+                int count = agg_float_count(agg_float);
+                int off = -((slot_idx + num_slots) * 16);
+                emit_sub_imm(&out, "x9", "x29", -off);
+                if (v_word + count <= 8) {
+                    for (int e = 0; e < count; ++e) {
+                        if (elem == 4) {
+                            sb_appendf(&out, "    str s%d, [x9, #%d]\n", v_word + e, e * elem);
+                        } else {
+                            sb_appendf(&out, "    str d%d, [x9, #%d]\n", v_word + e, e * elem);
+                        }
+                    }
+                    v_word += count;
+                } else {
+                    for (int w = 0; w < (agg_size + 7) / 8; ++w) {
+                        emit_load_fp(&out, 8, 16 + stack_word * 8);
+                        sb_appendf(&out, "    str x8, [x9, #%d]\n", w * 8);
+                        stack_word++;
+                    }
+                }
                 continue;
             }
 
@@ -403,12 +438,25 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                     hashmap_get(&ir_function_return_floats, inst->arg) :
                     hashmap_get(&ir_function_pointer_return_floats, inst->arg);
                 if (re) retf = re->val_int;
+                int scalar_path_ret_agg_size = 0;
+                int scalar_path_has_agg_arg = 0;
+                if (strcmp(inst->op, "call") == 0) {
+                    HashMapEntry *ae = hashmap_get(&ir_function_return_aggregate_sizes, inst->arg);
+                    if (ae) scalar_path_ret_agg_size = ae->val_int;
+                    ae = hashmap_get(&ir_function_param_aggregate_sizes, inst->arg);
+                    if (ae) {
+                        IntArray *as = (IntArray *)ae->val_ptr;
+                        for (int ai = 0; ai < as->count; ++ai) {
+                            if (as->data[ai] > 0) scalar_path_has_agg_arg = 1;
+                        }
+                    }
+                }
                 int any_f = 0;
                 for (long i = 0; i < num_args; ++i) {
                     int f = (pf && i < pf->count) ? pf->data[i] : 0;
                     if (f) any_f = 1;
                 }
-                if (any_f || retf) {
+                if ((any_f || retf) && scalar_path_ret_agg_size == 0 && !scalar_path_has_agg_arg) {
                     int g = 0, s = 0, stack_words = 0;
                     int *gi = calloc(num_args + 1, sizeof(int));
                     int *si = calloc(num_args + 1, sizeof(int));
@@ -476,13 +524,21 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                 }
             }
             IntArray *agg_sizes = nullptr;
+            IntArray *agg_float_classes = nullptr;
+            IntArray *param_floats_for_agg = nullptr;
             if (strcmp(inst->op, "call") == 0) {
                 HashMapEntry *entry = hashmap_get(&ir_function_param_aggregate_sizes, inst->arg);
                 if (entry) agg_sizes = (IntArray *)entry->val_ptr;
+                entry = hashmap_get(&ir_function_param_aggregate_float_classes, inst->arg);
+                if (entry) agg_float_classes = (IntArray *)entry->val_ptr;
+                entry = hashmap_get(&ir_function_param_floats, inst->arg);
+                if (entry) param_floats_for_agg = (IntArray *)entry->val_ptr;
             }
             int has_aggregate_arg = 0;
             int *arg_in_regs = calloc(num_args + 1, sizeof(int));
+            int *arg_in_vregs = calloc(num_args + 1, sizeof(int));
             int *arg_first_word = calloc(num_args + 1, sizeof(int));
+            int *arg_first_vreg = calloc(num_args + 1, sizeof(int));
             int *arg_stack_word = calloc(num_args + 1, sizeof(int));
 
             int vararg_fixed_count = -1;
@@ -492,9 +548,15 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
             }
 
             int ret_agg_size = 0;
+            int ret_agg_float = 0;
+            int ret_float_for_agg = 0;
             if (strcmp(inst->op, "call") == 0) {
                 HashMapEntry *entry = hashmap_get(&ir_function_return_aggregate_sizes, inst->arg);
                 if (entry) ret_agg_size = entry->val_int;
+                entry = hashmap_get(&ir_function_return_aggregate_float_classes, inst->arg);
+                if (entry) ret_agg_float = entry->val_int;
+                entry = hashmap_get(&ir_function_return_floats, inst->arg);
+                if (entry) ret_float_for_agg = entry->val_int;
             }
 
             int caller_indirect_ret = (fn->return_aggregate_size > 16);
@@ -504,12 +566,35 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
             int ret_buf_off = -((caller_local_slots + caller_call_ret_slots) * 16);
 
             int abi_words = 0;
+            int v_words = 0;
             int stack_words = 0;
             for (long i = 0; i < num_args; ++i) {
                 int agg_size = (agg_sizes && i < agg_sizes->count) ? agg_sizes->data[i] : 0;
+                int agg_float = (agg_float_classes && i < agg_float_classes->count) ? agg_float_classes->data[i] : 0;
+                int p_float = (param_floats_for_agg && i < param_floats_for_agg->count) ? param_floats_for_agg->data[i] : 0;
                 int words = (agg_size > 16) ? 1 : ((agg_size > 0) ? ((agg_size + 7) / 8) : 1);
                 if (agg_size > 0) {
                     has_aggregate_arg = 1;
+                }
+                if (agg_size == 0 && p_float) {
+                    if (v_words < 8) {
+                        arg_in_vregs[i] = 1;
+                        arg_first_vreg[i] = v_words++;
+                    } else {
+                        arg_stack_word[i] = stack_words++;
+                    }
+                    continue;
+                } else if (agg_size > 0 && agg_float) {
+                    int count = agg_float_count(agg_float);
+                    if (v_words + count <= 8) {
+                        arg_in_vregs[i] = 1;
+                        arg_first_vreg[i] = v_words;
+                        v_words += count;
+                    } else {
+                        arg_stack_word[i] = stack_words;
+                        stack_words += words;
+                    }
+                    continue;
                 }
                 if (abi_words + words <= 8) {
                     arg_in_regs[i] = 1;
@@ -541,18 +626,30 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                 }
                 sb_appendf(&out, "    bl _%s\n", inst->arg);
                 sb_appendf(&out, "    add sp, sp, #%ld\n", stack_bytes + num_args * 16);
-            } else if (has_aggregate_arg || ret_agg_size > 16) {
+            } else if (has_aggregate_arg || ret_agg_size > 0) {
                 int stack_bytes = ((stack_words * 8 + 15) / 16) * 16;
                 if (stack_bytes > 0) {
                     emit_sub_imm(&out, "sp", "sp", stack_bytes);
                 }
                 for (long i = 0; i < num_args; ++i) {
                     int agg_size = (agg_sizes && i < agg_sizes->count) ? agg_sizes->data[i] : 0;
+                    int agg_float = (agg_float_classes && i < agg_float_classes->count) ? agg_float_classes->data[i] : 0;
+                    int p_float = (param_floats_for_agg && i < param_floats_for_agg->count) ? param_floats_for_agg->data[i] : 0;
                     int words = (agg_size > 16) ? 1 : ((agg_size > 0) ? ((agg_size + 7) / 8) : 1);
                     int src_off = stack_bytes + (int)(num_args - 1 - i) * 16;
                     if (agg_size > 0) {
                         sb_appendf(&out, "    ldr x9, [sp, #%d]\n", src_off);
-                        if (agg_size > 16) {
+                        if (agg_float && arg_in_vregs[i]) {
+                            int elem = agg_float_elem_size(agg_float);
+                            int count = agg_float_count(agg_float);
+                            for (int e = 0; e < count; ++e) {
+                                if (elem == 4) {
+                                    sb_appendf(&out, "    ldr s%d, [x9, #%d]\n", arg_first_vreg[i] + e, e * elem);
+                                } else {
+                                    sb_appendf(&out, "    ldr d%d, [x9, #%d]\n", arg_first_vreg[i] + e, e * elem);
+                                }
+                            }
+                        } else if (agg_size > 16) {
                             if (arg_in_regs[i]) {
                                 sb_appendf(&out, "    mov x%d, x9\n", arg_first_word[i]);
                             } else {
@@ -569,7 +666,22 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                             }
                         }
                     } else {
-                        if (arg_in_regs[i]) {
+                        if (p_float && arg_in_vregs[i]) {
+                            if (p_float == 4) {
+                                sb_appendf(&out, "    ldr d%d, [sp, #%d]\n", arg_first_vreg[i], src_off);
+                                sb_appendf(&out, "    fcvt s%d, d%d\n", arg_first_vreg[i], arg_first_vreg[i]);
+                            } else {
+                                sb_appendf(&out, "    ldr d%d, [sp, #%d]\n", arg_first_vreg[i], src_off);
+                            }
+                        } else if (p_float) {
+                            sb_appendf(&out, "    ldr d16, [sp, #%d]\n", src_off);
+                            if (p_float == 4) {
+                                sb_append(&out, "    fcvt s16, d16\n");
+                                sb_appendf(&out, "    str s16, [sp, #%d]\n", arg_stack_word[i] * 8);
+                            } else {
+                                sb_appendf(&out, "    str d16, [sp, #%d]\n", arg_stack_word[i] * 8);
+                            }
+                        } else if (arg_in_regs[i]) {
                             sb_appendf(&out, "    ldr x%d, [sp, #%d]\n", arg_first_word[i], src_off);
                         } else {
                             sb_appendf(&out, "    ldr x10, [sp, #%d]\n", src_off);
@@ -626,13 +738,38 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
             }
             
             free(arg_in_regs);
+            free(arg_in_vregs);
             free(arg_first_word);
+            free(arg_first_vreg);
             free(arg_stack_word);
 
-            if (ret_agg_size <= 16) {
-                sb_append(&out, "    str x0, [sp, #-16]!\n");
-                if (ret_agg_size > 8) {
-                    sb_append(&out, "    str x1, [sp, #-16]!\n");
+            if (ret_float_for_agg) {
+                if (ret_float_for_agg == 4) {
+                    sb_append(&out, "    fcvt d0, s0\n");
+                }
+                sb_append(&out, "    str d0, [sp, #-16]!\n");
+            } else if (ret_agg_size <= 16) {
+                if (ret_agg_float) {
+                    int elem = agg_float_elem_size(ret_agg_float);
+                    int count = agg_float_count(ret_agg_float);
+                    int words = (ret_agg_size + 7) / 8;
+                    for (int w = 0; w < words; ++w) {
+                        sb_append(&out, "    sub sp, sp, #16\n");
+                        int first_elem = (w * 8) / elem;
+                        int elems_in_word = 8 / elem;
+                        for (int e = 0; e < elems_in_word && first_elem + e < count; ++e) {
+                            if (elem == 4) {
+                                sb_appendf(&out, "    str s%d, [sp, #%d]\n", first_elem + e, e * elem);
+                            } else {
+                                sb_appendf(&out, "    str d%d, [sp, #%d]\n", first_elem + e, e * elem);
+                            }
+                        }
+                    }
+                } else {
+                    sb_append(&out, "    str x0, [sp, #-16]!\n");
+                    if (ret_agg_size > 8) {
+                        sb_append(&out, "    str x1, [sp, #-16]!\n");
+                    }
                 }
             } else {
                 int words = (ret_agg_size + 7) / 8;
@@ -758,7 +895,17 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
         } else if (strcmp(inst->op, "ret_agg") == 0) {
             int ret_size = inst->value;
             sb_append(&out, "    ldr x9, [sp], #16\n"); // src_addr
-            if (ret_size > 16) {
+            if (fn->return_aggregate_float_class) {
+                int elem = agg_float_elem_size(fn->return_aggregate_float_class);
+                int count = agg_float_count(fn->return_aggregate_float_class);
+                for (int e = 0; e < count; ++e) {
+                    if (elem == 4) {
+                        sb_appendf(&out, "    ldr s%d, [x9, #%d]\n", e, e * elem);
+                    } else {
+                        sb_appendf(&out, "    ldr d%d, [x9, #%d]\n", e, e * elem);
+                    }
+                }
+            } else if (ret_size > 16) {
                 int off = -((fn->locals.size + 1) * 16);
                 emit_load_fp(&out, 10, off); // dest_addr (hidden pointer)
                 emit_block_copy(&out, "x9", "x10", ret_size);
@@ -900,6 +1047,24 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                 sb_append(&out, "    str s0, [x1]\n");
             } else {
                 sb_append(&out, "    str d0, [x1]\n");
+            }
+        } else if (strcmp(inst->op, "fload_addr4") == 0 || strcmp(inst->op, "fload_addr8") == 0) {
+            sb_append(&out, "    ldr x0, [sp], #16\n");
+            if (strcmp(inst->op, "fload_addr4") == 0) {
+                sb_append(&out, "    ldr s0, [x0]\n");
+                sb_append(&out, "    fcvt d0, s0\n");
+            } else {
+                sb_append(&out, "    ldr d0, [x0]\n");
+            }
+            sb_append(&out, "    str d0, [sp, #-16]!\n");
+        } else if (strcmp(inst->op, "fstore_addr4") == 0 || strcmp(inst->op, "fstore_addr8") == 0) {
+            sb_append(&out, "    ldr x0, [sp], #16\n");
+            sb_append(&out, "    ldr d0, [sp], #16\n");
+            if (strcmp(inst->op, "fstore_addr4") == 0) {
+                sb_append(&out, "    fcvt s0, d0\n");
+                sb_append(&out, "    str s0, [x0]\n");
+            } else {
+                sb_append(&out, "    str d0, [x0]\n");
             }
         } else if (strcmp(inst->op, "fret") == 0) {
             sb_append(&out, "    ldr d0, [sp], #16\n");
