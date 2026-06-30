@@ -663,13 +663,59 @@ static int arm64_get_aggregate_slots(TargetBackend *self, int size) {
     return (size + 15) / 16;
 }
 
+/* M16: type legalization – ARM64 supports 1/2/4/8-byte loads/stores. */
+static int arm64_legalize_type_size(TargetBackend *self, int width) {
+    (void)self;
+    if (width <= 1) return 1;
+    if (width <= 2) return 2;
+    if (width <= 4) return 4;
+    return 8;
+}
+
+/* M16: calling convention – AAPCS64 integer registers. */
+static void arm64_get_cc_info(TargetBackend *self, BackendCCInfo *out) {
+    (void)self;
+    static const char *const regs[] = {
+        "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"
+    };
+    out->int_arg_regs      = regs;
+    out->int_arg_reg_count = 8;
+    out->return_reg        = "x0";
+    out->scratch_reg       = "x9";
+    out->stack_align       = 16;
+}
+
+/* M16: general-purpose integer register names (x0-x15). */
+static const char *arm64_get_int_reg_name(TargetBackend *self, int n) {
+    (void)self;
+    static const char *const names[] = {
+        "x0",  "x1",  "x2",  "x3",
+        "x4",  "x5",  "x6",  "x7",
+        "x8",  "x9",  "x10", "x11",
+        "x12", "x13", "x14", "x15"
+    };
+    if (n < 0 || n >= 16) return nullptr;
+    return names[n];
+}
+
+/* M16: return register. */
+static const char *arm64_get_return_reg(TargetBackend *self) {
+    (void)self;
+    return "x0";
+}
+
 TargetBackend* backend_create_arm64(void) {
     Arm64Target *b = malloc(sizeof(Arm64Target));
-    b->base.emit_globals = arm64_emit_globals;
-    b->base.emit_function = arm64_emit_function;
-    b->base.free = arm64_free;
-    b->base.get_target_scale = arm64_get_target_scale;
-    b->base.get_stack_slot_size = arm64_get_stack_slot_size;
-    b->base.get_aggregate_slots = arm64_get_aggregate_slots;
+    b->base.emit_globals       = arm64_emit_globals;
+    b->base.emit_function      = arm64_emit_function;
+    b->base.free               = arm64_free;
+    b->base.get_target_scale   = arm64_get_target_scale;
+    b->base.get_stack_slot_size  = arm64_get_stack_slot_size;
+    b->base.get_aggregate_slots  = arm64_get_aggregate_slots;
+    /* M16 contract hooks */
+    b->base.legalize_type_size = arm64_legalize_type_size;
+    b->base.get_cc_info        = arm64_get_cc_info;
+    b->base.get_int_reg_name   = arm64_get_int_reg_name;
+    b->base.get_return_reg     = arm64_get_return_reg;
     return &b->base;
 }

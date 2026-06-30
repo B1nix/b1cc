@@ -120,7 +120,7 @@
 ## M16: Compiler Shape Cleanup
 
 - [x] Split C frontend semantics more clearly from target lowering.
-- [ ] Add a backend contract for type legalization, calling convention lowering, instruction selection, and register allocation.
+- [x] Add a backend contract for type legalization, calling convention lowering, instruction selection, and register allocation.
 - [x] Add tiny local optimizations only after type semantics are stable.
 - [x] Grow tests from real B1NIX userspace sources before chasing wider C compatibility; coverage is still optional/non-hermetic because it depends on a sibling B1NIX checkout.
 
@@ -143,7 +143,7 @@
 
 - M14 integer promotions, usual arithmetic conversions, and qualifier-aware typing are complete.
 - M15 native ELF object output covers: ELF64 relocatable objects for x86_64-b1nix (full instruction encoding + .text/.data/.rodata/.bss/.symtab/.strtab/.rela.text sections); ELF32 relocatable stubs for i386-b1nix (correct ELF identity + symbol table, code encoding is stub). arm64-darwin output remains Mach-O via host `cc`. Full i386 instruction encoding and native Mach-O writing are future work.
-- M16 still lacks a written/enforced backend contract for type legalization, calling convention lowering, instruction selection, and register allocation.
+- M16 backend contract is implemented: `TargetBackend` vtable now includes `legalize_type_size` (1/2/4/8-byte type normalization), `get_cc_info` (per-target CC descriptor with argument registers, return register, scratch register, and stack alignment), `get_int_reg_name` (register file exposure by index), and `get_return_reg`. ARM64 (AAPCS64), x86_64 (SysV AMD64), and i386 (cdecl) all implement the full contract.
 - M17 still only covers the tested C99 preprocessor operator subset; obscure expansion/rescan/placemarker edge cases remain future work.
 - M18 large returns (structs >16 bytes) and float/vector aggregates are not yet supported by the ABI lowering.
 

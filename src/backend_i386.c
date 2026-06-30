@@ -358,13 +358,55 @@ static int i386_get_aggregate_slots(TargetBackend *self, int size) {
     return (size + 15) / 16;
 }
 
+/* M16: type legalization – i386 supports 1/2/4/8-byte loads (8 via FILD/MOVQ). */
+static int i386_legalize_type_size(TargetBackend *self, int width) {
+    (void)self;
+    if (width <= 1) return 1;
+    if (width <= 2) return 2;
+    if (width <= 4) return 4;
+    return 8;  /* 64-bit via register pair or FPU */
+}
+
+/* M16: calling convention – cdecl (all args passed on stack). */
+static void i386_get_cc_info(TargetBackend *self, BackendCCInfo *out) {
+    (void)self;
+    /* cdecl passes no integer arguments in registers */
+    out->int_arg_regs      = nullptr;
+    out->int_arg_reg_count = 0;
+    out->return_reg        = "%eax";
+    out->scratch_reg       = "%ecx";
+    out->stack_align       = 4;
+}
+
+/* M16: general-purpose integer register names (32-bit forms). */
+static const char *i386_get_int_reg_name(TargetBackend *self, int n) {
+    (void)self;
+    static const char *const names[] = {
+        "%eax", "%ecx", "%edx", "%ebx",
+        "%esi", "%edi"
+    };
+    if (n < 0 || n >= 6) return nullptr;
+    return names[n];
+}
+
+/* M16: return register. */
+static const char *i386_get_return_reg(TargetBackend *self) {
+    (void)self;
+    return "%eax";
+}
+
 TargetBackend* backend_create_i386(void) {
     I386Target *b = malloc(sizeof(I386Target));
-    b->base.emit_globals = i386_emit_globals;
-    b->base.emit_function = i386_emit_function;
-    b->base.free = i386_free;
-    b->base.get_target_scale = i386_get_target_scale;
-    b->base.get_stack_slot_size = i386_get_stack_slot_size;
-    b->base.get_aggregate_slots = i386_get_aggregate_slots;
+    b->base.emit_globals       = i386_emit_globals;
+    b->base.emit_function      = i386_emit_function;
+    b->base.free               = i386_free;
+    b->base.get_target_scale   = i386_get_target_scale;
+    b->base.get_stack_slot_size  = i386_get_stack_slot_size;
+    b->base.get_aggregate_slots  = i386_get_aggregate_slots;
+    /* M16 contract hooks */
+    b->base.legalize_type_size = i386_legalize_type_size;
+    b->base.get_cc_info        = i386_get_cc_info;
+    b->base.get_int_reg_name   = i386_get_int_reg_name;
+    b->base.get_return_reg     = i386_get_return_reg;
     return &b->base;
 }
