@@ -105,7 +105,7 @@
 
 - [x] Add `sizeof` and move declarator parsing toward real C declarators (`int *a[3]`, `int (*fp)(int)`).
 - [x] Tighten integer typing for signed/unsigned comparisons, shifts, cast width, and char/short widening.
-- [ ] Complete integer promotions, usual arithmetic conversions, and qualifier-aware typing.
+- [x] Complete integer promotions, usual arithmetic conversions, and qualifier-aware typing.
 - [x] Improve aggregate layout for alignment, padding, nested structs, and `union`.
 - [x] Support arrays inside structs and reliable integer/pointer `.`/`->` field access for covered scalar, nested-struct, and array-field cases.
 - [x] Add function pointer declarators and calls without special parser shortcuts.
@@ -113,7 +113,7 @@
 ## M15: Driver and ABI Regression Coverage
 
 - [x] Add ABI regression tests for stack-passed arguments, varargs calls, function pointers, and small integer returns.
-- [x] Add driver modes expected from a tiny C compiler: `-E`, `-c`, multiple input files, and pass-through linker flags.
+- [x] Add driver modes expected from a tiny C compiler: `-E`, [-c](file:///Users/dmytrom/Documents/GitHub/b1cc/ROADMAP.md#L116), multiple input files, and pass-through linker flags.
 - [ ] Make native object output real enough for B1NIX: symbols, relocations, sections, and debug dumps.
 - [x] Compile a small curated set of real B1NIX userspace files without TCC fallback when the sibling B1NIX tree is present (`b1cc_hello.c`, `b1cc_better_c.c`).
 
@@ -141,7 +141,7 @@
 
 ## Honest M14-M18 Gaps
 
-- M14 still lacks complete integer promotions, usual arithmetic conversions, and qualifier-aware typing.
+- M14 integer promotions, usual arithmetic conversions, and qualifier-aware typing are complete.
 - M15 still does not have a native object/ELF writer; object/ELF production is driver-assisted through host tools or `b1nix-cc`.
 - M16 still lacks a written/enforced backend contract for type legalization, calling convention lowering, instruction selection, and register allocation.
 - M17 still only covers the tested C99 preprocessor operator subset; obscure expansion/rescan/placemarker edge cases remain future work.

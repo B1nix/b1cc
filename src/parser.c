@@ -94,6 +94,8 @@ static Node *create_node(ParserState *p, const char *op, int line, int col) {
     node->is_unsigned = 0;
     node->type_size = 8;
     node->is_bool = 0;
+    node->bit_offset = 0;
+    node->bit_width = 0;
     node->line = line;
     node->col = col;
     return node;
@@ -323,6 +325,10 @@ static long sizeof_expr(const ParserState *p, const Node *node) {
             if (entry) return entry->val_int;
         }
         return p->target_scale;
+    }
+    /* Fallback for binary/unary expression nodes: use stored type_size if set */
+    if (node->type_size > 0 && node->type_size < (long)p->target_scale * 4) {
+        return node->type_size;
     }
     return p->target_scale;
 }
@@ -1328,8 +1334,20 @@ static Node *term(ParserState *p) {
         Node *parent = create_node(p, op, tok_line, tok_col);
         parent->lhs = n;
         parent->rhs = rhs;
-        parent->type_size = (n->type_size > rhs->type_size) ? n->type_size : rhs->type_size;
-        parent->is_unsigned = n->is_unsigned || rhs->is_unsigned;
+        /* Integer promotions: both operands promote to at least int (4 bytes) */
+        int tls = n->type_size < 4 ? 4 : (int)n->type_size;
+        int trs = rhs->type_size < 4 ? 4 : (int)rhs->type_size;
+        /* Usual arithmetic conversions */
+        if (tls == trs) {
+            parent->type_size = tls;
+            parent->is_unsigned = n->is_unsigned || rhs->is_unsigned;
+        } else if (tls > trs) {
+            parent->type_size = tls;
+            parent->is_unsigned = n->is_unsigned;
+        } else {
+            parent->type_size = trs;
+            parent->is_unsigned = rhs->is_unsigned;
+        }
         n = parent;
     }
     return n;
@@ -1348,8 +1366,20 @@ static Node *add(ParserState *p) {
         Node *parent = create_node(p, op, tok_line, tok_col);
         parent->lhs = n;
         parent->rhs = rhs;
-        parent->type_size = (n->type_size > rhs->type_size) ? n->type_size : rhs->type_size;
-        parent->is_unsigned = n->is_unsigned || rhs->is_unsigned;
+        /* Integer promotions: both operands promote to at least int (4 bytes) */
+        int als = n->type_size < 4 ? 4 : (int)n->type_size;
+        int ars = rhs->type_size < 4 ? 4 : (int)rhs->type_size;
+        /* Usual arithmetic conversions */
+        if (als == ars) {
+            parent->type_size = als;
+            parent->is_unsigned = n->is_unsigned || rhs->is_unsigned;
+        } else if (als > ars) {
+            parent->type_size = als;
+            parent->is_unsigned = n->is_unsigned;
+        } else {
+            parent->type_size = ars;
+            parent->is_unsigned = rhs->is_unsigned;
+        }
         n = parent;
     }
     return n;
