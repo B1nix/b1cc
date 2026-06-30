@@ -86,6 +86,7 @@ static Node *create_node(ParserState *p, const char *op, int line, int col) {
     node_array_init(&node->body);
     string_array_init(&node->params);
     int_array_init(&node->param_aggregate_sizes);
+    int_array_init(&node->param_floats);
     node->aggregate_size = 0;
     node->type_tag = "";
     long_array_init(&node->array_dims);
@@ -94,6 +95,8 @@ static Node *create_node(ParserState *p, const char *op, int line, int col) {
     node->is_unsigned = 0;
     node->type_size = 8;
     node->is_bool = 0;
+    node->is_float = 0;
+    node->fvalue = 0.0;
     node->bit_offset = 0;
     node->bit_width = 0;
     node->line = line;
@@ -334,9 +337,10 @@ static long sizeof_expr(const ParserState *p, const Node *node) {
 }
 
 static void skip_attribute(ParserState *p) {
+    /* NOTE: type qualifiers (const/volatile/restrict) are intentionally NOT
+       skipped here. They carry semantics (M14) and are consumed and recorded
+       by parse_base_type / skip_type_qualifiers so the object can be tracked. */
     while (strcmp(peek(p), "__attribute__") == 0 || strcmp(peek(p), "__attribute") == 0 ||
-           strcmp(peek(p), "const") == 0 || strcmp(peek(p), "volatile") == 0 || strcmp(peek(p), "restrict") == 0 ||
-           strcmp(peek(p), "__restrict") == 0 || strcmp(peek(p), "__restrict__") == 0 ||
            (strcmp(peek(p), "[") == 0 && p->pos + 1 < p->tokens.count && strcmp(p->tokens.data[p->pos + 1].text, "[") == 0)) {
         if (strcmp(peek(p), "[") == 0) {
             take(p, "[");
@@ -379,10 +383,16 @@ static void skip_attribute_and_asm(ParserState *p) {
     }
 }
 
+static void note_type_qualifier(ParserState *p, const char *t) {
+    if (strcmp(t, "const") == 0) p->last_type_const = 1;
+    else if (strcmp(t, "volatile") == 0) p->last_type_volatile = 1;
+}
+
 static void skip_type_qualifiers(ParserState *p) {
     while (strcmp(peek(p), "const") == 0 || strcmp(peek(p), "volatile") == 0 ||
            strcmp(peek(p), "restrict") == 0 || strcmp(peek(p), "__restrict") == 0 ||
            strcmp(peek(p), "__restrict__") == 0 || strcmp(peek(p), "_Atomic") == 0) {
+        note_type_qualifier(p, peek(p));
         take(p, nullptr);
     }
 }
@@ -395,10 +405,14 @@ static int parse_base_type(ParserState *p) {
     int base_size = p->target_scale;
     p->last_type_unsigned = 0;
     p->last_type_bool = 0;
+    p->last_type_const = 0;
+    p->last_type_volatile = 0;
+    p->last_type_float = 0;
     while (strcmp(peek(p), "const") == 0 || strcmp(peek(p), "volatile") == 0 || strcmp(peek(p), "restrict") == 0 || strcmp(peek(p), "__restrict") == 0 || strcmp(peek(p), "__restrict__") == 0 || strcmp(peek(p), "register") == 0 || strcmp(peek(p), "_Atomic") == 0 || strcmp(peek(p), "__attribute__") == 0 || strcmp(peek(p), "__attribute") == 0) {
         if (strcmp(peek(p), "__attribute__") == 0 || strcmp(peek(p), "__attribute") == 0) {
             skip_attribute(p);
         } else {
+            note_type_qualifier(p, peek(p));
             take(p, nullptr);
         }
     }
@@ -409,6 +423,7 @@ static int parse_base_type(ParserState *p) {
             if (strcmp(peek(p), "__attribute__") == 0 || strcmp(peek(p), "__attribute") == 0) {
                 skip_attribute(p);
             } else {
+                note_type_qualifier(p, peek(p));
                 take(p, nullptr);
             }
         }
@@ -424,6 +439,7 @@ static int parse_base_type(ParserState *p) {
         if (strcmp(peek(p), "__attribute__") == 0 || strcmp(peek(p), "__attribute") == 0) {
             skip_attribute(p);
         } else {
+            note_type_qualifier(p, peek(p));
             take(p, nullptr);
         }
     }
@@ -754,12 +770,15 @@ static int parse_base_type(ParserState *p) {
             base_size = 4;
         } else if (strcmp(t, "float") == 0) {
             base_size = 4;
+            p->last_type_float = 1;
         } else if (strcmp(t, "double") == 0) {
             base_size = 8;
+            p->last_type_float = 1;
         } else if (strcmp(t, "long") == 0) {
             if (strcmp(peek(p), "double") == 0) {
                 take(p, nullptr);
                 base_size = 8;
+                p->last_type_float = 1;
             } else if (strcmp(peek(p), "long") == 0) {
                 take(p, nullptr);
                 if (strcmp(peek(p), "int") == 0) take(p, nullptr);
@@ -1025,10 +1044,28 @@ static Node *primary(ParserState *p) {
         n->type_size = 4;
         return n;
     }
-    if (p->pos < p->tokens.count && (is_digit(p->tokens.data[p->pos].text[0]))) {
+    if (p->pos < p->tokens.count &&
+        (is_digit(p->tokens.data[p->pos].text[0]) ||
+         (p->tokens.data[p->pos].text[0] == '.' && is_digit(p->tokens.data[p->pos].text[1])))) {
         const char *t = take(p, nullptr);
+        int is_hex = (strncmp(t, "0x", 2) == 0 || strncmp(t, "0X", 2) == 0);
+        int is_fp = 0;
+        if (!is_hex) {
+            for (const char *s = t; *s; ++s) {
+                if (*s == '.' || *s == 'e' || *s == 'E' || *s == 'f' || *s == 'F') { is_fp = 1; break; }
+            }
+        }
+        if (is_fp) {
+            Node *n = create_node(p, "fnum", tok_line, tok_col);
+            n->fvalue = strtod(t, nullptr);
+            n->is_float = 1;
+            /* an 'f'/'F' suffix denotes a 4-byte float, otherwise double */
+            size_t len = strlen(t);
+            n->type_size = (len > 0 && (t[len - 1] == 'f' || t[len - 1] == 'F')) ? 4 : 8;
+            return n;
+        }
         Node *n = create_node(p, "num", tok_line, tok_col);
-        if (strncmp(t, "0x", 2) == 0 || strncmp(t, "0X", 2) == 0) {
+        if (is_hex) {
             n->value = strtol(t, nullptr, 16);
         } else {
             n->value = strtol(t, nullptr, 10);
@@ -1067,6 +1104,8 @@ static Node *primary(ParserState *p) {
     if (unsigned_entry) n->is_unsigned = unsigned_entry->val_int;
     HashMapEntry *bool_entry = hashmap_get((HashMap *)&p->bool_vars, resolved);
     if (bool_entry) n->is_bool = bool_entry->val_int;
+    HashMapEntry *float_entry = hashmap_get((HashMap *)&p->float_vars, resolved);
+    if (float_entry) n->is_float = float_entry->val_int;
     HashMapEntry *sz_entry = hashmap_get((HashMap *)&p->value_sizes, resolved);
     n->type_size = sz_entry ? sz_entry->val_int : p->target_scale;
     return n;
@@ -1263,6 +1302,11 @@ static Node *unary(ParserState *p) {
         } else {
             n->type_size = n->lhs->type_size < 4 ? 4 : n->lhs->type_size;
             n->is_unsigned = n->lhs->is_unsigned;
+            /* unary minus on a float keeps the floating type; '~'/'!' do not */
+            if (strcmp(op, "-") == 0 && n->lhs->is_float) {
+                n->is_float = 1;
+                n->type_size = n->lhs->type_size;
+            }
         }
         return n;
     }
@@ -1304,10 +1348,12 @@ static Node *unary(ParserState *p) {
         int base_size = parse_base_type(p);
         is_unsigned_cast = p->last_type_unsigned;
         is_bool_cast = p->last_type_bool;
+        int is_float_cast = p->last_type_float;
         while (strcmp(peek(p), "*") == 0) {
             take(p, "*");
             base_size = p->target_scale;
             is_unsigned_cast = 1; // pointers are unsigned
+            is_float_cast = 0;    // pointer, not a floating value
         }
         take(p, ")");
         Node *n = create_node(p, is_bool_cast ? "bool_cast" : "cast", tok_line, tok_col);
@@ -1316,6 +1362,7 @@ static Node *unary(ParserState *p) {
         n->type_size = base_size;
         n->is_unsigned = is_unsigned_cast;
         n->is_bool = is_bool_cast;
+        n->is_float = is_float_cast;
         return n;
     }
     return factor(p);
@@ -1348,6 +1395,13 @@ static Node *term(ParserState *p) {
             parent->type_size = trs;
             parent->is_unsigned = rhs->is_unsigned;
         }
+        if (n->is_float || rhs->is_float) {
+            parent->is_float = 1;
+            int fs = n->is_float ? n->type_size : 0;
+            if (rhs->is_float && rhs->type_size > fs) fs = rhs->type_size;
+            parent->type_size = fs ? fs : 8;
+            parent->is_unsigned = 0;
+        }
         n = parent;
     }
     return n;
@@ -1379,6 +1433,13 @@ static Node *add(ParserState *p) {
         } else {
             parent->type_size = ars;
             parent->is_unsigned = rhs->is_unsigned;
+        }
+        if (n->is_float || rhs->is_float) {
+            parent->is_float = 1;
+            int fs = n->is_float ? n->type_size : 0;
+            if (rhs->is_float && rhs->type_size > fs) fs = rhs->type_size;
+            parent->type_size = fs ? fs : 8;
+            parent->is_unsigned = 0;
         }
         n = parent;
     }
@@ -1838,6 +1899,10 @@ static Node *assign_stmt(ParserState *p, int semicolon) {
     } else {
         resolved_name = resolve_name(p, name);
     }
+    HashMapEntry *const_entry = hashmap_get(&p->const_vars, resolved_name);
+    if (const_entry && const_entry->val_int) {
+        diagnostics_error(tok_line, tok_col, "assignment of read-only (const-qualified) variable");
+    }
     const char *op = take(p, nullptr);
     Node *node = create_node(p, "assign", tok_line, tok_col);
     node->name = resolved_name;
@@ -2209,18 +2274,27 @@ static Node *stmt(ParserState *p) {
         }
         int is_unsigned = p->last_type_unsigned;
         int is_bool = p->last_type_bool || strcmp(t, "_Bool") == 0 || strcmp(t, "bool") == 0;
-        
+        int base_const = p->last_type_const;
+        int base_volatile = p->last_type_volatile;
+        int base_float = p->last_type_float;
+
         if (strcmp(peek(p), ";") == 0) {
             take(p, ";");
             return create_node(p, "block", tok_line, tok_col);
         }
-        
+
         int stars = 0;
         while (strcmp(peek(p), "*") == 0) {
             take(p, "*");
             stars++;
         }
+        p->last_type_const = 0;
+        p->last_type_volatile = 0;
         skip_type_qualifiers(p);
+        /* Object is const/volatile if the qualifier applies at top level:
+           directly on a non-pointer object, or after the final '*' on a pointer. */
+        int is_const = (stars == 0) ? (base_const || p->last_type_const) : p->last_type_const;
+        int is_volatile = (stars == 0) ? (base_volatile || p->last_type_volatile) : p->last_type_volatile;
         skip_attribute_and_asm(p);
         
         const char *name = "";
@@ -2520,7 +2594,12 @@ static Node *stmt(ParserState *p) {
             hashmap_put(&p->unsigned_vars, unique_name_dup, nullptr, is_unsigned && !is_pointer);
             hashmap_put(&p->bool_vars, unique_name_dup, nullptr, is_bool && !is_pointer);
             hashmap_put(&p->value_sizes, unique_name_dup, nullptr, is_pointer ? p->target_scale : base_size);
-            
+            hashmap_put(&p->const_vars, unique_name_dup, nullptr, is_const);
+            hashmap_put(&p->volatile_vars, unique_name_dup, nullptr, is_volatile);
+            hashmap_put(&p->float_vars, unique_name_dup, nullptr, base_float && !is_pointer);
+            node->is_float = base_float && !is_pointer;
+            node->type_size = is_pointer ? p->target_scale : base_size;
+
             if (strcmp(peek(p), "=") == 0) {
                 take(p, "=");
                 node->lhs = expr(p);
@@ -2589,7 +2668,10 @@ static Node *stmt(ParserState *p) {
                     hashmap_put(&p->unsigned_vars, next_unique_name_dup, nullptr, is_unsigned && !next_is_pointer);
                     hashmap_put(&p->bool_vars, next_unique_name_dup, nullptr, is_bool && !next_is_pointer);
                     hashmap_put(&p->value_sizes, next_unique_name_dup, nullptr, next_is_pointer ? p->target_scale : base_size);
-                    
+                    hashmap_put(&p->float_vars, next_unique_name_dup, nullptr, base_float && !next_is_pointer);
+                    next_node->is_float = base_float && !next_is_pointer;
+                    next_node->type_size = next_is_pointer ? p->target_scale : base_size;
+
                     if (strcmp(peek(p), "=") == 0) {
                         take(p, "=");
                         next_node->lhs = expr(p);
@@ -2882,6 +2964,7 @@ static Node *function(ParserState *p, int is_static) {
     }
     int ret_is_struct = (strcmp(peek(p), "struct") == 0 || strcmp(peek(p), "union") == 0);
     int ret_base = parse_base_type(p);
+    int ret_is_float = p->last_type_float;
     if (!ret_is_struct && p->last_parsed_struct_tag && p->last_parsed_struct_tag[0]) {
         ret_is_struct = 1;
     }
@@ -2893,7 +2976,9 @@ static Node *function(ParserState *p, int is_static) {
     skip_type_qualifiers(p);
     skip_attribute(p);
     int ret_size = (ret_stars > 0) ? p->target_scale : ret_base;
-    int ret_aggregate_size = (ret_stars == 0 && (ret_is_struct || ret_base > p->target_scale)) ? ret_base : 0;
+    /* float/double returns are scalar FP (st0/xmm0/v0), never aggregates, even
+       though a double is wider than the 32-bit i386 word. */
+    int ret_aggregate_size = (ret_stars == 0 && !ret_is_float && (ret_is_struct || ret_base > p->target_scale)) ? ret_base : 0;
 
     const char *name = "";
     if (strcmp(peek(p), "(") == 0 &&
@@ -2913,6 +2998,7 @@ static Node *function(ParserState *p, int is_static) {
     fn_node->name = name;
     fn_node->value = ret_size;
     fn_node->aggregate_size = ret_aggregate_size;
+    fn_node->is_float = ret_is_float && ret_stars == 0;
     fn_node->is_static = is_static;
 
     parser_enter_scope(p);
@@ -2925,6 +3011,7 @@ static Node *function(ParserState *p, int is_static) {
                 take(p, "...");
                 string_array_push(&fn_node->params, "...");
                 int_array_push(&fn_node->param_aggregate_sizes, 0);
+                int_array_push(&fn_node->param_floats, 0);
                 break;
             }
             int is_unsigned = 0;
@@ -2942,6 +3029,7 @@ static Node *function(ParserState *p, int is_static) {
             int param_elem_scale = base_size;
             is_unsigned = p->last_type_unsigned;
             is_bool = p->last_type_bool;
+            int base_is_float = p->last_type_float;
 
             int is_param_pointer = 0;
             while (strcmp(peek(p), "*") == 0) {
@@ -3001,9 +3089,11 @@ static Node *function(ParserState *p, int is_static) {
             snprintf(local_name, sizeof(local_name), "%s.local.%d", param_name, p->local_var_counter++);
             const char *local_name_dup = arena_strdup(p->arena, local_name);
 
+            int is_param_float = base_is_float && !is_param_pointer && !is_param_arr && !is_func_ptr;
             hashmap_put(&p->scopes[p->scope_count - 1], param_name, (void *)local_name_dup, 0);
             hashmap_put(&p->unsigned_vars, local_name_dup, nullptr, is_unsigned_var);
             hashmap_put(&p->bool_vars, local_name_dup, nullptr, is_bool);
+            hashmap_put(&p->float_vars, local_name_dup, nullptr, is_param_float);
             hashmap_put(&p->value_sizes, local_name_dup, nullptr, type_size);
             char local_key[512];
             snprintf(local_key, sizeof(local_key), "%s$%s", p->current_func_name, local_name_dup);
@@ -3015,9 +3105,10 @@ static Node *function(ParserState *p, int is_static) {
             }
 
             string_array_push(&fn_node->params, local_name_dup);
-            int is_param_aggregate = !is_param_pointer && !is_param_arr && !is_func_ptr &&
+            int is_param_aggregate = !is_param_pointer && !is_param_arr && !is_func_ptr && !base_is_float &&
                                      (struct_tag[0] || base_size > p->target_scale);
             int_array_push(&fn_node->param_aggregate_sizes, is_param_aggregate ? base_size : 0);
+            int_array_push(&fn_node->param_floats, is_param_float ? type_size : 0);
 
             if (strcmp(peek(p), ",") == 0) {
                 take(p, ",");
@@ -3039,6 +3130,15 @@ static Node *function(ParserState *p, int is_static) {
             int_array_push(param_sizes, fn_node->param_aggregate_sizes.data[p_i]);
         }
         hashmap_put(&ir_function_param_aggregate_sizes, fn_node->name, param_sizes, 0);
+
+        IntArray *param_fl = malloc(sizeof(IntArray));
+        int_array_init(param_fl);
+        for (int p_i = 0; p_i < fn_node->param_floats.count; ++p_i) {
+            int_array_push(param_fl, fn_node->param_floats.data[p_i]);
+        }
+        hashmap_put(&ir_function_param_floats, fn_node->name, param_fl, 0);
+        hashmap_put(&ir_function_return_floats, fn_node->name, nullptr,
+                    fn_node->is_float ? (int)fn_node->value : 0);
 
         int is_vararg = 0;
         if (fn_node->params.count > 0 && strcmp(fn_node->params.data[fn_node->params.count - 1], "...") == 0) {
@@ -3078,6 +3178,9 @@ static void global_decl(ParserState *p, int is_static, int is_extern) {
     }
     int is_unsigned = p->last_type_unsigned;
     int is_bool = p->last_type_bool;
+    int base_const = p->last_type_const;
+    int base_volatile = p->last_type_volatile;
+    int base_float = p->last_type_float;
 
     if (strcmp(peek(p), ";") == 0) {
         take(p, ";");
@@ -3090,7 +3193,11 @@ static void global_decl(ParserState *p, int is_static, int is_extern) {
             take(p, "*");
             stars++;
         }
+        p->last_type_const = 0;
+        p->last_type_volatile = 0;
         skip_type_qualifiers(p);
+        int is_const = (stars == 0) ? (base_const || p->last_type_const) : p->last_type_const;
+        int is_volatile = (stars == 0) ? (base_volatile || p->last_type_volatile) : p->last_type_volatile;
         int type_size = (stars > 0) ? p->target_scale : base_size;
         int is_unsigned_var = (stars > 0) ? 1 : is_unsigned;
         const char *name = take(p, nullptr);
@@ -3117,6 +3224,11 @@ static void global_decl(ParserState *p, int is_static, int is_extern) {
         hashmap_put(&p->unsigned_vars, name, nullptr, is_unsigned_var);
         hashmap_put(&p->bool_vars, name, nullptr, is_bool);
         hashmap_put(&p->value_sizes, name, nullptr, type_size);
+        /* A const array's elements are read-only, but the array name itself is
+           never an assignment target, so only flag non-array const scalars. */
+        hashmap_put(&p->const_vars, name, nullptr, is_const && arr_dims.count == 0);
+        hashmap_put(&p->volatile_vars, name, nullptr, is_volatile);
+        hashmap_put(&p->float_vars, name, nullptr, base_float && stars == 0);
         if (struct_tag[0]) {
             hashmap_put(&p->var_struct_tags, name, (void *)struct_tag, 0);
         }
@@ -3219,10 +3331,34 @@ static void global_decl(ParserState *p, int is_static, int is_extern) {
                 ir_set_global_initializers(name, init_vals);
             } else {
                 Node *val_node = expr(p);
-                long val = eval_const(p, val_node);
                 LongArray init_vals;
                 long_array_init(&init_vals);
-                long_array_push(&init_vals, val);
+                /* Floating global initializer: store the IEEE-754 bit pattern so
+                   the backend emits .long/.quad with the right bits. Supports a
+                   plain literal and a negated literal. */
+                int fp_init = base_float && stars == 0;
+                double fp_d = 0.0;
+                int got_fp = 0;
+                if (fp_init && strcmp(val_node->op, "fnum") == 0) {
+                    fp_d = val_node->fvalue; got_fp = 1;
+                } else if (fp_init && strcmp(val_node->op, "unary_-") == 0 &&
+                           val_node->lhs && strcmp(val_node->lhs->op, "fnum") == 0) {
+                    fp_d = -val_node->lhs->fvalue; got_fp = 1;
+                }
+                if (got_fp) {
+                    long bits;
+                    if (base_size == 4) {
+                        float f = (float)fp_d;
+                        unsigned int u;
+                        memcpy(&u, &f, 4);
+                        bits = (long)u;
+                    } else {
+                        memcpy(&bits, &fp_d, 8);
+                    }
+                    long_array_push(&init_vals, bits);
+                } else {
+                    long_array_push(&init_vals, eval_const(p, val_node));
+                }
                 ir_set_global_initializers(name, init_vals);
             }
         }
@@ -3247,6 +3383,9 @@ static void parser_state_cleanup(ParserState *state) {
 
     hashmap_free(&state->unsigned_vars);
     hashmap_free(&state->bool_vars);
+    hashmap_free(&state->const_vars);
+    hashmap_free(&state->volatile_vars);
+    hashmap_free(&state->float_vars);
     hashmap_free(&state->value_sizes);
     hashmap_free(&state->var_struct_tags);
 
@@ -3307,6 +3446,9 @@ NodeArray parser_parse(const TokenArray *tokens, int target_scale, Arena *arena)
 
     hashmap_init(&state.unsigned_vars, 64);
     hashmap_init(&state.bool_vars, 64);
+    hashmap_init(&state.const_vars, 64);
+    hashmap_init(&state.volatile_vars, 64);
+    hashmap_init(&state.float_vars, 64);
     hashmap_init(&state.value_sizes, 64);
     hashmap_init(&state.var_struct_tags, 64);
     state.local_var_counter = 0;
@@ -3470,6 +3612,13 @@ NodeArray parser_parse(const TokenArray *tokens, int target_scale, Arena *arena)
         HashMapEntry *curr = state.value_sizes.buckets[b];
         while (curr) {
             ir_set_var_type_size(curr->key, curr->val_int);
+            curr = curr->next;
+        }
+    }
+    for (int b = 0; b < state.float_vars.bucket_count; ++b) {
+        HashMapEntry *curr = state.float_vars.buckets[b];
+        while (curr) {
+            ir_set_var_float(curr->key, curr->val_int);
             curr = curr->next;
         }
     }

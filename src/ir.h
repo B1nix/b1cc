@@ -106,6 +106,8 @@ void ir_set_global_var_elem_scale(const char *name, int val);
 
 void ir_set_var_unsigned(const char *name, int val);
 void ir_set_var_bool(const char *name, int val);
+void ir_set_var_float(const char *name, int val);
+int ir_get_var_float(const char *name);
 void ir_set_var_type_size(const char *name, int val);
 void ir_set_var_struct_tag(const char *name, const char *tag);
 
@@ -144,6 +146,8 @@ extern HashMap ir_local_var_is_pointer;
 extern HashMap ir_function_return_aggregate_sizes;
 extern HashMap ir_function_param_aggregate_sizes;
 extern HashMap ir_function_vararg_fixed_counts;
+extern HashMap ir_function_param_floats;
+extern HashMap ir_function_return_floats;
 extern int ir_current_target_scale;
 
 IrFunctionArray ir_lower_program(const NodeArray *ast, const char *target, Arena *arena);

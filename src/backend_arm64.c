@@ -196,13 +196,33 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
         }
         int abi_word = 0;
         int stack_word = 0;
+        int v_word = 0;
+        IntArray *prologue_floats = nullptr;
+        {
+            HashMapEntry *pfe = hashmap_get(&ir_function_param_floats, fn->name);
+            if (pfe) prologue_floats = (IntArray *)pfe->val_ptr;
+        }
         for (int i = 0; i < fn->params.count; ++i) {
             int agg_size = (i < fn->param_aggregate_sizes.count) ? fn->param_aggregate_sizes.data[i] : 0;
             int num_slots = (agg_size > 0) ? ((agg_size + 15) / 16) : 1;
-            
+
             HashMapEntry *entry = hashmap_get((HashMap *)&fn->locals, fn->params.data[i]);
             int slot_idx = entry ? entry->val_int : i;
-            
+
+            int p_float = (prologue_floats && i < prologue_floats->count) ? prologue_floats->data[i] : 0;
+            if (p_float && v_word < 8) {
+                /* scalar float/double parameter passed in V0-V7 (AAPCS64) */
+                int off = -((slot_idx + 1) * 16);
+                emit_sub_imm(&out, "x9", "x29", -off);
+                if (p_float == 4) {
+                    sb_appendf(&out, "    str s%d, [x9]\n", v_word);
+                } else {
+                    sb_appendf(&out, "    str d%d, [x9]\n", v_word);
+                }
+                v_word++;
+                continue;
+            }
+
             if (agg_size > 16) {
                 int in_regs = (abi_word + 1 <= 8);
                 if (in_regs) {
@@ -370,6 +390,53 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
             sb_appendf(&out, "%s:\n", inst->arg);
         } else if (strcmp(inst->op, "call") == 0 || strcmp(inst->op, "icall") == 0) {
             long num_args = inst->value;
+            /* Float-scalar call fast path (AAPCS64): float/double args -> V0-V7,
+               integer/pointer args -> X0-X7, float/double return -> V0. */
+            if (strcmp(inst->op, "call") == 0) {
+                IntArray *pf = nullptr;
+                int retf = 0;
+                HashMapEntry *pe = hashmap_get(&ir_function_param_floats, inst->arg);
+                if (pe) pf = (IntArray *)pe->val_ptr;
+                HashMapEntry *re = hashmap_get(&ir_function_return_floats, inst->arg);
+                if (re) retf = re->val_int;
+                int any_f = 0, gpc = 0, ssec = 0;
+                for (long i = 0; i < num_args; ++i) {
+                    int f = (pf && i < pf->count) ? pf->data[i] : 0;
+                    if (f) { any_f = 1; ssec++; } else gpc++;
+                }
+                if ((any_f || retf) && gpc <= 8 && ssec <= 8) {
+                    int g = 0, s = 0;
+                    int *gi = calloc(num_args + 1, sizeof(int));
+                    int *si = calloc(num_args + 1, sizeof(int));
+                    int *isf = calloc(num_args + 1, sizeof(int));
+                    for (long i = 0; i < num_args; ++i) {
+                        int f = (pf && i < pf->count) ? pf->data[i] : 0;
+                        isf[i] = f;
+                        if (f) si[i] = s++; else gi[i] = g++;
+                    }
+                    for (long i = num_args - 1; i >= 0; --i) {
+                        if (isf[i]) {
+                            sb_appendf(&out, "    ldr d%d, [sp], #16\n", si[i]);
+                            if (isf[i] == 4) {
+                                sb_appendf(&out, "    fcvt s%d, d%d\n", si[i], si[i]);
+                            }
+                        } else {
+                            sb_appendf(&out, "    ldr x%d, [sp], #16\n", gi[i]);
+                        }
+                    }
+                    sb_appendf(&out, "    bl _%s\n", inst->arg);
+                    if (retf) {
+                        if (retf == 4) {
+                            sb_append(&out, "    fcvt d0, s0\n");
+                        }
+                        sb_append(&out, "    str d0, [sp, #-16]!\n");
+                    } else {
+                        sb_append(&out, "    str x0, [sp, #-16]!\n");
+                    }
+                    free(gi); free(si); free(isf);
+                    continue;
+                }
+            }
             IntArray *agg_sizes = nullptr;
             if (strcmp(inst->op, "call") == 0) {
                 HashMapEntry *entry = hashmap_get(&ir_function_param_aggregate_sizes, inst->arg);
@@ -696,6 +763,116 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
             /* BFI: bit-field insert: x3 = x3 with bits [bf_offset+bf_width-1:bf_offset] = x0 */
             sb_appendf(&out, "    bfi x3, x0, #%d, #%d\n", bf_offset, bf_width);
             sb_append(&out, "    str x3, [x1]\n");
+        } else if (strcmp(inst->op, "fconst") == 0) {
+            unsigned long long val = inst->value;
+            sb_appendf(&out, "    movz x0, #%d\n", (int)(val & 0xffff));
+            if (val & 0xffff0000ULL) sb_appendf(&out, "    movk x0, #%d, lsl #16\n", (int)((val >> 16) & 0xffff));
+            if (val & 0xffff00000000ULL) sb_appendf(&out, "    movk x0, #%d, lsl #32\n", (int)((val >> 32) & 0xffff));
+            if (val & 0xffff000000000000ULL) sb_appendf(&out, "    movk x0, #%d, lsl #48\n", (int)((val >> 48) & 0xffff));
+            sb_append(&out, "    str x0, [sp, #-16]!\n");
+        } else if (strcmp(inst->op, "fadd") == 0 || strcmp(inst->op, "fsub") == 0 ||
+                   strcmp(inst->op, "fmul") == 0 || strcmp(inst->op, "fdiv") == 0) {
+            const char *fop = strcmp(inst->op, "fadd") == 0 ? "fadd" :
+                              strcmp(inst->op, "fsub") == 0 ? "fsub" :
+                              strcmp(inst->op, "fmul") == 0 ? "fmul" : "fdiv";
+            sb_append(&out, "    ldr d0, [sp], #16\n");  /* rhs */
+            sb_append(&out, "    ldr d1, [sp], #16\n");  /* lhs */
+            sb_appendf(&out, "    %s d0, d1, d0\n", fop);
+            sb_append(&out, "    str d0, [sp, #-16]!\n");
+        } else if (strcmp(inst->op, "fneg") == 0) {
+            sb_append(&out, "    ldr d0, [sp], #16\n");
+            sb_append(&out, "    fneg d0, d0\n");
+            sb_append(&out, "    str d0, [sp, #-16]!\n");
+        } else if (strcmp(inst->op, "i2f") == 0) {
+            sb_append(&out, "    ldr x0, [sp], #16\n");
+            sb_append(&out, "    scvtf d0, x0\n");
+            sb_append(&out, "    str d0, [sp, #-16]!\n");
+        } else if (strcmp(inst->op, "f2i") == 0) {
+            sb_append(&out, "    ldr d0, [sp], #16\n");
+            sb_append(&out, "    fcvtzs x0, d0\n");
+            sb_append(&out, "    str x0, [sp, #-16]!\n");
+        } else if (strcmp(inst->op, "d2f") == 0) {
+            sb_append(&out, "    ldr d0, [sp], #16\n");
+            sb_append(&out, "    fcvt s0, d0\n");
+            sb_append(&out, "    fcvt d0, s0\n");
+            sb_append(&out, "    str d0, [sp, #-16]!\n");
+        } else if (strcmp(inst->op, "f<") == 0 || strcmp(inst->op, "f>") == 0 ||
+                   strcmp(inst->op, "f<=") == 0 || strcmp(inst->op, "f>=") == 0 ||
+                   strcmp(inst->op, "f==") == 0 || strcmp(inst->op, "f!=") == 0) {
+            sb_append(&out, "    ldr d0, [sp], #16\n");  /* rhs */
+            sb_append(&out, "    ldr d1, [sp], #16\n");  /* lhs */
+            sb_append(&out, "    fcmp d1, d0\n");
+            const char *cc = strcmp(inst->op, "f<") == 0 ? "lt" :
+                             strcmp(inst->op, "f<=") == 0 ? "le" :
+                             strcmp(inst->op, "f>") == 0 ? "gt" :
+                             strcmp(inst->op, "f>=") == 0 ? "ge" :
+                             strcmp(inst->op, "f==") == 0 ? "eq" : "ne";
+            sb_appendf(&out, "    cset x0, %s\n", cc);
+            sb_append(&out, "    str x0, [sp, #-16]!\n");
+        } else if (strcmp(inst->op, "fload4") == 0) {
+            int off = -((inst->value + 1) * 16);
+            emit_sub_imm(&out, "x9", "x29", -off);
+            sb_append(&out, "    ldr s0, [x9]\n");
+            sb_append(&out, "    fcvt d0, s0\n");
+            sb_append(&out, "    str d0, [sp, #-16]!\n");
+        } else if (strcmp(inst->op, "fload8") == 0) {
+            emit_load_fp(&out, 0, -((inst->value + 1) * 16));
+            sb_append(&out, "    str x0, [sp, #-16]!\n");
+        } else if (strcmp(inst->op, "fstore4") == 0) {
+            int off = -((inst->value + 1) * 16);
+            sb_append(&out, "    ldr d0, [sp], #16\n");
+            sb_append(&out, "    fcvt s0, d0\n");
+            emit_sub_imm(&out, "x9", "x29", -off);
+            sb_append(&out, "    str s0, [x9]\n");
+        } else if (strcmp(inst->op, "fstore8") == 0) {
+            sb_append(&out, "    ldr x0, [sp], #16\n");
+            emit_store_fp(&out, 0, -((inst->value + 1) * 16));
+        } else if (strcmp(inst->op, "fgload") == 0) {
+            int gsize = 8;
+            HashMapEntry *ge = hashmap_get(&ir_global_var_elem_scales, inst->arg);
+            if (ge) gsize = ge->val_int;
+            if (is_defined_global(inst->arg)) {
+                sb_appendf(&out, "    adrp x1, _%s@PAGE\n", inst->arg);
+                sb_appendf(&out, "    add x1, x1, _%s@PAGEOFF\n", inst->arg);
+            } else {
+                sb_appendf(&out, "    adrp x1, _%s@GOTPAGE\n", inst->arg);
+                sb_appendf(&out, "    ldr x1, [x1, _%s@GOTPAGEOFF]\n", inst->arg);
+            }
+            if (gsize == 4) {
+                sb_append(&out, "    ldr s0, [x1]\n");
+                sb_append(&out, "    fcvt d0, s0\n");
+            } else {
+                sb_append(&out, "    ldr d0, [x1]\n");
+            }
+            sb_append(&out, "    str d0, [sp, #-16]!\n");
+        } else if (strcmp(inst->op, "fgstore") == 0) {
+            int gsize = 8;
+            HashMapEntry *ge = hashmap_get(&ir_global_var_elem_scales, inst->arg);
+            if (ge) gsize = ge->val_int;
+            sb_append(&out, "    ldr d0, [sp], #16\n");
+            if (is_defined_global(inst->arg)) {
+                sb_appendf(&out, "    adrp x1, _%s@PAGE\n", inst->arg);
+                sb_appendf(&out, "    add x1, x1, _%s@PAGEOFF\n", inst->arg);
+            } else {
+                sb_appendf(&out, "    adrp x1, _%s@GOTPAGE\n", inst->arg);
+                sb_appendf(&out, "    ldr x1, [x1, _%s@GOTPAGEOFF]\n", inst->arg);
+            }
+            if (gsize == 4) {
+                sb_append(&out, "    fcvt s0, d0\n");
+                sb_append(&out, "    str s0, [x1]\n");
+            } else {
+                sb_append(&out, "    str d0, [x1]\n");
+            }
+        } else if (strcmp(inst->op, "fret") == 0) {
+            sb_append(&out, "    ldr d0, [sp], #16\n");
+            if (inst->value == 4) {
+                sb_append(&out, "    fcvt s0, d0\n");  /* return float as single */
+            }
+            if (frame) {
+                sb_append(&out, "    mov sp, x29\n");
+                sb_append(&out, "    ldp x29, x30, [sp], #16\n");
+            }
+            sb_append(&out, "    ret\n");
         } else {
             char msg[128];
             snprintf(msg, sizeof(msg), "unknown IR op %s", inst->op);

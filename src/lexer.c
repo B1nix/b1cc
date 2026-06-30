@@ -102,11 +102,11 @@ TokenArray lex(const char *src, HashMap *macros, HashMap *active_macros, Arena *
                 diagnostics_error(tok_line, tok_col, "unterminated block comment");
             }
             CONSUME(2);
-        } else if (is_digit(c)) {
+        } else if (is_digit(c) || (c == '.' && i + 1 < src_len && is_digit(src[i + 1]))) {
             size_t start = i;
-            CONSUME(1);
-            if (c == '0' && i < src_len && (src[i] == 'x' || src[i] == 'X')) {
-                CONSUME(1);
+            int is_float = 0;
+            if (c == '0' && i + 1 < src_len && (src[i + 1] == 'x' || src[i + 1] == 'X')) {
+                CONSUME(2);
                 while (i < src_len && is_xdigit(src[i])) {
                     CONSUME(1);
                 }
@@ -114,11 +114,41 @@ TokenArray lex(const char *src, HashMap *macros, HashMap *active_macros, Arena *
                 while (i < src_len && is_digit(src[i])) {
                     CONSUME(1);
                 }
+                /* fractional part */
+                if (i < src_len && src[i] == '.') {
+                    is_float = 1;
+                    CONSUME(1);
+                    while (i < src_len && is_digit(src[i])) {
+                        CONSUME(1);
+                    }
+                }
+                /* exponent */
+                if (i < src_len && (src[i] == 'e' || src[i] == 'E')) {
+                    is_float = 1;
+                    CONSUME(1);
+                    if (i < src_len && (src[i] == '+' || src[i] == '-')) {
+                        CONSUME(1);
+                    }
+                    while (i < src_len && is_digit(src[i])) {
+                        CONSUME(1);
+                    }
+                }
             }
+            /* The token text includes the '.'/exponent so the parser can tell a
+               floating literal from an integer one; the suffix is kept too so a
+               trailing 'f'/'F' marks a float (4-byte) rather than double. */
+            size_t suffix_start = i;
+            if (is_float) {
+                while (i < src_len && (src[i] == 'f' || src[i] == 'F' || src[i] == 'l' || src[i] == 'L')) {
+                    CONSUME(1);
+                }
+            } else {
+                while (i < src_len && (src[i] == 'u' || src[i] == 'U' || src[i] == 'l' || src[i] == 'L')) {
+                    CONSUME(1);
+                }
+            }
+            (void)suffix_start;
             const char *num_str = arena_strndup(arena, src + start, i - start);
-            while (i < src_len && (src[i] == 'u' || src[i] == 'U' || src[i] == 'l' || src[i] == 'L')) {
-                CONSUME(1);
-            }
             push_token(&out, num_str, tok_line, tok_col);
         } else if (is_alpha(c)) {
             size_t start = i;

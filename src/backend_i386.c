@@ -128,9 +128,28 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
             sb_appendf(&out, "    movl %%eax, %d(%%ebp)\n", off);
         }
         int param_offset = indirect_ret ? 12 : 8;
+        IntArray *prologue_floats = nullptr;
+        {
+            HashMapEntry *pfe = hashmap_get(&ir_function_param_floats, fn->name);
+            if (pfe) prologue_floats = (IntArray *)pfe->val_ptr;
+        }
+        int in_off = param_offset;
         for (int i = 0; i < fn->params.count; ++i) {
-            sb_appendf(&out, "    movl %d(%%ebp), %%eax\n", param_offset + i * 4);
-            sb_appendf(&out, "    movl %%eax, -%d(%%ebp)\n", (i + 1) * 16);
+            int pf = (prologue_floats && i < prologue_floats->count) ? prologue_floats->data[i] : 0;
+            int slot = -((i + 1) * 16);
+            if (pf == 8) {
+                /* double parameter: copy 8 bytes from the incoming stack */
+                sb_appendf(&out, "    movl %d(%%ebp), %%eax\n", in_off);
+                sb_appendf(&out, "    movl %%eax, %d(%%ebp)\n", slot);
+                sb_appendf(&out, "    movl %d(%%ebp), %%eax\n", in_off + 4);
+                sb_appendf(&out, "    movl %%eax, %d(%%ebp)\n", slot + 4);
+                in_off += 8;
+            } else {
+                /* int/pointer or 4-byte float parameter */
+                sb_appendf(&out, "    movl %d(%%ebp), %%eax\n", in_off);
+                sb_appendf(&out, "    movl %%eax, %d(%%ebp)\n", slot);
+                in_off += 4;
+            }
         }
     }
 
@@ -263,6 +282,65 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
             HashMapEntry *entry = hashmap_get(&ir_function_return_aggregate_sizes, inst->arg);
             if (entry) ret_agg_size = entry->val_int;
 
+            /* Float-aware i386 call (System V i386: all args on the stack, float
+               and double returned in st0). Float/double eval values are 8 bytes;
+               int/pointer eval values are 4 bytes. */
+            {
+                IntArray *pf = nullptr;
+                int retf = 0;
+                HashMapEntry *pe = hashmap_get(&ir_function_param_floats, inst->arg);
+                if (pe) pf = (IntArray *)pe->val_ptr;
+                HashMapEntry *re = hashmap_get(&ir_function_return_floats, inst->arg);
+                if (re) retf = re->val_int;
+                int any_f = 0;
+                for (long i = 0; i < num_args; ++i) {
+                    if (pf && i < pf->count && pf->data[i]) any_f = 1;
+                }
+                if (ret_agg_size == 0 && (any_f || retf)) {
+                    int *evsz = calloc(num_args + 1, sizeof(int));
+                    int *abisz = calloc(num_args + 1, sizeof(int));
+                    int *abioff = calloc(num_args + 1, sizeof(int));
+                    int total_abi = 0, total_ev = 0;
+                    for (long i = 0; i < num_args; ++i) {
+                        int f = (pf && i < pf->count) ? pf->data[i] : 0;
+                        evsz[i] = f ? 8 : 4;          /* float/double eval value is 8 bytes */
+                        abisz[i] = (f == 8) ? 8 : 4;  /* double 8, float 4, int 4 */
+                        abioff[i] = total_abi;
+                        total_abi += abisz[i];
+                        total_ev += evsz[i];
+                    }
+                    sb_appendf(&out, "    subl $%d, %%esp\n", total_abi);
+                    for (long i = 0; i < num_args; ++i) {
+                        int f = (pf && i < pf->count) ? pf->data[i] : 0;
+                        int ev_above = 0;
+                        for (long j = i + 1; j < num_args; ++j) ev_above += evsz[j];
+                        int ev_src = total_abi + ev_above;  /* offset from current esp */
+                        if (f == 8) {
+                            sb_appendf(&out, "    movl %d(%%esp), %%eax\n", ev_src);
+                            sb_appendf(&out, "    movl %%eax, %d(%%esp)\n", abioff[i]);
+                            sb_appendf(&out, "    movl %d(%%esp), %%eax\n", ev_src + 4);
+                            sb_appendf(&out, "    movl %%eax, %d(%%esp)\n", abioff[i] + 4);
+                        } else if (f == 4) {
+                            sb_appendf(&out, "    fldl %d(%%esp)\n", ev_src);
+                            sb_appendf(&out, "    fstps %d(%%esp)\n", abioff[i]);
+                        } else {
+                            sb_appendf(&out, "    movl %d(%%esp), %%eax\n", ev_src);
+                            sb_appendf(&out, "    movl %%eax, %d(%%esp)\n", abioff[i]);
+                        }
+                    }
+                    sb_appendf(&out, "    call %s\n", inst->arg);
+                    sb_appendf(&out, "    addl $%d, %%esp\n", total_abi + total_ev);
+                    if (retf) {
+                        sb_append(&out, "    subl $8, %esp\n");
+                        sb_append(&out, "    fstpl (%esp)\n");
+                    } else {
+                        sb_append(&out, "    pushl %eax\n");
+                    }
+                    free(evsz); free(abisz); free(abioff);
+                    continue;
+                }
+            }
+
             if (ret_agg_size > 0) {
                 int ret_val_bytes = ((ret_agg_size + 15) / 16) * 16;
                 sb_appendf(&out, "    subl $%d, %%esp\n", ret_val_bytes);
@@ -394,6 +472,98 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
             sb_appendf(&out, "    andl $%ld, %%ecx\n", (long)(int)(~(unsigned int)(mask << bf_offset)));
             sb_append(&out, "    orl %eax, %ecx\n");
             sb_append(&out, "    movl %ecx, (%edi)\n");
+        } else if (strcmp(inst->op, "fconst") == 0) {
+            /* push the 8-byte double bit pattern: high word first so the low
+               word ends up at the lower (top-of-stack) address. */
+            unsigned long long bits = (unsigned long long)inst->value;
+            sb_appendf(&out, "    movl $%u, %%eax\n", (unsigned)(bits >> 32));
+            sb_append(&out, "    pushl %eax\n");
+            sb_appendf(&out, "    movl $%u, %%eax\n", (unsigned)(bits & 0xffffffffU));
+            sb_append(&out, "    pushl %eax\n");
+        } else if (strcmp(inst->op, "fadd") == 0 || strcmp(inst->op, "fsub") == 0 ||
+                   strcmp(inst->op, "fmul") == 0 || strcmp(inst->op, "fdiv") == 0) {
+            /* GAS AT&T swaps the operands of the non-commutative fsubp/fdivp, so
+               use the reverse forms to get lhs OP rhs = st(1) OP st(0). */
+            const char *fop = strcmp(inst->op, "fadd") == 0 ? "faddp" :
+                              strcmp(inst->op, "fsub") == 0 ? "fsubrp" :
+                              strcmp(inst->op, "fmul") == 0 ? "fmulp" : "fdivrp";
+            sb_append(&out, "    fldl 8(%esp)\n");   /* lhs -> st0 */
+            sb_append(&out, "    fldl (%esp)\n");    /* rhs -> st0, lhs -> st1 */
+            sb_appendf(&out, "    %s %%st, %%st(1)\n", fop); /* st1 = lhs OP rhs, pop */
+            sb_append(&out, "    addl $8, %esp\n");
+            sb_append(&out, "    fstpl (%esp)\n");
+        } else if (strcmp(inst->op, "fneg") == 0) {
+            sb_append(&out, "    fldl (%esp)\n");
+            sb_append(&out, "    fchs\n");
+            sb_append(&out, "    fstpl (%esp)\n");
+        } else if (strcmp(inst->op, "i2f") == 0) {
+            sb_append(&out, "    fildl (%esp)\n");
+            sb_append(&out, "    subl $4, %esp\n");
+            sb_append(&out, "    fstpl (%esp)\n");
+        } else if (strcmp(inst->op, "f2i") == 0) {
+            sb_append(&out, "    fldl (%esp)\n");
+            sb_append(&out, "    addl $4, %esp\n");
+            sb_append(&out, "    fisttpl (%esp)\n");  /* truncating store (SSE3) */
+        } else if (strcmp(inst->op, "d2f") == 0) {
+            sb_append(&out, "    fldl (%esp)\n");
+            sb_append(&out, "    fstps (%esp)\n");
+            sb_append(&out, "    flds (%esp)\n");
+            sb_append(&out, "    fstpl (%esp)\n");
+        } else if (strcmp(inst->op, "f<") == 0 || strcmp(inst->op, "f>") == 0 ||
+                   strcmp(inst->op, "f<=") == 0 || strcmp(inst->op, "f>=") == 0 ||
+                   strcmp(inst->op, "f==") == 0 || strcmp(inst->op, "f!=") == 0) {
+            sb_append(&out, "    fldl (%esp)\n");     /* rhs -> st0 */
+            sb_append(&out, "    fldl 8(%esp)\n");    /* lhs -> st0, rhs -> st1 */
+            sb_append(&out, "    addl $16, %esp\n");
+            sb_append(&out, "    fucomip %st(1), %st\n"); /* compare lhs vs rhs, pop lhs */
+            sb_append(&out, "    fstp %st(0)\n");          /* pop rhs */
+            const char *cc = strcmp(inst->op, "f<") == 0 ? "setb" :
+                             strcmp(inst->op, "f<=") == 0 ? "setbe" :
+                             strcmp(inst->op, "f>") == 0 ? "seta" :
+                             strcmp(inst->op, "f>=") == 0 ? "setae" :
+                             strcmp(inst->op, "f==") == 0 ? "sete" : "setne";
+            sb_appendf(&out, "    %s %%al\n", cc);
+            sb_append(&out, "    movzbl %al, %eax\n");
+            sb_append(&out, "    pushl %eax\n");
+        } else if (strcmp(inst->op, "fload4") == 0) {
+            sb_appendf(&out, "    flds -%ld(%%ebp)\n", (inst->value + 1) * 16);
+            sb_append(&out, "    subl $8, %esp\n");
+            sb_append(&out, "    fstpl (%esp)\n");
+        } else if (strcmp(inst->op, "fload8") == 0) {
+            sb_appendf(&out, "    fldl -%ld(%%ebp)\n", (inst->value + 1) * 16);
+            sb_append(&out, "    subl $8, %esp\n");
+            sb_append(&out, "    fstpl (%esp)\n");
+        } else if (strcmp(inst->op, "fstore4") == 0) {
+            sb_append(&out, "    fldl (%esp)\n");
+            sb_append(&out, "    addl $8, %esp\n");
+            sb_appendf(&out, "    fstps -%ld(%%ebp)\n", (inst->value + 1) * 16);
+        } else if (strcmp(inst->op, "fstore8") == 0) {
+            sb_append(&out, "    fldl (%esp)\n");
+            sb_append(&out, "    addl $8, %esp\n");
+            sb_appendf(&out, "    fstpl -%ld(%%ebp)\n", (inst->value + 1) * 16);
+        } else if (strcmp(inst->op, "fgload") == 0) {
+            int gsize = 4;
+            HashMapEntry *ge = hashmap_get(&ir_global_var_elem_scales, inst->arg);
+            if (ge) gsize = ge->val_int;
+            if (gsize == 4) sb_appendf(&out, "    flds %s\n", inst->arg);
+            else sb_appendf(&out, "    fldl %s\n", inst->arg);
+            sb_append(&out, "    subl $8, %esp\n");
+            sb_append(&out, "    fstpl (%esp)\n");
+        } else if (strcmp(inst->op, "fgstore") == 0) {
+            int gsize = 4;
+            HashMapEntry *ge = hashmap_get(&ir_global_var_elem_scales, inst->arg);
+            if (ge) gsize = ge->val_int;
+            sb_append(&out, "    fldl (%esp)\n");
+            sb_append(&out, "    addl $8, %esp\n");
+            if (gsize == 4) sb_appendf(&out, "    fstps %s\n", inst->arg);
+            else sb_appendf(&out, "    fstpl %s\n", inst->arg);
+        } else if (strcmp(inst->op, "fret") == 0) {
+            /* return value in st0 (i386 returns float and double in st0) */
+            sb_append(&out, "    fldl (%esp)\n");
+            sb_append(&out, "    addl $8, %esp\n");
+            if (frame)
+                sb_append(&out, "    leave\n");
+            sb_append(&out, "    ret\n");
         } else {
             char msg[128];
             snprintf(msg, sizeof(msg), "unknown IR op %s", inst->op);

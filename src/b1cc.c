@@ -1,3 +1,9 @@
+/* mkstemps() is a BSD/glibc extension; on Linux it needs _DEFAULT_SOURCE.
+   Harmless on Darwin, where it is declared unconditionally. */
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE
+#endif
+
 #include "diagnostics.h"
 #include "preprocessor.h"
 #include "lexer.h"

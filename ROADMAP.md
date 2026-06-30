@@ -109,7 +109,17 @@
 - [x] Improve aggregate layout for alignment, padding, nested structs, and `union`.
 - [x] Support arrays inside structs and reliable integer/pointer `.`/`->` field access for covered scalar, nested-struct, and array-field cases.
 - [x] Add function pointer declarators and calls without special parser shortcuts.
-- [ ] Qualifier semantics check and volatile access semantics.
+- [x] Qualifier semantics check and volatile access semantics. b1cc tracks the
+      top-level `const`/`volatile` qualifier on named local, global, and static
+      scalar/pointer objects and rejects assignment (`=` and compound `+=` etc.)
+      to a `const`-qualified object with a compile-time diagnostic. `volatile`
+      objects are tracked and every source-level access is preserved: b1cc does
+      no value caching, load/store elimination, or reordering of named accesses,
+      and its only optimization (the eval-stack push/pop peephole) never touches
+      named loads/stores. Covered by `tests/m14_qualifiers.c` and a negative
+      compile check. Not yet enforced: pointer-to-const *pointee* writes
+      (`*p = ...` where `p` is `const T *`), const struct/array element writes,
+      and const-correctness across function-argument passing.
 
 ## M15: Driver and ABI Regression Coverage
 
@@ -144,14 +154,37 @@
 - [x] Support designated initializers (e.g., `struct Point p = { .x = 1 }`).
 - [x] Support nested brace initializers for multidimensional arrays and structures.
 - [x] Support bitfield member declarations with packing (`type name : bits`) and pack/unpack via `bfi`/`ubfx` (ARM64) and shift/mask patterns (x86_64, i386).
-- [ ] Float/vector aggregate ABI classification (depends on floating-point types in M19).
+- [ ] Float/vector aggregate ABI classification. The scalar floating-point
+      foundation it depends on now exists (M19: float/double values, calls, and
+      returns on all three backends). Still to do: classify aggregates with
+      floating members (x86_64 SSE eightbyte class, arm64 homogeneous
+      floating aggregates in V0-V7) and route them through the by-value
+      call/return paths. i386 aggregate-by-value lowering is independently
+      incomplete and out of scope here.
 
 ## M19: Complete Type System & Math
 
-- [ ] Support floating-point types (`float`, `double`) with vector/FPU backend instructions and registers.
+- [x] Support **scalar** floating-point types (`float`, `double`) with FPU/SIMD
+      backend instructions and registers: float/double literals, locals,
+      globals (with IEEE-754 initializers), arithmetic (`+ - * /`), comparisons,
+      unary minus, and int↔float / float↔double conversions, plus float/double
+      function arguments and return values across the call boundary. Backends:
+      x86_64 SSE2 (`movsd`/`addsd`/`cvt*`, XMM regs, SysV xmm args/ret), arm64
+      AAPCS64 (`fadd`/`fcvt*`/`scvtf`, D/S regs, V0-V7 args/ret), i386 x87 FPU
+      (`fldl`/`faddp`/`fisttp`, st0 returns). Internally FP arithmetic is
+      evaluated at double precision and narrowed to `float` on store/return
+      (compute-in-double model). Verified runnable on x86_64 and i386
+      (`tests/m19_float_scalar.c`); arm64 codegen is assembly-validated.
+      Still pending: float/vector **aggregate** ABI (M18), `printf`-style
+      vararg float promotion, and `long double` beyond 64-bit.
 - [ ] Support `long long` 64-bit integer operations on 32-bit platforms (register pairs on i386).
 - [x] Add integer-only typing foundation for scalar C11 `_Bool`, C23 `bool`/`true`/`false`, tolerated `const`/`volatile`/`restrict` qualifiers, and usual integer promotions/conversions across current scalar integer types.
-- [ ] Complete qualifier semantics beyond parsing/tolerance, including const-correct diagnostics and volatile access semantics.
+- [x] Complete qualifier semantics beyond parsing/tolerance: const-correct
+      assignment diagnostics for top-level `const`-qualified named scalar/pointer
+      objects (local/global/static) and volatile access fidelity guaranteed by
+      non-caching codegen. See M14 for the exact supported subset and the
+      not-yet-covered cases (pointer-to-const pointee writes, const aggregate
+      element writes, const across argument passing).
 - [x] Implement bitfields packing/unpacking in aggregates (ARM64 `bfi`/`ubfx`, x86_64/i386 shift+mask; named and anonymous bitfields in top-level and local struct/union definitions).
 
 ## M20: Callee-Side Varargs & Self-Hosting

@@ -41,6 +41,7 @@ struct Node {
     NodeArray body;
     StringArray params;
     IntArray param_aggregate_sizes;
+    IntArray param_floats;
     int aggregate_size;
     const char *type_tag;
     LongArray array_dims;
@@ -49,6 +50,8 @@ struct Node {
     int is_unsigned;
     int type_size;
     int is_bool;
+    int is_float;     /* node yields a floating-point (float/double) value */
+    double fvalue;    /* literal value when op == "fnum" */
     int bit_offset;
     int bit_width;
     int line;

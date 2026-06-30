@@ -18,12 +18,16 @@ typedef struct {
     HashMap unsigned_vars;
     HashMap bool_vars;
     HashMap const_vars;
+    HashMap volatile_vars;
+    HashMap float_vars;
     HashMap value_sizes;
     HashMap var_struct_tags;
     int local_var_counter;
     int last_type_unsigned;
     int last_type_bool;
     int last_type_const;
+    int last_type_volatile;
+    int last_type_float;
 
     HashMap global_typedefs;
     HashMap global_typedef_sizes;

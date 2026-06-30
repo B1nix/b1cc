@@ -20,6 +20,8 @@ HashMap ir_local_var_is_pointer;
 HashMap ir_function_return_aggregate_sizes;
 HashMap ir_function_param_aggregate_sizes;
 HashMap ir_function_vararg_fixed_counts;
+HashMap ir_function_param_floats;     /* fn name -> IntArray(0/1 per param) */
+HashMap ir_function_return_floats;    /* fn name -> 1 if returns float/double */
 int ir_current_target_scale = 8;
 static B1CC_THREAD_LOCAL int ir_current_line = 1;
 static B1CC_THREAD_LOCAL int ir_current_col = 1;
@@ -33,9 +35,11 @@ typedef struct {
 static B1CC_THREAD_LOCAL LoopContextArray loop_contexts;
 static B1CC_THREAD_LOCAL int current_func_ret_size = 0;
 static B1CC_THREAD_LOCAL int current_func_ret_aggregate_size = 0;
+static B1CC_THREAD_LOCAL int current_func_ret_is_float = 0;
 
 static HashMap ir_var_unsigned;
 static HashMap ir_var_bool;
+static HashMap ir_var_float;
 static HashMap ir_var_type_size;
 static HashMap ir_var_struct_tag;
 static HashMap ir_struct_field_offsets;
@@ -276,11 +280,29 @@ void ir_reset_state(void) {
     hashmap_free(&ir_function_vararg_fixed_counts);
     hashmap_init(&ir_function_vararg_fixed_counts, 64);
 
+    for (int b = 0; b < ir_function_param_floats.bucket_count; ++b) {
+        HashMapEntry *curr = ir_function_param_floats.buckets[b];
+        while (curr) {
+            IntArray *arr = (IntArray *)curr->val_ptr;
+            int_array_free(arr);
+            free(arr);
+            curr = curr->next;
+        }
+    }
+    hashmap_free(&ir_function_param_floats);
+    hashmap_init(&ir_function_param_floats, 64);
+
+    hashmap_free(&ir_function_return_floats);
+    hashmap_init(&ir_function_return_floats, 64);
+
     hashmap_free(&ir_var_unsigned);
     hashmap_init(&ir_var_unsigned, 64);
 
     hashmap_free(&ir_var_bool);
     hashmap_init(&ir_var_bool, 64);
+
+    hashmap_free(&ir_var_float);
+    hashmap_init(&ir_var_float, 64);
 
     hashmap_free(&ir_var_type_size);
     hashmap_init(&ir_var_type_size, 64);
@@ -437,6 +459,13 @@ void ir_set_var_unsigned(const char *name, int val) {
 }
 void ir_set_var_bool(const char *name, int val) {
     hashmap_put(&ir_var_bool, name, nullptr, val);
+}
+void ir_set_var_float(const char *name, int val) {
+    hashmap_put(&ir_var_float, name, nullptr, val);
+}
+int ir_get_var_float(const char *name) {
+    HashMapEntry *entry = hashmap_get(&ir_var_float, name);
+    return entry ? entry->val_int : 0;
 }
 void ir_set_var_type_size(const char *name, int val) {
     hashmap_put(&ir_var_type_size, name, nullptr, val);
@@ -618,6 +647,31 @@ static LongArray get_node_dims(const Node *node, const IrFunction *fn) {
     return out;
 }
 
+/* Reinterpret a double's bit pattern as a 64-bit integer for the IR stream.
+   The eval stack carries floating values as their 8-byte double bit pattern;
+   backends move them into FP registers for arithmetic. */
+static long ir_double_to_bits(double d) {
+    long v;
+    memcpy(&v, &d, sizeof(v));
+    return v;
+}
+
+/* True when an expression node yields a floating-point value. */
+static int ir_expr_is_float(const Node *n) {
+    if (!n) return 0;
+    if (n->is_float) return 1;
+    if (strcmp(n->op, "fnum") == 0) return 1;
+    if (strcmp(n->op, "call") == 0) {
+        const char *cn = n->name;
+        if (n->lhs && strcmp(n->lhs->op, "var") == 0) cn = n->lhs->name;
+        if (cn && cn[0]) {
+            HashMapEntry *e = hashmap_get(&ir_function_return_floats, cn);
+            if (e) return e->val_int;
+        }
+    }
+    return 0;
+}
+
 static void ir_push(IrFunction *fn, const char *op, const char *arg, long value) {
     IrInst inst;
     inst.op = op;
@@ -731,9 +785,26 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         ir_push(fn, "const", "", node->value);
         return;
     }
+    if (strcmp(node->op, "fnum") == 0) {
+        /* float literal: 4-byte literals are still materialised as the double
+           bit pattern (compute-in-double model); the 4-byte storage type is
+           applied on store / in aggregates. */
+        ir_push(fn, "fconst", "", ir_double_to_bits(node->fvalue));
+        return;
+    }
     if (strcmp(node->op, "cast") == 0) {
         lower_expr(node->lhs, fn, backend, arena);
-        if (node->value > 0 && node->value < 8) {
+        int src_float = ir_expr_is_float(node->lhs);
+        int dst_float = node->is_float;
+        if (dst_float && !src_float) {
+            ir_push(fn, "i2f", "", 0);            /* int -> double */
+        } else if (!dst_float && src_float) {
+            ir_push(fn, "f2i", "", node->value);  /* double -> int (truncate) */
+        } else if (dst_float && src_float) {
+            if (node->value == 4) {
+                ir_push(fn, "d2f", "", 0);        /* round to float precision */
+            }
+        } else if (node->value > 0 && node->value < 8) {
             ir_push(fn, "cast", "", node->value);
         }
         return;
@@ -823,19 +894,21 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
     }
     if (strcmp(node->op, "unary_-") == 0) {
         lower_expr(node->lhs, fn, backend, arena);
-        ir_push(fn, "neg", "", 0);
+        ir_push(fn, ir_expr_is_float(node->lhs) ? "fneg" : "neg", "", 0);
         return;
     }
     if (strcmp(node->op, "var") == 0) {
+        int is_flt = node->is_float;
+        const char *flop = (node->type_size == 4) ? "fload4" : "fload8";
         HashMapEntry *loc_entry = hashmap_get(&fn->locals, node->name);
         if (loc_entry) {
-            ir_push(fn, "load", "", loc_entry->val_int);
+            ir_push(fn, is_flt ? flop : "load", "", loc_entry->val_int);
         } else if (hashmap_has(&ir_global_struct_vars, node->name)) {
             ir_push(fn, "gaddr", node->name, 0);
         } else if (hashmap_has(&ir_global_arrays, node->name)) {
             ir_push(fn, "gaddr", node->name, 0);
         } else if (hashmap_has(&ir_global_vars, node->name)) {
-            ir_push(fn, "gload", node->name, 0);
+            ir_push(fn, is_flt ? "fgload" : "gload", node->name, 0);
         } else {
             ir_push(fn, "gaddr", node->name, 0);
         }
@@ -1051,6 +1124,18 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         long_array_free(&current_dims);
         return;
     }
+    if (node->is_float && (strcmp(node->op, "+") == 0 || strcmp(node->op, "-") == 0 ||
+                           strcmp(node->op, "*") == 0 || strcmp(node->op, "/") == 0)) {
+        lower_expr(node->lhs, fn, backend, arena);
+        if (!ir_expr_is_float(node->lhs)) ir_push(fn, "i2f", "", 0);
+        lower_expr(node->rhs, fn, backend, arena);
+        if (!ir_expr_is_float(node->rhs)) ir_push(fn, "i2f", "", 0);
+        const char *fop = strcmp(node->op, "+") == 0 ? "fadd" :
+                          strcmp(node->op, "-") == 0 ? "fsub" :
+                          strcmp(node->op, "*") == 0 ? "fmul" : "fdiv";
+        ir_push(fn, fop, "", 0);
+        return;
+    }
     if (strcmp(node->op, "+") == 0 || strcmp(node->op, "-") == 0) {
         int left_scale = get_expr_pointer_scale(node->lhs, fn);
         int right_scale = get_expr_pointer_scale(node->rhs, fn);
@@ -1086,6 +1171,20 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         return;
     }
     
+    /* Floating comparisons: operands are float even though the result is int. */
+    if ((ir_expr_is_float(node->lhs) || ir_expr_is_float(node->rhs)) &&
+        (strcmp(node->op, "<") == 0 || strcmp(node->op, ">") == 0 ||
+         strcmp(node->op, "<=") == 0 || strcmp(node->op, ">=") == 0 ||
+         strcmp(node->op, "==") == 0 || strcmp(node->op, "!=") == 0)) {
+        lower_expr(node->lhs, fn, backend, arena);
+        if (!ir_expr_is_float(node->lhs)) ir_push(fn, "i2f", "", 0);
+        lower_expr(node->rhs, fn, backend, arena);
+        if (!ir_expr_is_float(node->rhs)) ir_push(fn, "i2f", "", 0);
+        char fcmp[8];
+        snprintf(fcmp, sizeof(fcmp), "f%s", node->op);
+        ir_push(fn, arena_strdup(arena, fcmp), "", 0);
+        return;
+    }
     lower_expr(node->lhs, fn, backend, arena);
     lower_expr(node->rhs, fn, backend, arena);
     const char *op = node->op;
@@ -1241,17 +1340,27 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
         hashmap_put(&fn->locals, stmt->name, nullptr, slot);
         if (stmt->lhs) {
             lower_expr(stmt->lhs, fn, backend, arena);
-            ir_push(fn, "store", "", slot);
+            if (stmt->is_float) {
+                if (!ir_expr_is_float(stmt->lhs)) ir_push(fn, "i2f", "", 0);
+                ir_push(fn, stmt->type_size == 4 ? "fstore4" : "fstore8", "", slot);
+            } else {
+                ir_push(fn, "store", "", slot);
+            }
         }
     } else if (strcmp(stmt->op, "assign") == 0) {
         HashMapEntry *loc_entry = hashmap_get(&fn->locals, stmt->name);
         if (loc_entry) {
             int size = ir_get_var_type_size(stmt->name);
+            int is_flt = ir_get_var_float(stmt->name);
             int rhs_is_call = (strcmp(stmt->lhs->op, "call") == 0);
             if (size > 8 && !rhs_is_call) {
                 lower_addr(stmt->lhs, fn, backend, arena);
                 ir_push(fn, "load", "", loc_entry->val_int);
                 ir_push(fn, "copy", "", size);
+            } else if (is_flt) {
+                lower_expr(stmt->lhs, fn, backend, arena);
+                if (!ir_expr_is_float(stmt->lhs)) ir_push(fn, "i2f", "", 0);
+                ir_push(fn, size == 4 ? "fstore4" : "fstore8", "", loc_entry->val_int);
             } else {
                 lower_expr(stmt->lhs, fn, backend, arena);
                 if (size > 8) {
@@ -1263,11 +1372,16 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
             }
         } else if (hashmap_has(&ir_global_vars, stmt->name)) {
             int size = ir_get_var_type_size(stmt->name);
+            int is_flt = ir_get_var_float(stmt->name);
             int rhs_is_call = (strcmp(stmt->lhs->op, "call") == 0);
             if (size > 8 && !rhs_is_call) {
                 lower_addr(stmt->lhs, fn, backend, arena);
                 ir_push(fn, "gaddr", stmt->name, 0);
                 ir_push(fn, "copy", "", size);
+            } else if (is_flt) {
+                lower_expr(stmt->lhs, fn, backend, arena);
+                if (!ir_expr_is_float(stmt->lhs)) ir_push(fn, "i2f", "", 0);
+                ir_push(fn, "fgstore", stmt->name, 0);
             } else {
                 lower_expr(stmt->lhs, fn, backend, arena);
                 if (size > 8) {
@@ -1290,6 +1404,14 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
         }
         if (stmt->lhs) {
             lower_expr(stmt->lhs, fn, backend, arena);
+        }
+        if (current_func_ret_is_float) {
+            if (stmt->lhs && !ir_expr_is_float(stmt->lhs)) {
+                ir_push(fn, "i2f", "", 0);
+            }
+            /* fret carries the return width: 4 -> narrow double to single in xmm0. */
+            ir_push(fn, "fret", "", current_func_ret_size);
+            return;
         }
         if (current_func_ret_size > 0 && current_func_ret_size < 8) {
             ir_push(fn, "cast", "", current_func_ret_size);
@@ -1529,7 +1651,8 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
 static void lower_func(const Node *ast, TargetBackend *backend, Arena *arena, IrFunction *fn) {
     current_func_ret_size = (int)ast->value;
     current_func_ret_aggregate_size = ast->aggregate_size;
-    
+    current_func_ret_is_float = ast->is_float;
+
     fn->name = ast->name;
     
     string_array_init(&fn->params);
@@ -1594,6 +1717,15 @@ IrFunctionArray ir_lower_program(const NodeArray *ast, const char *target, Arena
             int_array_push(param_sizes, ast->data[k]->param_aggregate_sizes.data[p_i]);
         }
         hashmap_put(&ir_function_param_aggregate_sizes, ast->data[k]->name, param_sizes, 0);
+
+        IntArray *param_fl = malloc(sizeof(IntArray));
+        int_array_init(param_fl);
+        for (int p_i = 0; p_i < ast->data[k]->param_floats.count; ++p_i) {
+            int_array_push(param_fl, ast->data[k]->param_floats.data[p_i]);
+        }
+        hashmap_put(&ir_function_param_floats, ast->data[k]->name, param_fl, 0);
+        hashmap_put(&ir_function_return_floats, ast->data[k]->name, nullptr,
+                    ast->data[k]->is_float ? (int)ast->data[k]->value : 0);
 
         int vararg_fixed = -1;
         for (int p_i = 0; p_i < ast->data[k]->params.count; ++p_i) {

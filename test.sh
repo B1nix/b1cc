@@ -521,6 +521,41 @@ set -e
 test "$rc" = 0
 echo "ok m14_promotions"
 
+./build/b1cc tests/m19_float_scalar.c -o "$tmp/m19_float_scalar"
+set +e
+"$tmp/m19_float_scalar"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok m19_float_scalar"
+
+# M19: float/double scalar codegen also targets x86_64 and i386 backends.
+./build/b1cc --target=x86_64-b1nix tests/m19_float_scalar.c -S -o "$tmp/m19_float_scalar_x86_64.s"
+grep -q 'mulsd\|addsd\|cvtsi2sd' "$tmp/m19_float_scalar_x86_64.s"
+echo "ok m19_float_scalar_x86_64_asm"
+
+./build/b1cc --target=i386-b1nix tests/m19_float_scalar.c -S -o "$tmp/m19_float_scalar_i386.s"
+grep -q 'fmulp\|faddp\|fildl' "$tmp/m19_float_scalar_i386.s"
+echo "ok m19_float_scalar_i386_asm"
+
+./build/b1cc tests/m14_qualifiers.c -o "$tmp/m14_qualifiers"
+set +e
+"$tmp/m14_qualifiers"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok m14_qualifiers"
+
+# M14: writing to a const-qualified object is rejected at compile time.
+printf '%s\n' 'int main(void){ const int x = 1; x = 2; return x; }' > "$tmp/m14_const_violation.c"
+set +e
+./build/b1cc "$tmp/m14_const_violation.c" -S -o "$tmp/m14_const_violation.s" 2> "$tmp/m14_const_violation.err"
+rc=$?
+set -e
+test "$rc" != 0
+grep -q "const-qualified" "$tmp/m14_const_violation.err"
+echo "ok m14_const_violation_rejected"
+
 ./build/b1cc tests/m15_debug.c -S -o "$tmp/m15_debug.s"
 grep -q '\.file 1 "tests/m15_debug.c"' "$tmp/m15_debug.s"
 grep -q '\.loc 1 ' "$tmp/m15_debug.s"
