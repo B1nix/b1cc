@@ -208,4 +208,15 @@
 - Aggregate assignment/copy support is still pragmatic and test-driven; do not claim complete ISO C aggregate semantics beyond the covered struct/union assignment, by-value copy, and ABI regression tests.
 - Aggregate ABI support remains pragmatic and test-driven. The covered ARM64 Darwin and B1NIX assembly tests include large and float aggregates, but future target ABI classes should still land with explicit regression tests.
 
+## M21: On-The-Fly Preprocessor Macro Expansion & X-Macros
+
+- [ ] Move macro expansion from a post-preprocessing phase in `lex()` to on-the-fly expansion during `preprocessor_preprocess()` (Translation Phase 4).
+- [ ] Fix the `#undef` shadowing issue where macros defined and undefined inside headers (like temporary generator macros in X-macro patterns, e.g., `__define_stab` in `stab.h`) are never expanded because they are removed before post-preprocess tokenization.
+
+## M22: GNU C Extensions & Kernel / TCC Compilation Support
+
+- [ ] Support GCC-style inline assembly (`__asm__`, `__asm__ __volatile__`, or `asm`) declarations and statements, mapping basic register constraints or treating them as inline pass-throughs.
+- [ ] Support standard GCC attribute tags (`__attribute__((...))`) and calling convention qualifiers for target compliance.
+- [ ] Support additional C standard header definitions and structures needed to compile complex external C programs (like `b1nix` kernel or TCC).
+
 Skipped: full C/C++ upfront. Add features only when a test or B1NIX source needs them.

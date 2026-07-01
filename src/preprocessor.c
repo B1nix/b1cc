@@ -379,6 +379,78 @@ static const char *find_include_file(const char *name, bool is_angled, const cha
     return nullptr;
 }
 
+static const char *strip_comments(const char *src, Arena *arena) {
+    size_t len = strlen(src);
+    StringBuilder sb;
+    sb_init(&sb);
+    size_t i = 0;
+    bool in_string = false;
+    bool in_char = false;
+    while (i < len) {
+        if (in_string) {
+            if (src[i] == '\\' && i + 1 < len) {
+                sb_append_char(&sb, src[i]);
+                sb_append_char(&sb, src[i + 1]);
+                i += 2;
+            } else if (src[i] == '"') {
+                in_string = false;
+                sb_append_char(&sb, src[i]);
+                i++;
+            } else {
+                sb_append_char(&sb, src[i]);
+                i++;
+            }
+        } else if (in_char) {
+            if (src[i] == '\\' && i + 1 < len) {
+                sb_append_char(&sb, src[i]);
+                sb_append_char(&sb, src[i + 1]);
+                i += 2;
+            } else if (src[i] == '\'') {
+                in_char = false;
+                sb_append_char(&sb, src[i]);
+                i++;
+            } else {
+                sb_append_char(&sb, src[i]);
+                i++;
+            }
+        } else {
+            if (src[i] == '"') {
+                in_string = true;
+                sb_append_char(&sb, src[i]);
+                i++;
+            } else if (src[i] == '\'') {
+                in_char = true;
+                sb_append_char(&sb, src[i]);
+                i++;
+            } else if (i + 1 < len && src[i] == '/' && src[i + 1] == '/') {
+                i += 2;
+                sb_append_char(&sb, ' ');
+                while (i < len && src[i] != '\n') {
+                    i++;
+                }
+            } else if (i + 1 < len && src[i] == '/' && src[i + 1] == '*') {
+                i += 2;
+                sb_append_char(&sb, ' ');
+                while (i + 1 < len && !(src[i] == '*' && src[i + 1] == '/')) {
+                    if (src[i] == '\n') {
+                        sb_append_char(&sb, '\n');
+                    }
+                    i++;
+                }
+                if (i + 1 < len) {
+                    i += 2;
+                }
+            } else {
+                sb_append_char(&sb, src[i]);
+                i++;
+            }
+        }
+    }
+    const char *res = sb_to_string(&sb, arena);
+    sb_free(&sb);
+    return res;
+}
+
 static const char *join_continuation_lines(const char *src, Arena *arena) {
     size_t len = strlen(src);
     StringBuilder sb;
@@ -400,7 +472,7 @@ static const char *join_continuation_lines(const char *src, Arena *arena) {
 }
 
 const char *preprocessor_preprocess(const char *raw_src, const char *filepath, StringArray *include_dirs, HashMap *macros, HashMap *included_files, Arena *arena) {
-    const char *src = join_continuation_lines(raw_src, arena);
+    const char *src = join_continuation_lines(strip_comments(raw_src, arena), arena);
     StringBuilder out;
     sb_init(&out);
 

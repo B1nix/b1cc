@@ -3318,7 +3318,14 @@ static Node *function(ParserState *p, int is_static) {
                     take_star(p);
                 }
                 skip_type_qualifiers(p);
-                param_name = take(p, nullptr);
+                if (is_alpha(peek(p)[0])) {
+                    param_name = take(p, nullptr);
+                } else {
+                    char dummy_name[64];
+                    static int dummy_counter = 0;
+                    snprintf(dummy_name, sizeof(dummy_name), "__dummy_ptr_param_%d", dummy_counter++);
+                    param_name = arena_strdup(p->arena, dummy_name);
+                }
                 take(p, ")");
                 parse_function_pointer_param_floats(p, &func_ptr_param_floats);
                 has_func_ptr_signature = 1;
@@ -3328,7 +3335,14 @@ static Node *function(ParserState *p, int is_static) {
                 is_func_ptr = 1;
                 is_param_pointer = 1;
             } else {
-                param_name = take(p, nullptr);
+                if (is_alpha(peek(p)[0])) {
+                    param_name = take(p, nullptr);
+                } else {
+                    char dummy_name[64];
+                    static int dummy_counter = 0;
+                    snprintf(dummy_name, sizeof(dummy_name), "__dummy_param_%d", dummy_counter++);
+                    param_name = arena_strdup(p->arena, dummy_name);
+                }
             }
             
             // Check if parameter is array type
@@ -3956,16 +3970,31 @@ NodeArray parser_parse(const TokenArray *tokens, int target_scale, Arena *arena)
                 alias_struct_tag = "";
             } else {
                 alias = take(&state, nullptr);
-                while (strcmp(peek(&state), "[") == 0) {
-                    take(&state, "[");
-                    if (strcmp(peek(&state), "]") != 0) {
-                        Node *dim_expr = expr(&state);
-                        long dim = eval_const(&state, dim_expr);
-                        if (dim > 0) {
-                            alias_size = (int)(alias_size * dim);
+                if (strcmp(peek(&state), "(") == 0) {
+                    int depth = 0;
+                    int keep_scanning = 1;
+                    while (keep_scanning && state.pos < state.tokens.count) {
+                        if (strcmp(peek(&state), "(") == 0) depth++;
+                        else if (strcmp(peek(&state), ")") == 0) depth--;
+                        take(&state, nullptr);
+                        if (depth <= 0) {
+                            keep_scanning = 0;
                         }
                     }
-                    take(&state, "]");
+                    alias_size = state.target_scale;
+                    alias_struct_tag = "";
+                } else {
+                    while (strcmp(peek(&state), "[") == 0) {
+                        take(&state, "[");
+                        if (strcmp(peek(&state), "]") != 0) {
+                            Node *dim_expr = expr(&state);
+                            long dim = eval_const(&state, dim_expr);
+                            if (dim > 0) {
+                                alias_size = (int)(alias_size * dim);
+                            }
+                        }
+                        take(&state, "]");
+                    }
                 }
             }
             take(&state, ";");
