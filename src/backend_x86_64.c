@@ -77,8 +77,42 @@ static const char *x86_64_emit_globals(TargetBackend *self, const IrGlobalVarArr
         sb_appendf(&out, "%s:\n", g->name);
 
         if (g->is_array || g->initializers.count > 1) {
-            for (int k = 0; k < g->initializers.count; ++k) {
-                long val = g->initializers.data[k];
+            int k = 0;
+            while (k < g->initializers.count) {
+                if (g->initializer_is_string.count > k && g->initializer_is_string.data[k]) {
+                    int str_idx = (int)g->initializers.data[k];
+                    const char *str_lbl = g->strings.data[str_idx].first;
+                    if (g->elem_size == 1) {
+                        sb_appendf(&out, "    .quad %s\n", str_lbl);
+                        k += 8;
+                    } else {
+                        sb_appendf(&out, "    .quad %s\n", str_lbl);
+                        k++;
+                    }
+                } else {
+                    long val = g->initializers.data[k];
+                    if (g->elem_size == 1)
+                        sb_appendf(&out, "    .byte %d\n", (int)(val & 0xff));
+                    else if (g->elem_size == 2)
+                        sb_appendf(&out, "    .short %d\n", (int)(val & 0xffff));
+                    else if (g->elem_size == 4)
+                        sb_appendf(&out, "    .long %ld\n", val);
+                    else
+                        sb_appendf(&out, "    .quad %ld\n", val);
+                    k++;
+                }
+            }
+            long remaining = g->size - g->initializers.count;
+            if (remaining > 0) {
+                sb_appendf(&out, "    .zero %ld\n", remaining * g->elem_size);
+            }
+        } else {
+            if (g->initializer_is_string.count > 0 && g->initializer_is_string.data[0]) {
+                int str_idx = (int)g->initializers.data[0];
+                const char *str_lbl = g->strings.data[str_idx].first;
+                sb_appendf(&out, "    .quad %s\n", str_lbl);
+            } else {
+                long val = (g->initializers.count == 0) ? 0 : g->initializers.data[0];
                 if (g->elem_size == 1)
                     sb_appendf(&out, "    .byte %d\n", (int)(val & 0xff));
                 else if (g->elem_size == 2)
@@ -88,20 +122,24 @@ static const char *x86_64_emit_globals(TargetBackend *self, const IrGlobalVarArr
                 else
                     sb_appendf(&out, "    .quad %ld\n", val);
             }
-            long remaining = g->size - g->initializers.count;
-            if (remaining > 0) {
-                sb_appendf(&out, "    .zero %ld\n", remaining * g->elem_size);
+        }
+    }
+    sb_append(&out, "\n");
+
+    int has_any_global_strings = 0;
+    for (int i = 0; i < globals->count; ++i) {
+        if (globals->data[i].strings.count > 0) {
+            has_any_global_strings = 1;
+            break;
+        }
+    }
+    if (has_any_global_strings) {
+        sb_append(&out, ".section .rodata\n");
+        for (int i = 0; i < globals->count; ++i) {
+            const IrGlobalVar *g = &globals->data[i];
+            for (int k = 0; k < g->strings.count; ++k) {
+                sb_appendf(&out, "%s:\n    .asciz \"%s\"\n", g->strings.data[k].first, g->strings.data[k].second);
             }
-        } else {
-            long val = (g->initializers.count == 0) ? 0 : g->initializers.data[0];
-            if (g->elem_size == 1)
-                sb_appendf(&out, "    .byte %d\n", (int)(val & 0xff));
-            else if (g->elem_size == 2)
-                sb_appendf(&out, "    .short %d\n", (int)(val & 0xffff));
-            else if (g->elem_size == 4)
-                sb_appendf(&out, "    .long %ld\n", val);
-            else
-                sb_appendf(&out, "    .quad %ld\n", val);
         }
     }
     sb_append(&out, "\n");
@@ -131,10 +169,18 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
     sb_appendf(&out, ".type %s, @function\n", fn->name);
     sb_appendf(&out, "%s:\n", fn->name);
 
+    int is_vararg = 0;
+    if (fn->params.count > 0 && strcmp(fn->params.data[fn->params.count - 1], "...") == 0) {
+        is_vararg = 1;
+    }
     int indirect_ret = (fn->return_aggregate_size > 16);
-    int local_slots = fn->locals.size;
+    int local_slots_before = fn->locals.size;
     if (indirect_ret) {
-        local_slots++;
+        local_slots_before++;
+    }
+    int local_slots = local_slots_before;
+    if (is_vararg) {
+        local_slots += 3;
     }
     int frame = fn->has_call || (local_slots > 0);
     if (frame) {
@@ -143,8 +189,17 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
         if (local_slots > 0) {
             sb_appendf(&out, "    subq $%d, %%rsp\n", local_slots * 16);
         }
+        if (is_vararg) {
+            int base_off = -(local_slots_before * 16);
+            sb_appendf(&out, "    movq %%rdi, %d(%%rbp)\n", base_off - 48);
+            sb_appendf(&out, "    movq %%rsi, %d(%%rbp)\n", base_off - 40);
+            sb_appendf(&out, "    movq %%rdx, %d(%%rbp)\n", base_off - 32);
+            sb_appendf(&out, "    movq %%rcx, %d(%%rbp)\n", base_off - 24);
+            sb_appendf(&out, "    movq %%r8,  %d(%%rbp)\n", base_off - 16);
+            sb_appendf(&out, "    movq %%r9,  %d(%%rbp)\n", base_off - 8);
+        }
         if (indirect_ret) {
-            int off = -(local_slots * 16);
+            int off = -(local_slots_before * 16);
             sb_appendf(&out, "    movq %%rdi, %d(%%rbp)\n", off);
         }
         int abi_word = indirect_ret ? 1 : 0;
@@ -236,6 +291,63 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
         } else if (strcmp(inst->op, "load") == 0) {
             sb_appendf(&out, "    movq -%ld(%%rbp), %%rax\n", (inst->value + 1) * 16);
             sb_append(&out, "    pushq %rax\n");
+        } else if (strcmp(inst->op, "va_start") == 0) {
+            int num_fixed = fn->params.count;
+            if (num_fixed > 0 && strcmp(fn->params.data[num_fixed - 1], "...") == 0) {
+                num_fixed--;
+            }
+            int indirect_ret = (fn->return_aggregate_size > 16);
+            int abi_word = indirect_ret ? 1 : 0;
+            int stack_word = 0;
+            int sse_word = 0;
+            IntArray *prologue_floats = nullptr;
+            IntArray *prologue_agg_floats = nullptr;
+            {
+                HashMapEntry *pfe = hashmap_get(&ir_function_param_floats, fn->name);
+                if (pfe) prologue_floats = (IntArray *)pfe->val_ptr;
+                HashMapEntry *paf = hashmap_get(&ir_function_param_aggregate_float_classes, fn->name);
+                if (paf) prologue_agg_floats = (IntArray *)paf->val_ptr;
+            }
+            for (int i = 0; i < num_fixed; ++i) {
+                int agg_size = (i < fn->param_aggregate_sizes.count) ? fn->param_aggregate_sizes.data[i] : 0;
+                int agg_float = (prologue_agg_floats && i < prologue_agg_floats->count) ? prologue_agg_floats->data[i] : 0;
+                int p_float = (prologue_floats && i < prologue_floats->count) ? prologue_floats->data[i] : 0;
+                if (p_float && sse_word < 8) {
+                    sse_word++;
+                    continue;
+                }
+                if (agg_size > 0 && agg_float) {
+                    int slots = x86_64_agg_sse_slots(agg_float);
+                    if (sse_word + slots <= 8) {
+                        sse_word += slots;
+                    } else {
+                        stack_word += slots;
+                    }
+                    continue;
+                }
+                int words = (agg_size > 0) ? ((agg_size + 7) / 8) : 1;
+                int in_regs = 0;
+                if (agg_size > 0 && agg_size <= 16) {
+                    in_regs = (abi_word + words <= 6);
+                } else if (agg_size == 0) {
+                    in_regs = (abi_word + 1 <= 6);
+                }
+                if (in_regs) {
+                    abi_word += words;
+                } else {
+                    stack_word += words;
+                }
+            }
+            int local_slots_before = fn->locals.size + (indirect_ret ? 1 : 0);
+            int base_off = -(local_slots_before * 16);
+            if (abi_word < 6) {
+                int off = base_off - 48 + abi_word * 8;
+                sb_appendf(&out, "    leaq %d(%%rbp), %%rax\n", off);
+            } else {
+                int off = 16 + stack_word * 8;
+                sb_appendf(&out, "    leaq %d(%%rbp), %%rax\n", off);
+            }
+            sb_appendf(&out, "    movq %%rax, -%ld(%%rbp)\n", (inst->value + 1) * 16);
         } else if (strcmp(inst->op, "str") == 0) {
             sb_appendf(&out, "    leaq %s(%%rip), %%rax\n", inst->arg);
             sb_append(&out, "    pushq %rax\n");
@@ -247,6 +359,18 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
             sb_append(&out, "    pushq %rax\n");
         } else if (strcmp(inst->op, "pop") == 0) {
             sb_append(&out, "    addq $8, %rsp\n");
+        } else if (strcmp(inst->op, "load_addr") == 0) {
+            sb_append(&out, "    popq %rax\n");
+            if (inst->value == 1) {
+                sb_append(&out, "    movsbq (%rax), %rax\n");
+            } else if (inst->value == 2) {
+                sb_append(&out, "    movswq (%rax), %rax\n");
+            } else if (inst->value == 4) {
+                sb_append(&out, "    movslq (%rax), %rax\n");
+            } else {
+                sb_append(&out, "    movq (%rax), %rax\n");
+            }
+            sb_append(&out, "    pushq %rax\n");
         } else if (strcmp(inst->op, "+") == 0 || strcmp(inst->op, "-") == 0 || strcmp(inst->op, "*") == 0 ||
                    strcmp(inst->op, "/") == 0 || strcmp(inst->op, "%") == 0 || strcmp(inst->op, "==") == 0 || strcmp(inst->op, "!=") == 0 ||
                    strcmp(inst->op, "<") == 0 || strcmp(inst->op, ">") == 0 || strcmp(inst->op, "<=") == 0 ||
@@ -319,7 +443,8 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                 sb_append(&out, "    movzbq %al, %rax\n");
             }
             sb_append(&out, "    pushq %rax\n");
-        } else if (strcmp(inst->op, "~") == 0 || strcmp(inst->op, "!") == 0 || strcmp(inst->op, "neg") == 0 || strcmp(inst->op, "cast") == 0) {
+        } else if (strcmp(inst->op, "~") == 0 || strcmp(inst->op, "!") == 0 || strcmp(inst->op, "neg") == 0 ||
+                   strcmp(inst->op, "cast") == 0 || strcmp(inst->op, "ucast") == 0) {
             sb_append(&out, "    popq %rax\n");
             if (strcmp(inst->op, "~") == 0)
                 sb_append(&out, "    notq %rax\n");
@@ -332,6 +457,13 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                     sb_append(&out, "    movswq %ax, %rax\n");
                 else if (inst->value == 4)
                     sb_append(&out, "    movslq %eax, %rax\n");
+            } else if (strcmp(inst->op, "ucast") == 0) {
+                if (inst->value == 1)
+                    sb_append(&out, "    movzbq %al, %rax\n");
+                else if (inst->value == 2)
+                    sb_append(&out, "    movzwq %ax, %rax\n");
+                else if (inst->value == 4)
+                    sb_append(&out, "    movl %eax, %eax\n");
             } else {
                 sb_append(&out, "    cmpq $0, %rax\n");
                 sb_append(&out, "    sete %al\n");

@@ -42,6 +42,7 @@ static B1CC_THREAD_LOCAL LoopContextArray loop_contexts;
 static B1CC_THREAD_LOCAL int current_func_ret_size = 0;
 static B1CC_THREAD_LOCAL int current_func_ret_aggregate_size = 0;
 static B1CC_THREAD_LOCAL int current_func_ret_is_float = 0;
+static B1CC_THREAD_LOCAL int current_func_ret_is_unsigned = 0;
 
 static HashMap ir_var_unsigned;
 static HashMap ir_var_bool;
@@ -81,6 +82,8 @@ void ir_global_var_array_push(IrGlobalVarArray *arr, const IrGlobalVar *val) {
     arr->data[arr->count].is_array = val->is_array;
     arr->data[arr->count].size = val->size;
     arr->data[arr->count].initializers = val->initializers;
+    arr->data[arr->count].initializer_is_string = val->initializer_is_string;
+    arr->data[arr->count].strings = val->strings;
     arr->data[arr->count].is_static = val->is_static;
     arr->data[arr->count].is_extern = val->is_extern;
     arr->data[arr->count].elem_size = val->elem_size;
@@ -88,6 +91,11 @@ void ir_global_var_array_push(IrGlobalVarArray *arr, const IrGlobalVar *val) {
     arr->count = arr->count + 1;
 }
 void ir_global_var_array_free(IrGlobalVarArray *arr) {
+    for (int i = 0; i < arr->count; ++i) {
+        long_array_free(&arr->data[i].initializers);
+        int_array_free(&arr->data[i].initializer_is_string);
+        string_pair_array_free(&arr->data[i].strings);
+    }
     free(arr->data);
     arr->data = nullptr;
     arr->count = 0;
@@ -427,6 +435,8 @@ void ir_declare_global(const char *name, int is_array, long size, int is_static,
     v.is_array = is_array;
     v.size = size;
     long_array_init(&v.initializers);
+    int_array_init(&v.initializer_is_string);
+    string_pair_array_init(&v.strings);
     v.is_static = is_static;
     v.is_extern = is_extern;
     v.elem_size = elem_size;
@@ -444,6 +454,15 @@ void ir_mark_global_struct(const char *name) {
     hashmap_put(&ir_global_struct_vars, name, nullptr, 1);
 }
 
+void ir_set_global_align(const char *name, int align) {
+    for (int i = 0; i < ir_global_decls.count; ++i) {
+        if (strcmp(ir_global_decls.data[i].name, name) == 0) {
+            ir_global_decls.data[i].align = align;
+            break;
+        }
+    }
+}
+
 void ir_set_global_array_dims(const char *name, LongArray dims) {
     LongArray *arr = malloc(sizeof(LongArray));
     long_array_init(arr);
@@ -453,8 +472,7 @@ void ir_set_global_array_dims(const char *name, LongArray dims) {
     hashmap_put(&ir_global_array_dims, name, arr, 0);
 }
 
-void ir_set_global_initializers(const char *name, LongArray inits) {
-    // Find declaration
+void ir_set_global_initializers_with_strings(const char *name, LongArray inits, IntArray is_string, StringPairArray strings) {
     for (int idx = 0; idx < ir_global_decls.count; ++idx) {
         if (strcmp(ir_global_decls.data[idx].name, name) == 0) {
             long_array_free(&ir_global_decls.data[idx].initializers);
@@ -462,9 +480,32 @@ void ir_set_global_initializers(const char *name, LongArray inits) {
             for (int k = 0; k < inits.count; ++k) {
                 long_array_push(&ir_global_decls.data[idx].initializers, inits.data[k]);
             }
+            int_array_free(&ir_global_decls.data[idx].initializer_is_string);
+            int_array_init(&ir_global_decls.data[idx].initializer_is_string);
+            for (int k = 0; k < is_string.count; ++k) {
+                int_array_push(&ir_global_decls.data[idx].initializer_is_string, is_string.data[k]);
+            }
+            string_pair_array_free(&ir_global_decls.data[idx].strings);
+            string_pair_array_init(&ir_global_decls.data[idx].strings);
+            for (int k = 0; k < strings.count; ++k) {
+                string_pair_array_push(&ir_global_decls.data[idx].strings, &strings.data[k]);
+            }
             break;
         }
     }
+}
+
+void ir_set_global_initializers(const char *name, LongArray inits) {
+    IntArray is_string;
+    int_array_init(&is_string);
+    for (int k = 0; k < inits.count; ++k) {
+        int_array_push(&is_string, 0);
+    }
+    StringPairArray strings;
+    string_pair_array_init(&strings);
+    ir_set_global_initializers_with_strings(name, inits, is_string, strings);
+    int_array_free(&is_string);
+    string_pair_array_free(&strings);
 }
 
 void ir_set_global_array_base_size(const char *name, int val) {
@@ -754,6 +795,11 @@ static int ir_expr_is_i64(const Node *n, int target_scale) {
     return target_scale == 4 && n && !ir_expr_is_float(n) && n->type_size == 8;
 }
 
+static int ir_expr_has_address(const Node *n) {
+    if (!n) return 0;
+    return strcmp(n->op, "var") == 0 || strcmp(n->op, "index") == 0 || strcmp(n->op, "unary_*") == 0;
+}
+
 static void ir_push(IrFunction *fn, const char *op, const char *arg, long value) {
     IrInst inst;
     inst.op = op;
@@ -984,6 +1030,159 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
             ir_push(fn, "fneg", "", 0);
         } else {
             ir_push(fn, ir_expr_is_i64(node->lhs, target_scale) ? "neg64" : "neg", "", 0);
+        }
+        return;
+    }
+    if (strcmp(node->op, "va_start") == 0) {
+        HashMapEntry *loc_entry = hashmap_get(&fn->locals, node->lhs->name);
+        if (!loc_entry) {
+            diagnostics_error(node->line, node->col, "va_list variable not declared");
+        }
+        ir_push(fn, "va_start", "", loc_entry->val_int);
+        ir_push(fn, "const", "", 0);
+        return;
+    }
+    if (strcmp(node->op, "va_copy") == 0) {
+        HashMapEntry *dest_entry = hashmap_get(&fn->locals, node->lhs->name);
+        HashMapEntry *src_entry = hashmap_get(&fn->locals, node->rhs->name);
+        if (!dest_entry || !src_entry) {
+            diagnostics_error(node->line, node->col, "va_list variable not declared");
+        }
+        ir_push(fn, "load", "", src_entry->val_int);
+        ir_push(fn, "store", "", dest_entry->val_int);
+        ir_push(fn, "const", "", 0);
+        return;
+    }
+    if (strcmp(node->op, "va_arg") == 0) {
+        HashMapEntry *loc_entry = hashmap_get(&fn->locals, node->lhs->name);
+        if (!loc_entry) {
+            diagnostics_error(node->line, node->col, "va_list variable not declared");
+        }
+        int ap_slot = loc_entry->val_int;
+        int sz = node->type_size;
+        int aligned_sz = ((sz + target_scale - 1) / target_scale) * target_scale;
+        ir_push(fn, "load", "", ap_slot);
+        ir_push(fn, "dup", "", 0);
+        ir_push(fn, "const", "", aligned_sz);
+        ir_push(fn, "+", "", 0);
+        ir_push(fn, "store", "", ap_slot);
+        ir_push(fn, "const", "", 0);
+        ir_push(fn, "index", "", sz);
+        return;
+    }
+    if (strcmp(node->op, "store_index") == 0) {
+        int scale = get_expr_pointer_scale(node->lhs, fn);
+        if (strcmp(node->lhs->op, "index") == 0 && strcmp(node->lhs->name, "byte_offset") == 0) {
+            if (node->lhs->elem_size > 0) {
+                scale = node->lhs->elem_size;
+            }
+        }
+        if (scale == 0) {
+            if (strcmp(node->lhs->op, "index") == 0 || strcmp(node->lhs->op, "unary_*") == 0) {
+                scale = get_expr_pointer_scale(node->lhs->lhs, fn);
+            }
+        }
+        if (scale == 0) scale = target_scale;
+
+        int rhs_is_call = (strcmp(node->rhs->op, "call") == 0);
+        if (scale > 8 && !rhs_is_call) {
+            lower_addr(node->rhs, fn, backend, arena);
+            lower_addr(node->lhs, fn, backend, arena);
+            ir_push(fn, "copy", "", scale);
+            lower_addr(node->lhs, fn, backend, arena);
+        } else {
+            int is_bf = (strcmp(node->lhs->op, "index") == 0 &&
+                         strcmp(node->lhs->name, "byte_offset") == 0 &&
+                         node->lhs->bit_width > 0);
+            if (is_bf) {
+                int bf_offset = node->lhs->bit_offset;
+                int bf_width  = node->lhs->bit_width;
+                long packed = (long)bf_offset | ((long)bf_width << 16);
+                lower_expr(node->rhs, fn, backend, arena);
+                ir_push(fn, "dup", "", 0);
+                ir_push(fn, "const", "", 0);
+                lower_addr(node->lhs, fn, backend, arena);
+                ir_push(fn, "insert_bits", "", packed);
+            } else {
+                lower_expr(node->rhs, fn, backend, arena);
+                if (node->lhs->is_float) {
+                    if (!ir_expr_is_float(node->rhs)) ir_push(fn, "i2f", "", 0);
+                    if (scale == 4) ir_push(fn, "d2f", "", 0);
+                    ir_push(fn, "dup", "", 0);
+                    lower_addr(node->lhs, fn, backend, arena);
+                    ir_push(fn, scale == 4 ? "fstore_addr4" : "fstore_addr8", "", 0);
+                } else {
+                    ir_push(fn, "dup", "", 0);
+                    ir_push(fn, "const", "", 0);
+                    lower_addr(node->lhs, fn, backend, arena);
+                    ir_push(fn, "store_index", "", scale);
+                }
+            }
+        }
+        return;
+    }
+    if (strcmp(node->op, "assign") == 0) {
+        HashMapEntry *loc_entry = hashmap_get(&fn->locals, node->name);
+        if (loc_entry) {
+            int size = ir_get_var_type_size(node->name);
+            int is_flt = ir_get_var_float(node->name);
+            int rhs_is_call = (strcmp(node->lhs->op, "call") == 0);
+            if (size > 8 && !rhs_is_call) {
+                lower_addr(node->lhs, fn, backend, arena);
+                ir_push(fn, "addr", "", loc_entry->val_int);
+                ir_push(fn, "copy", "", size);
+                ir_push(fn, "addr", "", loc_entry->val_int);
+            } else if (is_flt) {
+                lower_expr(node->lhs, fn, backend, arena);
+                if (!ir_expr_is_float(node->lhs)) ir_push(fn, "i2f", "", 0);
+                ir_push(fn, "dup", "", 0);
+                ir_push(fn, size == 4 ? "fstore4" : "fstore8", "", loc_entry->val_int);
+            } else {
+                lower_expr(node->lhs, fn, backend, arena);
+                if (target_scale == 4 && size == 8 && node->lhs->type_size < 8) {
+                    ir_push(fn, node->lhs->is_unsigned ? "zext64" : "sext64", "", 0);
+                }
+                ir_push(fn, "dup", "", 0);
+                if (size > 8) {
+                    ir_push(fn, "addr", "", loc_entry->val_int);
+                    ir_push(fn, "store_agg", "", size);
+                } else if (target_scale == 4 && size == 8) {
+                    ir_push(fn, "store64", "", loc_entry->val_int);
+                } else {
+                    ir_push(fn, "store", "", loc_entry->val_int);
+                }
+            }
+        } else if (hashmap_has(&ir_global_vars, node->name)) {
+            int size = ir_get_var_type_size(node->name);
+            int is_flt = ir_get_var_float(node->name);
+            int rhs_is_call = (strcmp(node->lhs->op, "call") == 0);
+            if (size > 8 && !rhs_is_call) {
+                lower_addr(node->lhs, fn, backend, arena);
+                ir_push(fn, "gaddr", node->name, 0);
+                ir_push(fn, "copy", "", size);
+                ir_push(fn, "gaddr", node->name, 0);
+            } else if (is_flt) {
+                lower_expr(node->lhs, fn, backend, arena);
+                if (!ir_expr_is_float(node->lhs)) ir_push(fn, "i2f", "", 0);
+                ir_push(fn, "dup", "", 0);
+                ir_push(fn, "fgstore", node->name, 0);
+            } else {
+                lower_expr(node->lhs, fn, backend, arena);
+                if (target_scale == 4 && size == 8 && node->lhs->type_size < 8) {
+                    ir_push(fn, node->lhs->is_unsigned ? "zext64" : "sext64", "", 0);
+                }
+                ir_push(fn, "dup", "", 0);
+                if (size > 8) {
+                    ir_push(fn, "gaddr", node->name, 0);
+                    ir_push(fn, "store_agg", "", size);
+                } else if (target_scale == 4 && size == 8) {
+                    ir_push(fn, "gstore64", node->name, 0);
+                } else {
+                    ir_push(fn, "gstore", node->name, 0);
+                }
+            }
+        } else {
+            diagnostics_error(node->line, node->col, "assigning to undeclared variable");
         }
         return;
     }
@@ -1228,8 +1427,7 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
 
         LongArray current_dims = get_node_dims(node, fn);
         if (current_dims.count == 0) {
-            ir_push(fn, "const", "", 0);
-            ir_push(fn, "index", "", base_size);
+            ir_push(fn, "load_addr", "", base_size);
         }
         long_array_free(&current_dims);
         return;
@@ -1441,14 +1639,22 @@ static void lower_addr(const Node *node, IrFunction *fn, TargetBackend *backend,
                 ir_push(fn, "load", "", entry->val_int);
             } else {
                 int slot = entry->val_int;
+                int is_param = 0;
                 for (int p_i = 0; p_i < fn->params.count; ++p_i) {
                     if (strcmp(fn->params.data[p_i], node->name) == 0) {
+                        is_param = 1;
                         int agg_size = fn->param_aggregate_sizes.data[p_i];
                         if (agg_size > 0) {
                             int num_slots = backend->get_aggregate_slots(backend, agg_size);
                             slot += num_slots - 1;
                         }
                         break;
+                    }
+                }
+                if (!is_param) {
+                    int type_size = ir_get_var_type_size(node->name);
+                    if (type_size > 16) {
+                        slot += (type_size + 15) / 16 - 1;
                     }
                 }
                 ir_push(fn, "addr", "", slot);
@@ -1481,9 +1687,30 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
         }
         int slot = fn->locals.size;
         hashmap_put(&fn->locals, stmt->name, nullptr, slot);
+        if (stmt->type_size > 16) {
+            int num_slots = (stmt->type_size + 15) / 16;
+            for (int extra = 1; extra < num_slots; ++extra) {
+                char dummy_name[512];
+                snprintf(dummy_name, sizeof(dummy_name), "%s$aggslot%d", stmt->name, extra);
+                hashmap_put(&fn->locals, arena_strdup(arena, dummy_name), nullptr, slot + extra);
+            }
+        }
         if (stmt->lhs) {
-            lower_expr(stmt->lhs, fn, backend, arena);
-            if (stmt->is_float) {
+            int rhs_is_call = (strcmp(stmt->lhs->op, "call") == 0);
+            if (stmt->type_size > 8 && !rhs_is_call) {
+                lower_addr(stmt->lhs, fn, backend, arena);
+                ir_push(fn, "addr", "", slot);
+                ir_push(fn, "copy", "", stmt->type_size);
+            } else if (stmt->type_size > 8 && rhs_is_call) {
+                lower_expr(stmt->lhs, fn, backend, arena);
+                ir_push(fn, "addr", "", slot);
+                ir_push(fn, "store_agg", "", stmt->type_size);
+            } else {
+                lower_expr(stmt->lhs, fn, backend, arena);
+            }
+            if (stmt->type_size > 8) {
+                /* Aggregate initializer handled above. */
+            } else if (stmt->is_float) {
                 if (!ir_expr_is_float(stmt->lhs)) ir_push(fn, "i2f", "", 0);
                 ir_push(fn, stmt->type_size == 4 ? "fstore4" : "fstore8", "", slot);
             } else if (target_scale == 4 && stmt->type_size == 8) {
@@ -1503,7 +1730,7 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
             int rhs_is_call = (strcmp(stmt->lhs->op, "call") == 0);
             if (size > 8 && !rhs_is_call) {
                 lower_addr(stmt->lhs, fn, backend, arena);
-                ir_push(fn, "load", "", loc_entry->val_int);
+                ir_push(fn, "addr", "", loc_entry->val_int);
                 ir_push(fn, "copy", "", size);
             } else if (is_flt) {
                 lower_expr(stmt->lhs, fn, backend, arena);
@@ -1515,7 +1742,7 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
                     ir_push(fn, stmt->lhs->is_unsigned ? "zext64" : "sext64", "", 0);
                 }
                 if (size > 8) {
-                    ir_push(fn, "load", "", loc_entry->val_int);
+                    ir_push(fn, "addr", "", loc_entry->val_int);
                     ir_push(fn, "store_agg", "", size);
                 } else if (target_scale == 4 && size == 8) {
                     ir_push(fn, "store64", "", loc_entry->val_int);
@@ -1572,7 +1799,7 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
             return;
         }
         if (current_func_ret_size > 0 && current_func_ret_size < 8) {
-            ir_push(fn, "cast", "", current_func_ret_size);
+            ir_push(fn, current_func_ret_is_unsigned ? "ucast" : "cast", "", current_func_ret_size);
         }
         if (target_scale == 4 && current_func_ret_size == 8) {
             if (stmt->lhs && stmt->lhs->type_size < 8) {
@@ -1620,6 +1847,29 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
         lower_stmt(stmt->rhs, fn, backend, arena);
         loop_contexts.count--;
 
+        ir_push(fn, "jmp", sl_dup, 0);
+        ir_push(fn, "label", el_dup, 0);
+    } else if (strcmp(stmt->op, "do_while") == 0) {
+        char start_label[128];
+        snprintf(start_label, sizeof(start_label), ".L%s_do%d", fn->name, fn->label_id++);
+        const char *sl_dup = arena_strdup(arena, start_label);
+
+        char cond_label[128];
+        snprintf(cond_label, sizeof(cond_label), ".L%s_docond%d", fn->name, fn->label_id++);
+        const char *cl_dup = arena_strdup(arena, cond_label);
+
+        char end_label[128];
+        snprintf(end_label, sizeof(end_label), ".L%s_enddo%d", fn->name, fn->label_id++);
+        const char *el_dup = arena_strdup(arena, end_label);
+
+        ir_push(fn, "label", sl_dup, 0);
+        push_loop_ctx(&loop_contexts, el_dup, cl_dup);
+        lower_stmt(stmt->rhs, fn, backend, arena);
+        loop_contexts.count--;
+
+        ir_push(fn, "label", cl_dup, 0);
+        lower_expr(stmt->lhs, fn, backend, arena);
+        ir_push(fn, ir_expr_is_i64(stmt->lhs, target_scale) ? "jz64" : "jz", el_dup, 0);
         ir_push(fn, "jmp", sl_dup, 0);
         ir_push(fn, "label", el_dup, 0);
     } else if (strcmp(stmt->op, "for") == 0) {
@@ -1744,19 +1994,29 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
             if (strcmp(stmt->body.data[k]->op, "init_item") == 0) {
                 int size = atoi(stmt->body.data[k]->name);
                 long offset = stmt->body.data[k]->value;
-                lower_expr(stmt->body.data[k]->lhs, fn, backend, arena);
                 if (size > target_scale) {
-                    ir_push(fn, "load", "", base_slot);
-                    ir_push(fn, "const", "", offset);
-                    ir_push(fn, "+", "", 0);
-                    ir_push(fn, "store_agg", "", size);
+                    if (ir_expr_has_address(stmt->body.data[k]->lhs)) {
+                        lower_addr(stmt->body.data[k]->lhs, fn, backend, arena);
+                        ir_push(fn, "load", "", base_slot);
+                        ir_push(fn, "const", "", offset);
+                        ir_push(fn, "+", "", 0);
+                        ir_push(fn, "copy", "", size);
+                    } else {
+                        lower_expr(stmt->body.data[k]->lhs, fn, backend, arena);
+                        ir_push(fn, "load", "", base_slot);
+                        ir_push(fn, "const", "", offset);
+                        ir_push(fn, "+", "", 0);
+                        ir_push(fn, "store_agg", "", size);
+                    }
                 } else if (ir_expr_is_float(stmt->body.data[k]->lhs)) {
+                    lower_expr(stmt->body.data[k]->lhs, fn, backend, arena);
                     if (size == 4) ir_push(fn, "d2f", "", 0);
                     ir_push(fn, "load", "", base_slot);
                     ir_push(fn, "const", "", offset);
                     ir_push(fn, "+", "", 0);
                     ir_push(fn, size == 4 ? "fstore_addr4" : "fstore_addr8", "", 0);
                 } else {
+                    lower_expr(stmt->body.data[k]->lhs, fn, backend, arena);
                     ir_push(fn, "const", "", 0);
                     ir_push(fn, "load", "", base_slot);
                     ir_push(fn, "const", "", offset);
@@ -1830,6 +2090,7 @@ static void lower_func(const Node *ast, TargetBackend *backend, Arena *arena, Ir
     current_func_ret_size = (int)ast->value;
     current_func_ret_aggregate_size = ast->aggregate_size;
     current_func_ret_is_float = ast->is_float;
+    current_func_ret_is_unsigned = ast->is_unsigned;
 
     fn->name = ast->name;
     

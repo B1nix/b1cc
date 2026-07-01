@@ -157,6 +157,38 @@ static void bb_align(ByteBuf *b, size_t align) {
     while (b->size % align) bb_write8(b, 0);
 }
 
+static void elf_write_shdr64(ByteBuf *out, uint32_t name, uint32_t type,
+                             uint64_t flags, uint64_t addr, uint64_t offset,
+                             uint64_t size, uint32_t link, uint32_t info,
+                             uint64_t addralign, uint64_t entsize) {
+    bb_write32le(out, name);
+    bb_write32le(out, type);
+    bb_write64le(out, flags);
+    bb_write64le(out, addr);
+    bb_write64le(out, offset);
+    bb_write64le(out, size);
+    bb_write32le(out, link);
+    bb_write32le(out, info);
+    bb_write64le(out, addralign);
+    bb_write64le(out, entsize);
+}
+
+static void elf_write_shdr32(ByteBuf *out, uint32_t name, uint32_t type,
+                             uint32_t flags, uint32_t addr, uint32_t offset,
+                             uint32_t size, uint32_t link, uint32_t info,
+                             uint32_t addralign, uint32_t entsize) {
+    bb_write32le(out, name);
+    bb_write32le(out, type);
+    bb_write32le(out, flags);
+    bb_write32le(out, addr);
+    bb_write32le(out, offset);
+    bb_write32le(out, size);
+    bb_write32le(out, link);
+    bb_write32le(out, info);
+    bb_write32le(out, addralign);
+    bb_write32le(out, entsize);
+}
+
 /* =========================================================================
  * String table builder
  * ========================================================================= */
@@ -2140,82 +2172,65 @@ static void write_elf64_object(AsmModel *m, ByteBuf *out) {
     bb_writebytes(out, shstrtab.buf.data, shstrtab.buf.size);
     while (out->size < shdr_off) bb_write8(out, 0);
 
-    /* ---- Write section headers ---- */
-    /* Helper macro to write one shdr64 */
-#define SHDR64(name, type, flags, addr, offset, size, link, info, addralign, entsize) do { \
-    bb_write32le(out, (name));    /* sh_name */ \
-    bb_write32le(out, (type));    /* sh_type */ \
-    bb_write64le(out, (flags));   /* sh_flags */ \
-    bb_write64le(out, (addr));    /* sh_addr */ \
-    bb_write64le(out, (offset));  /* sh_offset */ \
-    bb_write64le(out, (size));    /* sh_size */ \
-    bb_write32le(out, (link));    /* sh_link */ \
-    bb_write32le(out, (info));    /* sh_info */ \
-    bb_write64le(out, (addralign)); /* sh_addralign */ \
-    bb_write64le(out, (entsize)); /* sh_entsize */ \
-} while(0)
-
     /* SHN_NULL */
-    SHDR64(sh_null_name, SHT_NULL, 0, 0, 0, 0, 0, 0, 0, 0);
+    elf_write_shdr64(out, sh_null_name, SHT_NULL, 0, 0, 0, 0, 0, 0, 0, 0);
     /* .text */
-    SHDR64(sh_text_name, SHT_PROGBITS,
+    elf_write_shdr64(out, sh_text_name, SHT_PROGBITS,
            SHF_ALLOC | SHF_EXECINSTR, 0,
            (uint64_t)text_off, (uint64_t)m->text.size,
            0, 0, 16, 0);
     /* .data */
     if (shidx_data >= 0)
-        SHDR64(sh_data_name, SHT_PROGBITS,
+        elf_write_shdr64(out, sh_data_name, SHT_PROGBITS,
                SHF_ALLOC | SHF_WRITE, 0,
                (uint64_t)data_off, (uint64_t)m->data.size,
                0, 0, 8, 0);
     /* .rodata */
     if (shidx_rodata >= 0)
-        SHDR64(sh_rodata_name, SHT_PROGBITS,
+        elf_write_shdr64(out, sh_rodata_name, SHT_PROGBITS,
                SHF_ALLOC, 0,
                (uint64_t)rodata_off, (uint64_t)m->rodata.size,
                0, 0, 8, 0);
     /* .bss */
     if (shidx_bss >= 0)
-        SHDR64(sh_bss_name, SHT_NOBITS,
+        elf_write_shdr64(out, sh_bss_name, SHT_NOBITS,
                SHF_ALLOC | SHF_WRITE, 0,
                (uint64_t)rodata_off + (shidx_rodata >= 0 ? m->rodata.size : 0),
                (uint64_t)m->bss_size,
                0, 0, 8, 0);
     /* .rela.text */
     if (shidx_rela >= 0)
-        SHDR64(sh_rela_name, SHT_RELA,
+        elf_write_shdr64(out, sh_rela_name, SHT_RELA,
                0, 0,
                (uint64_t)rela_off, (uint64_t)rela_buf.size,
                (uint32_t)shidx_symtab, (uint32_t)shidx_text, 8, 24);
     /* .symtab */
-    SHDR64(sh_symtab_name, SHT_SYMTAB,
+    elf_write_shdr64(out, sh_symtab_name, SHT_SYMTAB,
            0, 0,
            (uint64_t)symtab_off, (uint64_t)symtab_buf.size,
            (uint32_t)shidx_strtab, (uint32_t)symtab_info, 8, SYM64_SIZE);
     /* .debug_line */
     if (shidx_debug_line >= 0)
-        SHDR64(sh_debug_line_name, SHT_PROGBITS,
+        elf_write_shdr64(out, sh_debug_line_name, SHT_PROGBITS,
                0, 0,
                (uint64_t)debug_line_off, (uint64_t)debug_line_buf.size,
                0, 0, 1, 0);
     /* .rela.debug_line */
     if (shidx_rela_debug >= 0)
-        SHDR64(sh_rela_debug_name, SHT_RELA,
+        elf_write_shdr64(out, sh_rela_debug_name, SHT_RELA,
                0, 0,
                (uint64_t)rela_debug_off, (uint64_t)rela_debug_buf.size,
                (uint32_t)shidx_symtab, (uint32_t)shidx_debug_line, 8, 24);
     /* .strtab */
-    SHDR64(sh_strtab_name, SHT_STRTAB,
+    elf_write_shdr64(out, sh_strtab_name, SHT_STRTAB,
            0, 0,
            (uint64_t)strtab_off, (uint64_t)strtab.buf.size,
            0, 0, 1, 0);
     /* .shstrtab */
-    SHDR64(sh_shstr_name, SHT_STRTAB,
+    elf_write_shdr64(out, sh_shstr_name, SHT_STRTAB,
            0, 0,
            (uint64_t)shstr_off, (uint64_t)shstrtab.buf.size,
            0, 0, 1, 0);
-
-#undef SHDR64
 
     bb_free(&rela_buf);
     bb_free(&symtab_buf);
@@ -3020,34 +3035,19 @@ static void write_elf32_object(AsmModel *m, ByteBuf *out) {
     bb_writebytes(out, shstrtab.buf.data, shstrtab.buf.size);
     while (out->size < shdr_off) bb_write8(out, 0);
 
-#define SHDR32(name, type, flags, addr, offset, size, link, info, addralign, entsize) do { \
-    bb_write32le(out, (name));    \
-    bb_write32le(out, (type));    \
-    bb_write32le(out, (flags));   \
-    bb_write32le(out, (addr));    \
-    bb_write32le(out, (offset));  \
-    bb_write32le(out, (size));    \
-    bb_write32le(out, (link));    \
-    bb_write32le(out, (info));    \
-    bb_write32le(out, (addralign)); \
-    bb_write32le(out, (entsize)); \
-} while(0)
-
-    SHDR32(sh_null_name,   SHT_NULL,    0, 0, 0, 0, 0, 0, 0, 0);
-    SHDR32(sh_text_name,   SHT_PROGBITS, SHF_ALLOC|SHF_EXECINSTR, 0, (uint32_t)text_off, (uint32_t)m->text.size, 0, 0, 4, 0);
+    elf_write_shdr32(out, sh_null_name, SHT_NULL, 0, 0, 0, 0, 0, 0, 0, 0);
+    elf_write_shdr32(out, sh_text_name, SHT_PROGBITS, SHF_ALLOC|SHF_EXECINSTR, 0, (uint32_t)text_off, (uint32_t)m->text.size, 0, 0, 4, 0);
     if (shidx_data >= 0)
-        SHDR32(sh_data_name, SHT_PROGBITS, SHF_ALLOC|SHF_WRITE, 0, (uint32_t)data_off, (uint32_t)m->data.size, 0, 0, 4, 0);
+        elf_write_shdr32(out, sh_data_name, SHT_PROGBITS, SHF_ALLOC|SHF_WRITE, 0, (uint32_t)data_off, (uint32_t)m->data.size, 0, 0, 4, 0);
     if (shidx_rodata >= 0)
-        SHDR32(sh_rodata_name, SHT_PROGBITS, SHF_ALLOC, 0, (uint32_t)rodata_off, (uint32_t)m->rodata.size, 0, 0, 4, 0);
+        elf_write_shdr32(out, sh_rodata_name, SHT_PROGBITS, SHF_ALLOC, 0, (uint32_t)rodata_off, (uint32_t)m->rodata.size, 0, 0, 4, 0);
     if (shidx_bss >= 0)
-        SHDR32(sh_bss_name, SHT_NOBITS, SHF_ALLOC|SHF_WRITE, 0, 0, (uint32_t)m->bss_size, 0, 0, 4, 0);
+        elf_write_shdr32(out, sh_bss_name, SHT_NOBITS, SHF_ALLOC|SHF_WRITE, 0, 0, (uint32_t)m->bss_size, 0, 0, 4, 0);
     if (shidx_rel >= 0)
-        SHDR32(sh_rel_name, SHT_REL, 0, 0, (uint32_t)rel_off, (uint32_t)rel_buf.size, (uint32_t)shidx_symtab, (uint32_t)shidx_text, 4, 8);
-    SHDR32(sh_symtab_name, SHT_SYMTAB,  0, 0, (uint32_t)symtab_off, (uint32_t)symtab_buf.size, (uint32_t)shidx_strtab, (uint32_t)symtab_info, 4, SYM32_SIZE);
-    SHDR32(sh_strtab_name, SHT_STRTAB,  0, 0, (uint32_t)strtab_off, (uint32_t)strtab.buf.size, 0, 0, 1, 0);
-    SHDR32(sh_shstr_name,  SHT_STRTAB,  0, 0, (uint32_t)shstr_off, (uint32_t)shstrtab.buf.size, 0, 0, 1, 0);
-
-#undef SHDR32
+        elf_write_shdr32(out, sh_rel_name, SHT_REL, 0, 0, (uint32_t)rel_off, (uint32_t)rel_buf.size, (uint32_t)shidx_symtab, (uint32_t)shidx_text, 4, 8);
+    elf_write_shdr32(out, sh_symtab_name, SHT_SYMTAB, 0, 0, (uint32_t)symtab_off, (uint32_t)symtab_buf.size, (uint32_t)shidx_strtab, (uint32_t)symtab_info, 4, SYM32_SIZE);
+    elf_write_shdr32(out, sh_strtab_name, SHT_STRTAB, 0, 0, (uint32_t)strtab_off, (uint32_t)strtab.buf.size, 0, 0, 1, 0);
+    elf_write_shdr32(out, sh_shstr_name, SHT_STRTAB, 0, 0, (uint32_t)shstr_off, (uint32_t)shstrtab.buf.size, 0, 0, 1, 0);
 
     bb_free(&symtab_buf);
     bb_free(&rel_buf);

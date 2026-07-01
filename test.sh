@@ -376,6 +376,19 @@ grep -q "R_386_PC32" "$tmp/m15_elf_i386_reloc.txt"
 grep -q "puts" "$tmp/m15_elf_i386_reloc.txt"
 echo "ok m15_elf_i386_encoding"
 
+./build/b1cc --target=arm64-darwin -c tests/return_42.c -o "$tmp/m15_macho_arm64.o"
+test -s "$tmp/m15_macho_arm64.o"
+macho_magic=$(od -A n -N 4 -t x1 "$tmp/m15_macho_arm64.o" | tr -d ' \n')
+test "$macho_magic" = "cffaedfe"
+cc "$tmp/m15_macho_arm64.o" -o "$tmp/m15_macho_arm64_exec"
+set +e
+"$tmp/m15_macho_arm64_exec"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m15_macho_arm64_native"
+
+
 ./build/b1cc tests/m17_preprocessor_full.c -o "$tmp/m17_preprocessor_full"
 set +e
 "$tmp/m17_preprocessor_full"
@@ -612,6 +625,22 @@ echo "ok m17_preproc_edge"
 
 
 
+./build/b1cc tests/m20_callee_varargs.c -o "$tmp/m20_callee_varargs"
+set +e
+"$tmp/m20_callee_varargs"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m20_callee_varargs"
+
+./build/b1cc tests/m20_self_host_local_array.c -o "$tmp/m20_self_host_local_array"
+set +e
+"$tmp/m20_self_host_local_array"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m20_self_host_local_array"
+
 ./build/b1cc src/b1cc_token_lexer.c -o "$tmp/b1cc_token_lexer"
 "$tmp/b1cc_token_lexer" < tests/local.c > "$tmp/lexer_output.txt"
 grep -q "IDENT: int" "$tmp/lexer_output.txt"
@@ -622,6 +651,57 @@ echo "ok self_hosting_lexer"
 ./build/b1cc src/ast.c -c -o "$tmp/ast_self.o"
 test -s "$tmp/ast_self.o"
 echo "ok self_hosting_ast"
+
+# Self-hosting roundtrip: compile b1cc codebase with b1cc
+echo "building b1cc_self using b1cc..."
+./build/b1cc src/ast.c -c -o "$tmp/ast_self.o"
+./build/b1cc src/b1cc.c -c -o "$tmp/b1cc_self.o"
+./build/b1cc src/backend.c -c -o "$tmp/backend_self.o"
+./build/b1cc src/backend_arm64.c -c -o "$tmp/backend_arm64_self.o"
+./build/b1cc src/backend_x86_64.c -c -o "$tmp/backend_x86_64_self.o"
+./build/b1cc src/backend_i386.c -c -o "$tmp/backend_i386_self.o"
+./build/b1cc src/common.c -c -o "$tmp/common_self.o"
+./build/b1cc src/diagnostics.c -c -o "$tmp/diagnostics_self.o"
+./build/b1cc src/elf_writer.c -c -o "$tmp/elf_writer_self.o"
+./build/b1cc src/ir.c -c -o "$tmp/ir_self.o"
+./build/b1cc src/lexer.c -c -o "$tmp/lexer_self.o"
+./build/b1cc src/macho_writer.c -c -o "$tmp/macho_writer_self.o"
+./build/b1cc src/parser.c -c -o "$tmp/parser_self.o"
+./build/b1cc src/preprocessor.c -c -o "$tmp/preprocessor_self.o"
+
+# Link self-hosted binary
+cc "$tmp"/ast_self.o "$tmp"/b1cc_self.o "$tmp"/backend_self.o "$tmp"/backend_arm64_self.o "$tmp"/backend_x86_64_self.o "$tmp"/backend_i386_self.o "$tmp"/common_self.o "$tmp"/diagnostics_self.o "$tmp"/elf_writer_self.o "$tmp"/ir_self.o "$tmp"/lexer_self.o "$tmp"/macho_writer_self.o "$tmp"/parser_self.o "$tmp"/preprocessor_self.o -o "$tmp/b1cc_self"
+test -s "$tmp/b1cc_self"
+echo "ok self_hosted_binary_build"
+
+# Verify build/b1cc_self compiles and links a covered regression corpus.
+self_host_case() {
+    src="$1"
+    expect="$2"
+    shift 2
+    name=$(basename "$src" .c)
+    "$tmp/b1cc_self" "$src" -o "$tmp/${name}_self"
+    set +e
+    "$tmp/${name}_self" "$@"
+    rc=$?
+    set -e
+    test "$rc" = "$expect"
+    echo "ok self_hosted_$name"
+}
+
+self_host_case tests/return_42.c 42
+self_host_case tests/precedence.c 14
+self_host_case tests/local.c 18
+self_host_case tests/if_else.c 7
+self_host_case tests/while.c 10
+self_host_case tests/for.c 15
+self_host_case tests/function.c 42
+self_host_case tests/argc.c 4 a b c
+self_host_case tests/argv.c 10 aa bbb cccc
+self_host_case tests/string_pointer.c 10
+self_host_case tests/m20_callee_varargs.c 42
+self_host_case tests/m20_self_host_local_array.c 42
+echo "ok self_hosted_binary_compiles_corpus"
 
 ./build/b1cc --target=x86_64-b1nix tests/return_42.c -S -o "$tmp/return_42_x86_64.s"
 grep -q '^main:' "$tmp/return_42_x86_64.s"
@@ -655,16 +735,21 @@ if [ -x ../b1nix/tools/toolchain/bin/b1nix-cc ]; then
   ./build/b1cc --target=x86_64-b1nix tests/m18_large_aggregate_abi.c -o "$tmp/m18_large_aggregate_abi.b1nix"
   test -s "$tmp/m18_large_aggregate_abi.b1nix"
   echo "ok x86_64_b1nix_m18_large_aggregate_abi_elf"
-fi
 
+  ./build/b1cc --target=x86_64-b1nix tests/m18_float_aggregate_abi.c -o "$tmp/m18_float_aggregate_abi.b1nix"
+  test -s "$tmp/m18_float_aggregate_abi.b1nix"
+  echo "ok x86_64_b1nix_m18_float_aggregate_abi_elf"
+
+  ./build/b1cc --target=x86_64-b1nix tests/m19_float_scalar.c -o "$tmp/m19_float_scalar.b1nix"
+  test -s "$tmp/m19_float_scalar.b1nix"
+  echo "ok x86_64_b1nix_m19_float_scalar_elf"
+
+  ./build/b1cc --target=x86_64-b1nix tests/c23_bool.c -o "$tmp/c23_bool.b1nix"
+  test -s "$tmp/c23_bool.b1nix"
+  echo "ok x86_64_b1nix_c23_bool_elf"
+fi
 
 ./build/b1cc --target=i386-b1nix tests/return_42.c -S -o "$tmp/return_42_i386.s"
 grep -q '^main:' "$tmp/return_42_i386.s"
 grep -q 'ret' "$tmp/return_42_i386.s"
 echo "ok i386_b1nix_asm"
-
-if [ -x ../b1nix/tools/toolchain/bin/b1nix-cc ]; then
-  ./build/b1cc --target=i386-b1nix tests/return_42.c -o "$tmp/return_42_i386.b1nix"
-  test -s "$tmp/return_42_i386.b1nix"
-  echo "ok i386_b1nix_elf"
-fi

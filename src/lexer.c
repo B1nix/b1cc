@@ -508,6 +508,12 @@ TokenArray lex(const char *src, HashMap *macros, HashMap *active_macros, Arena *
         } else if (i + 2 < src_len && src[i] == '.' && src[i+1] == '.' && src[i+2] == '.') {
             CONSUME(3);
             push_token(&out, "...", tok_line, tok_col);
+        } else if (i + 2 < src_len &&
+                   ((src[i] == '<' && src[i + 1] == '<' && src[i + 2] == '=') ||
+                    (src[i] == '>' && src[i + 1] == '>' && src[i + 2] == '='))) {
+            const char *text = arena_strndup(arena, src + i, 3);
+            CONSUME(3);
+            push_token(&out, text, tok_line, tok_col);
         } else if (i + 1 < src_len &&
                    ((src[i] == '=' && src[i + 1] == '=') ||
                     (src[i] == '!' && src[i + 1] == '=') ||

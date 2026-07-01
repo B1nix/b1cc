@@ -58,8 +58,42 @@ static const char *i386_emit_globals(TargetBackend *self, const IrGlobalVarArray
         sb_appendf(&out, "%s:\n", g->name);
 
         if (g->is_array || g->initializers.count > 1) {
-            for (int k = 0; k < g->initializers.count; ++k) {
-                long val = g->initializers.data[k];
+            int k = 0;
+            while (k < g->initializers.count) {
+                if (g->initializer_is_string.count > k && g->initializer_is_string.data[k]) {
+                    int str_idx = (int)g->initializers.data[k];
+                    const char *str_lbl = g->strings.data[str_idx].first;
+                    if (g->elem_size == 1) {
+                        sb_appendf(&out, "    .long %s\n", str_lbl);
+                        k += 4;
+                    } else {
+                        sb_appendf(&out, "    .long %s\n", str_lbl);
+                        k++;
+                    }
+                } else {
+                    long val = g->initializers.data[k];
+                    if (g->elem_size == 1)
+                        sb_appendf(&out, "    .byte %d\n", (int)(val & 0xff));
+                    else if (g->elem_size == 2)
+                        sb_appendf(&out, "    .short %d\n", (int)(val & 0xffff));
+                    else if (g->elem_size == 4)
+                        sb_appendf(&out, "    .long %ld\n", val);
+                    else
+                        sb_appendf(&out, "    .quad %ld\n", val);
+                    k++;
+                }
+            }
+            long remaining = g->size - g->initializers.count;
+            if (remaining > 0) {
+                sb_appendf(&out, "    .zero %ld\n", remaining * g->elem_size);
+            }
+        } else {
+            if (g->initializer_is_string.count > 0 && g->initializer_is_string.data[0]) {
+                int str_idx = (int)g->initializers.data[0];
+                const char *str_lbl = g->strings.data[str_idx].first;
+                sb_appendf(&out, "    .long %s\n", str_lbl);
+            } else {
+                long val = (g->initializers.count == 0) ? 0 : g->initializers.data[0];
                 if (g->elem_size == 1)
                     sb_appendf(&out, "    .byte %d\n", (int)(val & 0xff));
                 else if (g->elem_size == 2)
@@ -69,20 +103,24 @@ static const char *i386_emit_globals(TargetBackend *self, const IrGlobalVarArray
                 else
                     sb_appendf(&out, "    .quad %ld\n", val);
             }
-            long remaining = g->size - g->initializers.count;
-            if (remaining > 0) {
-                sb_appendf(&out, "    .zero %ld\n", remaining * g->elem_size);
+        }
+    }
+    sb_append(&out, "\n");
+
+    int has_any_global_strings = 0;
+    for (int i = 0; i < globals->count; ++i) {
+        if (globals->data[i].strings.count > 0) {
+            has_any_global_strings = 1;
+            break;
+        }
+    }
+    if (has_any_global_strings) {
+        sb_append(&out, ".section .rodata\n");
+        for (int i = 0; i < globals->count; ++i) {
+            const IrGlobalVar *g = &globals->data[i];
+            for (int k = 0; k < g->strings.count; ++k) {
+                sb_appendf(&out, "%s:\n    .asciz \"%s\"\n", g->strings.data[k].first, g->strings.data[k].second);
             }
-        } else {
-            long val = (g->initializers.count == 0) ? 0 : g->initializers.data[0];
-            if (g->elem_size == 1)
-                sb_appendf(&out, "    .byte %d\n", (int)(val & 0xff));
-            else if (g->elem_size == 2)
-                sb_appendf(&out, "    .short %d\n", (int)(val & 0xffff));
-            else if (g->elem_size == 4)
-                sb_appendf(&out, "    .long %ld\n", val);
-            else
-                sb_appendf(&out, "    .quad %ld\n", val);
         }
     }
     sb_append(&out, "\n");
@@ -186,6 +224,35 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
         } else if (strcmp(inst->op, "load") == 0) {
             sb_appendf(&out, "    movl -%ld(%%ebp), %%eax\n", (inst->value + 1) * 16);
             sb_append(&out, "    pushl %eax\n");
+        } else if (strcmp(inst->op, "va_start") == 0) {
+            int num_fixed = fn->params.count;
+            if (num_fixed > 0 && strcmp(fn->params.data[num_fixed - 1], "...") == 0) {
+                num_fixed--;
+            }
+            int indirect_ret = (fn->return_aggregate_size > 16);
+            int param_offset = indirect_ret ? 12 : 8;
+            IntArray *prologue_floats = nullptr;
+            {
+                HashMapEntry *pfe = hashmap_get(&ir_function_param_floats, fn->name);
+                if (pfe) prologue_floats = (IntArray *)pfe->val_ptr;
+            }
+            IntArray *prologue_int_sizes = nullptr;
+            {
+                HashMapEntry *pie = hashmap_get(&ir_function_param_int_sizes, fn->name);
+                if (pie) prologue_int_sizes = (IntArray *)pie->val_ptr;
+            }
+            int in_off = param_offset;
+            for (int i = 0; i < num_fixed; ++i) {
+                int pf = (prologue_floats && i < prologue_floats->count) ? prologue_floats->data[i] : 0;
+                int isz = (prologue_int_sizes && i < prologue_int_sizes->count) ? prologue_int_sizes->data[i] : 4;
+                if (pf == 8 || (pf == 0 && isz == 8)) {
+                    in_off += 8;
+                } else {
+                    in_off += 4;
+                }
+            }
+            sb_appendf(&out, "    leal %d(%%ebp), %%eax\n", in_off);
+            sb_appendf(&out, "    movl %%eax, -%ld(%%ebp)\n", (inst->value + 1) * 16);
         } else if (strcmp(inst->op, "load64") == 0) {
             long off = (inst->value + 1) * 16;
             sb_appendf(&out, "    movl -%ld(%%ebp), %%eax\n", off - 4);
@@ -362,6 +429,16 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
             sb_append(&out, "    addl $16, %esp\n");
             sb_append(&out, "    pushl %edx\n");
             sb_append(&out, "    pushl %eax\n");
+        } else if (strcmp(inst->op, "load_addr") == 0) {
+            sb_append(&out, "    popl %eax\n");
+            if (inst->value == 1) {
+                sb_append(&out, "    movsbl (%eax), %eax\n");
+            } else if (inst->value == 2) {
+                sb_append(&out, "    movswl (%eax), %eax\n");
+            } else {
+                sb_append(&out, "    movl (%eax), %eax\n");
+            }
+            sb_append(&out, "    pushl %eax\n");
         } else if (strcmp(inst->op, "+") == 0 || strcmp(inst->op, "-") == 0 || strcmp(inst->op, "*") == 0 ||
                    strcmp(inst->op, "/") == 0 || strcmp(inst->op, "%") == 0 || strcmp(inst->op, "==") == 0 || strcmp(inst->op, "!=") == 0 ||
                    strcmp(inst->op, "<") == 0 || strcmp(inst->op, ">") == 0 || strcmp(inst->op, "<=") == 0 ||
@@ -434,7 +511,8 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
                 sb_append(&out, "    movzbl %al, %eax\n");
             }
             sb_append(&out, "    pushl %eax\n");
-        } else if (strcmp(inst->op, "~") == 0 || strcmp(inst->op, "!") == 0 || strcmp(inst->op, "neg") == 0 || strcmp(inst->op, "cast") == 0) {
+        } else if (strcmp(inst->op, "~") == 0 || strcmp(inst->op, "!") == 0 || strcmp(inst->op, "neg") == 0 ||
+                   strcmp(inst->op, "cast") == 0 || strcmp(inst->op, "ucast") == 0) {
             sb_append(&out, "    popl %eax\n");
             if (strcmp(inst->op, "~") == 0)
                 sb_append(&out, "    notl %eax\n");
@@ -445,6 +523,11 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
                     sb_append(&out, "    movsbl %al, %eax\n");
                 else if (inst->value == 2)
                     sb_append(&out, "    movswl %ax, %eax\n");
+            } else if (strcmp(inst->op, "ucast") == 0) {
+                if (inst->value == 1)
+                    sb_append(&out, "    movzbl %al, %eax\n");
+                else if (inst->value == 2)
+                    sb_append(&out, "    movzwl %ax, %eax\n");
             } else {
                 sb_append(&out, "    cmpl $0, %eax\n");
                 sb_append(&out, "    sete %al\n");

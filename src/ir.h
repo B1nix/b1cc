@@ -5,10 +5,27 @@
 #include "common.h"
 
 typedef struct {
+    const char *first;
+    const char *second;
+} StringPair;
+
+typedef struct {
+    StringPair *data;
+    int count;
+    int capacity;
+} StringPairArray;
+
+void string_pair_array_init(StringPairArray *arr);
+void string_pair_array_push(StringPairArray *arr, const StringPair *val);
+void string_pair_array_free(StringPairArray *arr);
+
+typedef struct {
     const char *name;
     int is_array;
     long size;
     LongArray initializers;
+    IntArray initializer_is_string;
+    StringPairArray strings;
     int is_static;
     int is_extern;
     int elem_size;
@@ -44,21 +61,6 @@ void ir_inst_array_push(IrInstArray *arr, const IrInst *val);
 void ir_inst_array_free(IrInstArray *arr);
 
 typedef struct {
-    const char *first;
-    const char *second;
-} StringPair;
-
-typedef struct {
-    StringPair *data;
-    int count;
-    int capacity;
-} StringPairArray;
-
-void string_pair_array_init(StringPairArray *arr);
-void string_pair_array_push(StringPairArray *arr, const StringPair *val);
-void string_pair_array_free(StringPairArray *arr);
-
-typedef struct {
     const char *name;
     StringArray params;
     IntArray param_aggregate_sizes;
@@ -91,8 +93,10 @@ typedef struct {
 void ir_reset_state(void);
 void ir_declare_global(const char *name, int is_array, long size, int is_static, int is_extern, int elem_size, int target_scale);
 void ir_mark_global_struct(const char *name);
+void ir_set_global_align(const char *name, int align);
 void ir_set_global_array_dims(const char *name, LongArray dims);
 void ir_set_global_initializers(const char *name, LongArray inits);
+void ir_set_global_initializers_with_strings(const char *name, LongArray inits, IntArray is_string, StringPairArray strings);
 void ir_set_global_array_base_size(const char *name, int val);
 void ir_set_local_array_dims(const char *name, LongArray dims);
 void ir_set_local_array_base_size(const char *name, int val);

@@ -194,18 +194,18 @@
 
 ## M20: Callee-Side Varargs & Self-Hosting
 
-- [ ] Add compiler built-ins for writing vararg functions (`__builtin_va_list`, `__builtin_va_start`, etc.).
-- [ ] Support full self-host roundtrip for the C compiler codebase: host-built `b1cc` builds `build/b1cc_self`, and `build/b1cc_self` can compile/link the covered test corpus, not only tiny smoke programs.
-- [ ] Add regression coverage for the current self-host smoke boundary: `build/b1cc_self` compiling `tests/return_42.c` and producing an executable that exits with 42.
-- [ ] Implement general aggregate assignment for structs/unions, including nested field assignment such as `state.tokens = tokens`, instead of relying on field-wise workaround code in compiler internals.
-- [ ] Replace remaining self-host workarounds for by-value aggregate copies with real aggregate copy lowering, or document each intentionally pointer-based API boundary.
-- [ ] Extend aggregate return/call lowering beyond the currently covered small integer/pointer aggregate subset; large struct returns and non-integer aggregates must have explicit ABI tests before being marked supported.
-- [ ] Add self-host regression tests for local string array initializers such as `char tmp[] = "/tmp/file-XXXXXX.s"` because the driver depends on them for temporary assembly/object paths.
+- [x] Add compiler built-ins for writing vararg functions (`__builtin_va_list`, `__builtin_va_start`, etc.).
+- [x] Support full self-host roundtrip for the C compiler codebase: host-built `b1cc` builds `build/b1cc_self`, and `build/b1cc_self` can compile/link the covered test corpus, not only tiny smoke programs.
+- [x] Add regression coverage for the current self-host smoke boundary: `build/b1cc_self` compiling `tests/return_42.c` and producing an executable that exits with 42.
+- [x] Implement aggregate assignment/copy lowering for the covered struct/union cases, including nested field assignment such as `state.tokens = tokens`.
+- [x] Replace remaining self-host workarounds for by-value aggregate copies with real aggregate copy lowering for compiler-used value structs, while preserving intentionally pointer-based API boundaries.
+- [x] Extend aggregate return/call lowering beyond the earlier small integer/pointer aggregate subset, with explicit large and float aggregate ABI tests.
+- [x] Add self-host regression tests for local string array initializers such as `char tmp[] = "/tmp/file-XXXXXX.s"` because the driver depends on them for temporary assembly/object paths.
 
 ## Honest M20 Gaps
 
-- Current self-host progress is partial: `compile_self.sh` can build `build/b1cc_self`, and that binary can compile a minimal `return_42` program, but this is not yet a complete self-host milestone.
-- General C aggregate assignment is still incomplete; compiler sources avoid some cases by passing containers and IR objects by pointer or copying fields manually.
-- Aggregate ABI support remains pragmatic and test-driven. Do not claim full C struct passing/return support until large returns, nested aggregates, and target ABI classification are covered by regression tests.
+- M20 self-host coverage now builds a self-hosted compiler and runs a covered corpus including arithmetic/control-flow, arguments, string pointers, callee-side varargs, and local string array initializers.
+- Aggregate assignment/copy support is still pragmatic and test-driven; do not claim complete ISO C aggregate semantics beyond the covered struct/union assignment, by-value copy, and ABI regression tests.
+- Aggregate ABI support remains pragmatic and test-driven. The covered ARM64 Darwin and B1NIX assembly tests include large and float aggregates, but future target ABI classes should still land with explicit regression tests.
 
 Skipped: full C/C++ upfront. Add features only when a test or B1NIX source needs them.

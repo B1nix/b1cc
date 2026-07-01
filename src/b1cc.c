@@ -11,6 +11,7 @@
 #include "ir.h"
 #include "backend.h"
 #include "elf_writer.h"
+#include "macho_writer.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -340,10 +341,11 @@ int main(int argc, char **argv) {
     }
 
     if (compile_only) {
-        /* Determine whether to use native ELF writer or host assembler */
+        /* Determine whether to use native ELF/Mach-O writer or host assembler */
         bool use_native_elf = (strcmp(target, "x86_64-b1nix") == 0 ||
                                strcmp(target, "i386-b1nix")   == 0 ||
                                strcmp(target, "x86-b1nix")    == 0);
+        bool use_native_macho = (strcmp(target, "arm64-darwin") == 0);
 
         for (int idx = 0; idx < inputs.count; ++idx) {
             const char *inp = inputs.data[idx];
@@ -382,8 +384,22 @@ int main(int argc, char **argv) {
                 }
                 fwrite(obj.data, 1, obj.size, of);
                 fclose(of);
+            } else if (use_native_macho) {
+                /* Native Mach-O writer path — no external assembler needed */
+                MachObject obj = macho_write_object(asm_text, inp, &arena);
+                if (!obj.data || obj.size == 0) {
+                    diagnostics_fatal("macho_write_object: failed to produce Mach-O object");
+                }
+                FILE *of = fopen(dest_obj, "wb");
+                if (!of) {
+                    char msg[512];
+                    snprintf(msg, sizeof(msg), "cannot write %s", dest_obj);
+                    diagnostics_fatal(msg);
+                }
+                fwrite(obj.data, 1, obj.size, of);
+                fclose(of);
             } else {
-                /* Host assembler path (arm64-darwin, etc.) */
+                /* Host assembler path */
                 char tmp_asm[] = "/tmp/b1cc-XXXXXX.s";
                 int fd = mkstemps(tmp_asm, 2);
                 if (fd < 0) diagnostics_fatal("cannot create temporary file");
