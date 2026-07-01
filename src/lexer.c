@@ -170,6 +170,23 @@ TokenArray lex(const char *src, HashMap *macros, HashMap *active_macros, Arena *
                 CONSUME(1);
             }
             const char *ident = arena_strndup(arena, src + start, i - start);
+            if (strcmp(ident, "L") == 0 && i < src_len && src[i] == '\'') {
+                size_t char_start = i;
+                CONSUME(1);
+                while (i < src_len && src[i] != '\'') {
+                    if (src[i] == '\\' && i + 1 < src_len) {
+                        CONSUME(2);
+                    } else {
+                        CONSUME(1);
+                    }
+                }
+                if (i == src_len) {
+                    diagnostics_error(tok_line, tok_col, "unterminated wide character literal");
+                }
+                CONSUME(1);
+                push_token(&out, arena_strndup(arena, src + char_start, i - char_start), tok_line, tok_col);
+                continue;
+            }
             HashMapEntry *macro_entry = macros ? hashmap_get(macros, ident) : nullptr;
             int is_active = active_macros ? hashmap_has(active_macros, ident) : 0;
 

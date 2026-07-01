@@ -2386,7 +2386,13 @@ static void fill_aggregate_zero(ParserState *p, long base_offset, const char *st
 static void parse_aggregate_init(ParserState *p, long base_offset, const char *struct_tag, const LongArray *array_dims, size_t dim_idx, int base_type_size, InitElementArray *inits) {
     if (strcmp(peek(p), "{") == 0) {
         take(p, "{");
-        if (strcmp(peek(p), "}") == 0) {
+        if (array_dims && dim_idx + 1 == (size_t)array_dims->count &&
+            (!struct_tag || !struct_tag[0]) && strcmp(peek(p), "{") == 0) {
+            parse_aggregate_init(p, base_offset, struct_tag, array_dims, dim_idx, base_type_size, inits);
+            if (strcmp(peek(p), "}") == 0) {
+                take(p, "}");
+            }
+        } else if (strcmp(peek(p), "}") == 0) {
             take(p, "}");
             fill_aggregate_zero(p, base_offset, struct_tag, array_dims, dim_idx, base_type_size, inits);
         } else {

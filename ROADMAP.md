@@ -252,6 +252,8 @@
 - [x] Support global pointer and aggregate initializers with casted string literals, such as `char *program_invocation_name = (char *)"b1nix";` and `{ (char *)"UTC" }`. Covered by `tests/m22_global_pointer_casted_string.c`.
 - [x] Support static-local `char[N] = "..."` initializers used by userspace libc timezone state. Covered by `tests/m22_global_pointer_casted_string.c`.
 - [x] Support mixed static-local scalar declarations such as `static int probed, has_tls;`. Covered by `tests/m22_static_local_mixed_scalars.c`.
+- [x] Tolerate extra nested braces around array fields in global aggregate initializers, such as B1NIX libc's `IN6ADDR_ANY_INIT` anonymous-union IPv6 constants. Covered by `tests/m22_nested_array_initializer_braces.c`.
+- [x] Parse covered wide character literals such as `L'A'` and `L'\n'` as integer constants for B1NIX libc wchar helpers. Covered by `tests/m22_wide_char_literal.c`.
 - [ ] Map GNU asm operands/register constraints; operand/constraint forms are currently parsed for tolerance and skipped rather than emitted.
 - [ ] Implement semantic handling for GCC attributes that affect code generation, layout, symbols, or calling convention; current covered attributes are syntax-tolerated only.
 - [ ] Support additional C standard header definitions and structures needed to compile complex external C programs (like `b1nix` kernel or TCC).

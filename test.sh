@@ -771,6 +771,23 @@ set -e
 test "$rc" = 42
 echo "ok m22_global_pointer_casted_string"
 
+./build/b1cc tests/m22_nested_array_initializer_braces.c -o "$tmp/m22_nested_array_initializer_braces"
+set +e
+"$tmp/m22_nested_array_initializer_braces"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_nested_array_initializer_braces"
+
+./build/b1cc tests/m22_wide_char_literal.c -o "$tmp/m22_wide_char_literal"
+set +e
+"$tmp/m22_wide_char_literal"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_wide_char_literal"
+
+
 ./build/b1cc tests/c23_empty_init.c -o "$tmp/c23_empty_init"
 set +e
 "$tmp/c23_empty_init"
@@ -965,6 +982,8 @@ self_host_case tests/m20_callee_varargs.c 42
 self_host_case tests/m20_self_host_local_array.c 42
 self_host_case tests/m20_assign_global_to_local.c 42
 self_host_case tests/m20_assign_nested_array_union.c 42
+self_host_case tests/m22_nested_array_initializer_braces.c 42
+self_host_case tests/m22_wide_char_literal.c 42
 echo "ok self_hosted_binary_compiles_corpus"
 
 ./build/b1cc --target=x86_64-b1nix tests/return_42.c -S -o "$tmp/return_42_x86_64.s"
