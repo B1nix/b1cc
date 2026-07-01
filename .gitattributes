@@ -1,0 +1,11 @@
+# Ensure shell scripts always have LF line endings (even on Windows)
+*.sh    text eol=lf
+*.py    text eol=lf
+Makefile text eol=lf
+# Windows scripts keep CRLF
+*.ps1   text eol=crlf
+# Patches must be LF
+*.patch text eol=lf
+
+# Generated Graphify reports should stay versioned, but not count as repo code.
+graphify-out/** linguist-generated=true
