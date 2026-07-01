@@ -887,6 +887,22 @@ set -e
 test "$rc" = 42
 echo "ok m20_aggregate_copy_nested"
 
+./build/b1cc tests/m20_assign_global_to_local.c -o "$tmp/m20_assign_global_to_local"
+set +e
+"$tmp/m20_assign_global_to_local"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m20_assign_global_to_local"
+
+./build/b1cc tests/m20_assign_nested_array_union.c -o "$tmp/m20_assign_nested_array_union"
+set +e
+"$tmp/m20_assign_nested_array_union"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m20_assign_nested_array_union"
+
 ./build/b1cc src/b1cc_token_lexer.c -o "$tmp/b1cc_token_lexer"
 "$tmp/b1cc_token_lexer" < tests/local.c > "$tmp/lexer_output.txt"
 grep -q "IDENT: int" "$tmp/lexer_output.txt"
@@ -947,6 +963,8 @@ self_host_case tests/argv.c 10 aa bbb cccc
 self_host_case tests/string_pointer.c 10
 self_host_case tests/m20_callee_varargs.c 42
 self_host_case tests/m20_self_host_local_array.c 42
+self_host_case tests/m20_assign_global_to_local.c 42
+self_host_case tests/m20_assign_nested_array_union.c 42
 echo "ok self_hosted_binary_compiles_corpus"
 
 ./build/b1cc --target=x86_64-b1nix tests/return_42.c -S -o "$tmp/return_42_x86_64.s"

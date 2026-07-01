@@ -203,10 +203,10 @@
 - [x] Add self-host regression tests for local string array initializers such as `char tmp[] = "/tmp/file-XXXXXX.s"` because the driver depends on them for temporary assembly/object paths.
 - [x] Document the current self-host coverage boundary: it builds a self-hosted compiler and runs a covered corpus including arithmetic/control-flow, arguments, string pointers, callee-side varargs, and local string array initializers.
 - [x] Add regression coverage for nested aggregate copy-by-value in the currently supported assignment forms: local aggregate copy initialization and global aggregate assignment. Covered by `tests/m20_aggregate_copy_nested.c`.
-- [ ] Fix local aggregate assignment from global aggregate sources for >8-byte structs.
-- [ ] Fix nested array/union field access inside aggregate-copy regression shapes before expanding the M20 copy tests to those cases.
-- [ ] Complete ISO C aggregate assignment/copy semantics beyond the covered struct/union assignment, by-value copy, nested struct copy initialization, global aggregate assignment, and ABI regression tests.
-- [ ] Add explicit regression tests before claiming future aggregate ABI target classes beyond the currently covered ARM64 Darwin and B1NIX large/float aggregate cases.
+- [x] Fix local aggregate assignment from global aggregate sources for >8-byte structs.
+- [x] Fix nested array/union field access inside aggregate-copy regression shapes before expanding the M20 copy tests to those cases.
+- [x] Complete ISO C aggregate assignment/copy semantics beyond the covered struct/union assignment, by-value copy, nested struct copy initialization, global aggregate assignment, and ABI regression tests.
+- [x] Add explicit regression tests before claiming future aggregate ABI target classes beyond the currently covered ARM64 Darwin and B1NIX large/float aggregate cases.
 
 ## M21: On-The-Fly Preprocessor Macro Expansion & X-Macros
 

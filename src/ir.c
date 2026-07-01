@@ -1162,9 +1162,19 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
             int rhs_is_call = (strcmp(node->lhs->op, "call") == 0);
             if (size > 8 && !rhs_is_call) {
                 lower_addr(node->lhs, fn, backend, arena);
-                ir_push(fn, "addr", "", loc_entry->val_int);
+                char local_key[512];
+                snprintf(local_key, sizeof(local_key), "%s$%s", fn->name, node->name);
+                if (hashmap_has(&ir_local_array_dims, local_key)) {
+                    ir_push(fn, "load", "", loc_entry->val_int);
+                } else {
+                    ir_push(fn, "addr", "", loc_entry->val_int);
+                }
                 ir_push(fn, "copy", "", size);
-                ir_push(fn, "addr", "", loc_entry->val_int);
+                if (hashmap_has(&ir_local_array_dims, local_key)) {
+                    ir_push(fn, "load", "", loc_entry->val_int);
+                } else {
+                    ir_push(fn, "addr", "", loc_entry->val_int);
+                }
             } else if (is_flt) {
                 lower_expr(node->lhs, fn, backend, arena);
                 if (!ir_expr_is_float(node->lhs)) ir_push(fn, "i2f", "", 0);
@@ -1177,7 +1187,13 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
                 }
                 ir_push(fn, "dup", "", 0);
                 if (size > 8) {
-                    ir_push(fn, "addr", "", loc_entry->val_int);
+                    char local_key[512];
+                    snprintf(local_key, sizeof(local_key), "%s$%s", fn->name, node->name);
+                    if (hashmap_has(&ir_local_array_dims, local_key)) {
+                        ir_push(fn, "load", "", loc_entry->val_int);
+                    } else {
+                        ir_push(fn, "addr", "", loc_entry->val_int);
+                    }
                     ir_push(fn, "store_agg", "", size);
                 } else if (target_scale == 4 && size == 8) {
                     ir_push(fn, "store64", "", loc_entry->val_int);
@@ -1781,7 +1797,13 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
             int rhs_is_call = (strcmp(stmt->lhs->op, "call") == 0);
             if (size > 8 && !rhs_is_call) {
                 lower_addr(stmt->lhs, fn, backend, arena);
-                ir_push(fn, "addr", "", loc_entry->val_int);
+                char local_key[512];
+                snprintf(local_key, sizeof(local_key), "%s$%s", fn->name, stmt->name);
+                if (hashmap_has(&ir_local_array_dims, local_key)) {
+                    ir_push(fn, "load", "", loc_entry->val_int);
+                } else {
+                    ir_push(fn, "addr", "", loc_entry->val_int);
+                }
                 ir_push(fn, "copy", "", size);
             } else if (is_flt) {
                 lower_expr(stmt->lhs, fn, backend, arena);
@@ -1793,7 +1815,13 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
                     ir_push(fn, stmt->lhs->is_unsigned ? "zext64" : "sext64", "", 0);
                 }
                 if (size > 8) {
-                    ir_push(fn, "addr", "", loc_entry->val_int);
+                    char local_key[512];
+                    snprintf(local_key, sizeof(local_key), "%s$%s", fn->name, stmt->name);
+                    if (hashmap_has(&ir_local_array_dims, local_key)) {
+                        ir_push(fn, "load", "", loc_entry->val_int);
+                    } else {
+                        ir_push(fn, "addr", "", loc_entry->val_int);
+                    }
                     ir_push(fn, "store_agg", "", size);
                 } else if (target_scale == 4 && size == 8) {
                     ir_push(fn, "store64", "", loc_entry->val_int);

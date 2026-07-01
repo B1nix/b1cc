@@ -746,7 +746,11 @@ static int parse_base_type(ParserState *p) {
                                     int sub_total = tot_e ? tot_e->val_int : sub_size;
                                     HashMapEntry *tag_e = hashmap_get(&p->global_struct_field_tags, f_key);
                                     const char *sub_tag = tag_e ? (const char *)tag_e->val_ptr : "";
-                                    LongArray *sub_dims = ir_get_struct_field_dims(f_key);
+                                    HashMapEntry *sub_dims_entry = hashmap_get(&p->global_struct_field_dims_by_tag, f_key);
+                                    LongArray *sub_dims = sub_dims_entry ? (LongArray *)sub_dims_entry->val_ptr : nullptr;
+                                    if (!sub_dims) {
+                                        sub_dims = ir_get_struct_field_dims(f_key);
+                                    }
                                     
                                     hashmap_put(&p->global_field_sizes, sub_field_name, nullptr, sub_size);
                                     
@@ -1526,7 +1530,11 @@ static Node *factor(ParserState *p) {
                 HashMapEntry *tot_entry = hashmap_get(&p->global_struct_field_total_sizes_by_tag, field_key);
                 field_total_sz = tot_entry ? tot_entry->val_int : field_sz;
                 
-                LongArray *dims_ptr = ir_get_struct_field_dims(field_key);
+                HashMapEntry *dims_entry = hashmap_get(&p->global_struct_field_dims_by_tag, field_key);
+                LongArray *dims_ptr = dims_entry ? (LongArray *)dims_entry->val_ptr : nullptr;
+                if (!dims_ptr) {
+                    dims_ptr = ir_get_struct_field_dims(field_key);
+                }
                 if (dims_ptr) {
                     for (int d_i = 0; d_i < dims_ptr->count; ++d_i) {
                         long_array_push(&field_dims, dims_ptr->data[d_i]);
@@ -1559,8 +1567,10 @@ static Node *factor(ParserState *p) {
 
             /* Bitfield metadata */
             if (field_key[0]) {
-                int bf_bit_offset = ir_get_struct_field_bit_offset(field_key);
-                int bf_bit_width  = ir_get_struct_field_bit_width(field_key);
+                HashMapEntry *bf_off_entry = hashmap_get(&p->global_struct_field_bit_offsets_by_tag, field_key);
+                int bf_bit_offset = bf_off_entry ? bf_off_entry->val_int : ir_get_struct_field_bit_offset(field_key);
+                HashMapEntry *bf_w_entry = hashmap_get(&p->global_struct_field_bit_widths_by_tag, field_key);
+                int bf_bit_width = bf_w_entry ? bf_w_entry->val_int : ir_get_struct_field_bit_width(field_key);
                 if (bf_bit_width > 0) {
                     parent->bit_offset = bf_bit_offset;
                     parent->bit_width  = bf_bit_width;
@@ -3655,19 +3665,30 @@ static Node *stmt(ParserState *p) {
                 if (p->last_parsed_struct_tag && p->last_parsed_struct_tag[0]) {
                     struct_tag = p->last_parsed_struct_tag;
                 }
+                int orig_base_size = base_size;
                 int is_unsigned = p->last_type_unsigned;
                 int is_bool = p->last_type_bool || strcmp(t_for, "_Bool") == 0 || strcmp(t_for, "bool") == 0;
+                int stars = 0;
                 while (strcmp(peek(p), "*") == 0) {
                     take(p, "*");
                     base_size = p->target_scale;
                     is_unsigned = 1;
+                    stars++;
                 }
+                int is_pointer = stars > 0;
+                int elem_scale = stars == 1 ? orig_base_size : (stars > 1 ? p->target_scale : 1);
                 const char *name = take(p, nullptr);
                 char local_name[256];
                 snprintf(local_name, sizeof(local_name), "%s.local.%d", name, p->local_var_counter++);
                 const char *local_name_dup = arena_strdup(p->arena, local_name);
                 hashmap_put(&p->scopes[p->scope_count - 1], name, (void *)local_name_dup, 0);
                 
+                char local_key[512];
+                snprintf(local_key, sizeof(local_key), "%s$%s", p->current_func_name, local_name_dup);
+                const char *local_key_dup = arena_strdup(p->arena, local_key);
+                ir_set_local_var_is_pointer(local_key_dup, is_pointer);
+                ir_set_local_var_elem_scale(local_key_dup, elem_scale);
+
                 hashmap_put(&p->unsigned_vars, local_name_dup, nullptr, is_unsigned);
                 hashmap_put(&p->bool_vars, local_name_dup, nullptr, is_bool);
                 hashmap_put(&p->value_sizes, local_name_dup, nullptr, base_size);
