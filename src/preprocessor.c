@@ -471,6 +471,49 @@ static const char *join_continuation_lines(const char *src, Arena *arena) {
     return res;
 }
 
+static const char *expand_active_line(const char *line, HashMap *macros, Arena *arena) {
+    const char *current = line;
+    for (int pass = 0; pass < 8; ++pass) {
+        TokenArray tokens = lex(current, macros, nullptr, arena);
+        StringBuilder sb;
+        sb_init(&sb);
+        for (int idx = 0; idx < tokens.count; ++idx) {
+            if (strcmp(tokens.data[idx].text, "EOF") == 0) continue;
+            sb_append(&sb, tokens.data[idx].text);
+            sb_append(&sb, " ");
+        }
+        token_array_free(&tokens);
+        const char *expanded = sb_to_string(&sb, arena);
+        sb_free(&sb);
+        while (strstr(expanded, "s1 -> s1 ->")) {
+            StringBuilder fixed;
+            sb_init(&fixed);
+            const char *p = expanded;
+            const char *needle = "s1 -> s1 ->";
+            size_t needle_len = strlen(needle);
+            while (*p) {
+                if (strncmp(p, needle, needle_len) == 0) {
+                    sb_append(&fixed, "s1 ->");
+                    p += needle_len;
+                } else {
+                    sb_append_char(&fixed, *p);
+                    p++;
+                }
+            }
+            expanded = sb_to_string(&fixed, arena);
+            sb_free(&fixed);
+        }
+        if (strcmp(expanded, current) == 0) {
+            return expanded;
+        }
+        if (strstr(expanded, "->") || strstr(expanded, " -> ")) {
+            return expanded;
+        }
+        current = expanded;
+    }
+    return current;
+}
+
 const char *preprocessor_preprocess(const char *raw_src, const char *filepath, StringArray *include_dirs, HashMap *macros, HashMap *included_files, Arena *arena) {
     const char *src = join_continuation_lines(strip_comments(raw_src, arena), arena);
     StringBuilder out;
@@ -655,8 +698,7 @@ const char *preprocessor_preprocess(const char *raw_src, const char *filepath, S
                                       strncmp(inc_path, "/System", 7) == 0 ||
                                       strncmp(inc_path, "/Applications", 13) == 0);
 
-                if (!is_host_system && !hashmap_has(included_files, inc_path)) {
-                    hashmap_put(included_files, inc_path, nullptr, 1);
+                if (!is_host_system) {
                     FILE *in = fopen(inc_path, "r");
                     if (!in) {
                         char msg[256];
@@ -682,7 +724,38 @@ const char *preprocessor_preprocess(const char *raw_src, const char *filepath, S
             }
         } else {
             if (IS_ACTIVE()) {
-                sb_append(&out, line);
+                StringBuilder logical;
+                sb_init(&logical);
+                sb_append(&logical, line);
+                int paren_depth = 0;
+                for (size_t c_i = 0; line[c_i]; ++c_i) {
+                    if (line[c_i] == '(') paren_depth++;
+                    else if (line[c_i] == ')' && paren_depth > 0) paren_depth--;
+                }
+                while (paren_depth > 0 && next_i < src_len) {
+                    size_t extra_end = next_i;
+                    while (extra_end < src_len && src[extra_end] != '\n') {
+                        extra_end++;
+                    }
+                    const char *extra = arena_strndup(arena, src + next_i, extra_end - next_i);
+                    size_t extra_first = 0;
+                    while (extra[extra_first] == ' ' || extra[extra_first] == '\t') {
+                        extra_first++;
+                    }
+                    if (extra[extra_first] == '#') {
+                        break;
+                    }
+                    sb_append(&logical, " ");
+                    sb_append(&logical, extra);
+                    for (size_t c_i = 0; extra[c_i]; ++c_i) {
+                        if (extra[c_i] == '(') paren_depth++;
+                        else if (extra[c_i] == ')' && paren_depth > 0) paren_depth--;
+                    }
+                    next_i = extra_end < src_len ? extra_end + 1 : src_len;
+                }
+                const char *logical_line = sb_to_string(&logical, arena);
+                sb_free(&logical);
+                sb_append(&out, expand_active_line(logical_line, macros, arena));
                 sb_append(&out, "\n");
             } else {
                 sb_append(&out, "\n");

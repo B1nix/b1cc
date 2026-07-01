@@ -44,6 +44,7 @@ typedef struct {
     HashMap global_struct_field_sizes_by_tag;
     HashMap global_struct_field_float_sizes_by_tag;
     HashMap global_struct_field_elem_sizes_by_tag;
+    HashMap global_struct_field_is_pointer_by_tag;
     HashMap global_struct_field_total_sizes_by_tag;
     HashMap global_struct_field_dims_by_tag;
     HashMap global_struct_field_bit_offsets_by_tag;

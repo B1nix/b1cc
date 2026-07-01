@@ -119,7 +119,9 @@ static const char *i386_emit_globals(TargetBackend *self, const IrGlobalVarArray
         for (int i = 0; i < globals->count; ++i) {
             const IrGlobalVar *g = &globals->data[i];
             for (int k = 0; k < g->strings.count; ++k) {
-                sb_appendf(&out, "%s:\n    .asciz \"%s\"\n", g->strings.data[k].first, g->strings.data[k].second);
+                if (g->strings.data[k].second) {
+                    sb_appendf(&out, "%s:\n    .asciz \"%s\"\n", g->strings.data[k].first, g->strings.data[k].second);
+                }
             }
         }
     }
@@ -212,7 +214,12 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
             last_loc_line = inst->line;
             last_loc_col = inst->col;
         }
-        if (strcmp(inst->op, "const") == 0) {
+        if (strcmp(inst->op, "asm") == 0) {
+            sb_append(&out, inst->arg);
+            if (inst->arg[0] && inst->arg[strlen(inst->arg) - 1] != '\n') {
+                sb_append(&out, "\n");
+            }
+        } else if (strcmp(inst->op, "const") == 0) {
             sb_appendf(&out, "    movl $%ld, %%eax\n", inst->value);
             sb_append(&out, "    pushl %eax\n");
         } else if (strcmp(inst->op, "const64") == 0) {

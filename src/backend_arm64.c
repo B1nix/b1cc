@@ -112,6 +112,14 @@ static int is_defined_global(const char *name) {
     return 0;
 }
 
+static void arm64_emit_data_symbol_ref(StringBuilder *out, const char *label) {
+    if (label[0] == '.' || label[0] == '_') {
+        sb_appendf(out, "    .quad %s\n", label);
+    } else {
+        sb_appendf(out, "    .quad _%s\n", label);
+    }
+}
+
 static const char *arm64_emit_globals(TargetBackend *self, const IrGlobalVarArray *globals, Arena *arena) {
     (void)self;
     if (globals->count == 0)
@@ -143,10 +151,10 @@ static const char *arm64_emit_globals(TargetBackend *self, const IrGlobalVarArra
                     int str_idx = (int)g->initializers.data[k];
                     const char *str_lbl = g->strings.data[str_idx].first;
                     if (g->elem_size == 1) {
-                        sb_appendf(&out, "    .quad %s\n", str_lbl);
+                        arm64_emit_data_symbol_ref(&out, str_lbl);
                         k += 8;
                     } else {
-                        sb_appendf(&out, "    .quad %s\n", str_lbl);
+                        arm64_emit_data_symbol_ref(&out, str_lbl);
                         k++;
                     }
                 } else {
@@ -170,7 +178,7 @@ static const char *arm64_emit_globals(TargetBackend *self, const IrGlobalVarArra
             if (g->initializer_is_string.count > 0 && g->initializer_is_string.data[0]) {
                 int str_idx = (int)g->initializers.data[0];
                 const char *str_lbl = g->strings.data[str_idx].first;
-                sb_appendf(&out, "    .quad %s\n", str_lbl);
+                arm64_emit_data_symbol_ref(&out, str_lbl);
             } else {
                 long val = (g->initializers.count == 0) ? 0 : g->initializers.data[0];
                 if (g->elem_size == 1)
@@ -198,7 +206,9 @@ static const char *arm64_emit_globals(TargetBackend *self, const IrGlobalVarArra
         for (int i = 0; i < globals->count; ++i) {
             const IrGlobalVar *g = &globals->data[i];
             for (int k = 0; k < g->strings.count; ++k) {
-                sb_appendf(&out, "%s:\n    .asciz \"%s\"\n", g->strings.data[k].first, g->strings.data[k].second);
+                if (g->strings.data[k].second) {
+                    sb_appendf(&out, "%s:\n    .asciz \"%s\"\n", g->strings.data[k].first, g->strings.data[k].second);
+                }
             }
         }
     }
@@ -358,7 +368,12 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
             last_loc_line = inst->line;
             last_loc_col = inst->col;
         }
-        if (strcmp(inst->op, "const") == 0) {
+        if (strcmp(inst->op, "asm") == 0) {
+            sb_append(&out, inst->arg);
+            if (inst->arg[0] && inst->arg[strlen(inst->arg) - 1] != '\n') {
+                sb_append(&out, "\n");
+            }
+        } else if (strcmp(inst->op, "const") == 0) {
             if (inst->value >= 0 && inst->value <= 65535) {
                 sb_appendf(&out, "    mov x0, #%ld\n", inst->value);
             } else {

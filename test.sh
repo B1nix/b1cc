@@ -405,6 +405,25 @@ set -e
 test "$rc" = 0
 echo "ok m17_if_macro_expr"
 
+./build/b1cc -I tests/include tests/m21_xmacro_undef.c -o "$tmp/m21_xmacro_undef"
+set +e
+"$tmp/m21_xmacro_undef"
+rc=$?
+set -e
+test "$rc" = 42
+./build/b1cc -E -I tests/include tests/m21_xmacro_undef.c -o "$tmp/m21_xmacro_undef.i"
+grep -q 'generated_alpha' "$tmp/m21_xmacro_undef.i"
+! grep -q 'M21_ITEM' "$tmp/m21_xmacro_undef.i"
+echo "ok m21_xmacro_undef"
+
+./build/b1cc -I tests/include tests/m21_repeat_xmacro.c -o "$tmp/m21_repeat_xmacro"
+set +e
+"$tmp/m21_repeat_xmacro"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m21_repeat_xmacro"
+
 ./build/b1cc tests/m18_aggregates.c -o "$tmp/m18_aggregates"
 set +e
 "$tmp/m18_aggregates"
@@ -533,6 +552,225 @@ set -e
 test "$rc" = 0
 echo "ok c23_attributes"
 
+./build/b1cc tests/m22_gnu_extensions.c -o "$tmp/m22_gnu_extensions"
+set +e
+"$tmp/m22_gnu_extensions"
+rc=$?
+set -e
+test "$rc" = 42
+./build/b1cc tests/m22_gnu_extensions.c -S -o "$tmp/m22_gnu_extensions.s"
+grep -q '_m22_global_asm_marker:' "$tmp/m22_gnu_extensions.s"
+grep -q 'nop' "$tmp/m22_gnu_extensions.s"
+echo "ok m22_gnu_extensions"
+
+./build/b1cc tests/m22_enum_const_expr.c -o "$tmp/m22_enum_const_expr"
+set +e
+"$tmp/m22_enum_const_expr"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_enum_const_expr"
+
+./build/b1cc tests/m22_comma_expr.c -o "$tmp/m22_comma_expr"
+set +e
+"$tmp/m22_comma_expr"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_comma_expr"
+
+./build/b1cc tests/m22_adjacent_string_array.c -o "$tmp/m22_adjacent_string_array"
+set +e
+"$tmp/m22_adjacent_string_array"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_adjacent_string_array"
+
+./build/b1cc tests/m22_goto_label.c -o "$tmp/m22_goto_label"
+set +e
+"$tmp/m22_goto_label"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_goto_label"
+
+./build/b1cc tests/m22_prefix_lvalue.c -o "$tmp/m22_prefix_lvalue"
+set +e
+"$tmp/m22_prefix_lvalue"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_prefix_lvalue"
+
+./build/b1cc tests/m22_mixed_local_declarators.c -o "$tmp/m22_mixed_local_declarators"
+set +e
+"$tmp/m22_mixed_local_declarators"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_mixed_local_declarators"
+
+./build/b1cc tests/m22_tcc_struct_table_init.c -o "$tmp/m22_tcc_struct_table_init"
+set +e
+"$tmp/m22_tcc_struct_table_init"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_tcc_struct_table_init"
+
+./build/b1cc tests/m22_typedef_storage_after_type.c -o "$tmp/m22_typedef_storage_after_type"
+set +e
+"$tmp/m22_typedef_storage_after_type"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_typedef_storage_after_type"
+
+./build/b1cc tests/m22_global_function_pointer_initializer.c -o "$tmp/m22_global_function_pointer_initializer"
+set +e
+"$tmp/m22_global_function_pointer_initializer"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_global_function_pointer_initializer"
+
+./build/b1cc tests/m22_builtin_offsetof_initializer.c -o "$tmp/m22_builtin_offsetof_initializer"
+set +e
+"$tmp/m22_builtin_offsetof_initializer"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_builtin_offsetof_initializer"
+
+./build/b1cc tests/m22_struct_char_array_string_init.c -o "$tmp/m22_struct_char_array_string_init"
+set +e
+"$tmp/m22_struct_char_array_string_init"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_struct_char_array_string_init"
+
+./build/b1cc tests/m22_local_shadows_enum.c -o "$tmp/m22_local_shadows_enum"
+set +e
+"$tmp/m22_local_shadows_enum"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_local_shadows_enum"
+
+./build/b1cc tests/m22_struct_tail_attribute.c -o "$tmp/m22_struct_tail_attribute"
+set +e
+"$tmp/m22_struct_tail_attribute"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_struct_tail_attribute"
+
+./build/b1cc tests/m22_function_asm_label.c -o "$tmp/m22_function_asm_label"
+set +e
+"$tmp/m22_function_asm_label"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_function_asm_label"
+
+./build/b1cc tests/m22_local_array_constexpr_dim.c -o "$tmp/m22_local_array_constexpr_dim"
+set +e
+"$tmp/m22_local_array_constexpr_dim"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_local_array_constexpr_dim"
+
+./build/b1cc tests/m22_block_scope_extern.c -o "$tmp/m22_block_scope_extern"
+set +e
+"$tmp/m22_block_scope_extern"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_block_scope_extern"
+
+./build/b1cc tests/m22_local_enum_variable.c -o "$tmp/m22_local_enum_variable"
+set +e
+"$tmp/m22_local_enum_variable"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_local_enum_variable"
+
+./build/b1cc tests/m22_function_pointer_type_cast.c -o "$tmp/m22_function_pointer_type_cast"
+set +e
+"$tmp/m22_function_pointer_type_cast"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_function_pointer_type_cast"
+
+./build/b1cc tests/m22_compound_literal_zero.c -o "$tmp/m22_compound_literal_zero"
+set +e
+"$tmp/m22_compound_literal_zero"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_compound_literal_zero"
+
+./build/b1cc tests/m22_compound_literal_array_cast.c -o "$tmp/m22_compound_literal_array_cast"
+set +e
+"$tmp/m22_compound_literal_array_cast"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_compound_literal_array_cast"
+
+./build/b1cc tests/m22_local_struct_definition_declarator.c -o "$tmp/m22_local_struct_definition_declarator"
+set +e
+"$tmp/m22_local_struct_definition_declarator"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_local_struct_definition_declarator"
+
+./build/b1cc tests/m22_array_designated_initializer.c -o "$tmp/m22_array_designated_initializer"
+set +e
+"$tmp/m22_array_designated_initializer"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_array_designated_initializer"
+
+./build/b1cc tests/m22_global_pointer_address_initializer.c -o "$tmp/m22_global_pointer_address_initializer"
+set +e
+"$tmp/m22_global_pointer_address_initializer"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_global_pointer_address_initializer"
+
+./build/b1cc tests/m22_global_function_pointer_array.c -o "$tmp/m22_global_function_pointer_array"
+set +e
+"$tmp/m22_global_function_pointer_array"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_global_function_pointer_array"
+
+./build/b1cc tests/m22_static_local_mixed_scalars.c -o "$tmp/m22_static_local_mixed_scalars"
+set +e
+"$tmp/m22_static_local_mixed_scalars"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_static_local_mixed_scalars"
+
+./build/b1cc tests/m22_global_pointer_casted_string.c -o "$tmp/m22_global_pointer_casted_string"
+set +e
+"$tmp/m22_global_pointer_casted_string"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_global_pointer_casted_string"
+
 ./build/b1cc tests/c23_empty_init.c -o "$tmp/c23_empty_init"
 set +e
 "$tmp/c23_empty_init"
@@ -640,6 +878,14 @@ rc=$?
 set -e
 test "$rc" = 42
 echo "ok m20_self_host_local_array"
+
+./build/b1cc tests/m20_aggregate_copy_nested.c -o "$tmp/m20_aggregate_copy_nested"
+set +e
+"$tmp/m20_aggregate_copy_nested"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m20_aggregate_copy_nested"
 
 ./build/b1cc src/b1cc_token_lexer.c -o "$tmp/b1cc_token_lexer"
 "$tmp/b1cc_token_lexer" < tests/local.c > "$tmp/lexer_output.txt"

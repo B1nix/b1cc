@@ -54,6 +54,14 @@ static int exists(const char *path) {
     return 0;
 }
 
+static void define_object_macro(Arena *arena, const char *name, const char *body) {
+    Macro *m = arena_alloc(arena, sizeof(Macro));
+    m->is_function_like = false;
+    string_array_init(&m->params);
+    m->body = body;
+    hashmap_put(&preprocessor_driver_macros, name, m, 0);
+}
+
 static const char *shell_quote(const char *s, Arena *arena) {
     StringBuilder out;
     sb_init(&out);
@@ -129,6 +137,7 @@ int main(int argc, char **argv) {
 
     string_array_init(&preprocessor_driver_include_dirs);
     hashmap_init(&preprocessor_driver_macros, 64);
+    define_object_macro(&arena, "__b1cc__", "1");
     string_array_push(&preprocessor_driver_include_dirs, ".");
     string_array_push(&preprocessor_driver_include_dirs, "../b1nix/userspace/include");
     string_array_push(&preprocessor_driver_include_dirs, "/usr/include");
@@ -184,11 +193,7 @@ int main(int argc, char **argv) {
                 name = arena_strndup(&arena, def, eq - def);
                 val = eq + 1;
             }
-            Macro *m = arena_alloc(&arena, sizeof(Macro));
-            m->is_function_like = false;
-            string_array_init(&m->params);
-            m->body = val;
-            hashmap_put(&preprocessor_driver_macros, name, m, 0);
+            define_object_macro(&arena, name, val);
         } else if (arg[0] == '-' && strcmp(arg, "-") != 0) {
             string_array_push(&link_flags, arg);
         } else {
@@ -200,23 +205,9 @@ int main(int argc, char **argv) {
         diagnostics_fatal("usage: b1cc [-S] [-c] [-E] [-fdump-ast] [-fdump-ir] input.c ... [-o output]");
 
     if (strcmp(target, "arm64-darwin") == 0) {
-        Macro *m_in = arena_alloc(&arena, sizeof(Macro));
-        m_in->is_function_like = false;
-        string_array_init(&m_in->params);
-        m_in->body = "__stdinp";
-        hashmap_put(&preprocessor_driver_macros, "stdin", m_in, 0);
-
-        Macro *m_out = arena_alloc(&arena, sizeof(Macro));
-        m_out->is_function_like = false;
-        string_array_init(&m_out->params);
-        m_out->body = "__stdoutp";
-        hashmap_put(&preprocessor_driver_macros, "stdout", m_out, 0);
-
-        Macro *m_err = arena_alloc(&arena, sizeof(Macro));
-        m_err->is_function_like = false;
-        string_array_init(&m_err->params);
-        m_err->body = "__stderrp";
-        hashmap_put(&preprocessor_driver_macros, "stderr", m_err, 0);
+        define_object_macro(&arena, "stdin", "__stdinp");
+        define_object_macro(&arena, "stdout", "__stdoutp");
+        define_object_macro(&arena, "stderr", "__stderrp");
     }
 
     const char *cc = "cc";
@@ -261,7 +252,7 @@ int main(int argc, char **argv) {
             const char *prep = preprocessor_preprocess(read_file(inp, &arena), inp, &preprocessor_driver_include_dirs, &macros, &included_files, &arena);
             hashmap_free(&included_files);
 
-            TokenArray toks = lex(prep, &macros, nullptr, &arena);
+            TokenArray toks = lex(prep, nullptr, nullptr, &arena);
             hashmap_free(&macros);
 
             for (int t_i = 0; t_i < toks.count; ++t_i) {

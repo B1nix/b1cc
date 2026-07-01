@@ -157,7 +157,7 @@ const char *backend_compile_asm(const char *src, const char *target, bool dump_a
     const char *preprocessed_src = preprocessor_preprocess(src, diagnostics_filepath, &preprocessor_driver_include_dirs, &macros, &included_files, arena);
     hashmap_free(&included_files);
 
-    TokenArray tokens = lex(preprocessed_src, &macros, nullptr, arena);
+    TokenArray tokens = lex(preprocessed_src, nullptr, nullptr, arena);
     hashmap_free(&macros);
 
     NodeArray ast = parser_parse(&tokens, target_scale, arena);
@@ -192,6 +192,16 @@ const char *backend_compile_asm(const char *src, const char *target, bool dump_a
     sb_init(&out);
 
     sb_appendf(&out, "\t.file 1 \"%s\"\n", diagnostics_filepath ? diagnostics_filepath : "source.c");
+    if (ir_global_asm_blocks.count > 0) {
+        sb_append(&out, ".text\n");
+        for (int asm_i = 0; asm_i < ir_global_asm_blocks.count; ++asm_i) {
+            sb_append(&out, ir_global_asm_blocks.data[asm_i]);
+            if (ir_global_asm_blocks.data[asm_i][0] &&
+                ir_global_asm_blocks.data[asm_i][strlen(ir_global_asm_blocks.data[asm_i]) - 1] != '\n') {
+                sb_append(&out, "\n");
+            }
+        }
+    }
     sb_append(&out, backend->emit_globals(backend, &ir_global_decls, arena));
 
     for (int k = 0; k < ir_functions.count; ++k) {

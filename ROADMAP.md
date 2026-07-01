@@ -201,22 +201,59 @@
 - [x] Replace remaining self-host workarounds for by-value aggregate copies with real aggregate copy lowering for compiler-used value structs, while preserving intentionally pointer-based API boundaries.
 - [x] Extend aggregate return/call lowering beyond the earlier small integer/pointer aggregate subset, with explicit large and float aggregate ABI tests.
 - [x] Add self-host regression tests for local string array initializers such as `char tmp[] = "/tmp/file-XXXXXX.s"` because the driver depends on them for temporary assembly/object paths.
-
-## Honest M20 Gaps
-
-- M20 self-host coverage now builds a self-hosted compiler and runs a covered corpus including arithmetic/control-flow, arguments, string pointers, callee-side varargs, and local string array initializers.
-- Aggregate assignment/copy support is still pragmatic and test-driven; do not claim complete ISO C aggregate semantics beyond the covered struct/union assignment, by-value copy, and ABI regression tests.
-- Aggregate ABI support remains pragmatic and test-driven. The covered ARM64 Darwin and B1NIX assembly tests include large and float aggregates, but future target ABI classes should still land with explicit regression tests.
+- [x] Document the current self-host coverage boundary: it builds a self-hosted compiler and runs a covered corpus including arithmetic/control-flow, arguments, string pointers, callee-side varargs, and local string array initializers.
+- [x] Add regression coverage for nested aggregate copy-by-value in the currently supported assignment forms: local aggregate copy initialization and global aggregate assignment. Covered by `tests/m20_aggregate_copy_nested.c`.
+- [ ] Fix local aggregate assignment from global aggregate sources for >8-byte structs.
+- [ ] Fix nested array/union field access inside aggregate-copy regression shapes before expanding the M20 copy tests to those cases.
+- [ ] Complete ISO C aggregate assignment/copy semantics beyond the covered struct/union assignment, by-value copy, nested struct copy initialization, global aggregate assignment, and ABI regression tests.
+- [ ] Add explicit regression tests before claiming future aggregate ABI target classes beyond the currently covered ARM64 Darwin and B1NIX large/float aggregate cases.
 
 ## M21: On-The-Fly Preprocessor Macro Expansion & X-Macros
 
-- [ ] Move macro expansion from a post-preprocessing phase in `lex()` to on-the-fly expansion during `preprocessor_preprocess()` (Translation Phase 4).
-- [ ] Fix the `#undef` shadowing issue where macros defined and undefined inside headers (like temporary generator macros in X-macro patterns, e.g., `__define_stab` in `stab.h`) are never expanded because they are removed before post-preprocess tokenization.
+- [x] Move normal active-line macro expansion from the compile-time post-preprocessing `lex()` call to on-the-fly expansion during `preprocessor_preprocess()` for the currently supported macro subset.
+- [x] Fix the covered `#undef` shadowing issue where macros defined and undefined inside headers are expanded before they are removed. Covered by `tests/m21_xmacro_undef.c`.
+- [x] Add `-E` regression coverage showing X-macro expansion appears in preprocessed output and the temporary macro invocation does not survive past header-local `#undef`.
+- [x] Support repeated non-system X-macro includes with different macro bodies instead of suppressing the second include globally. Covered by `tests/m21_repeat_xmacro.c`.
+- [x] Support the covered object-like macro alias to function-like macro expansion pattern used by TCC opcode tables, such as `DEF_BWLX` expanding to `DEF_BWLQ` before invocation. Covered by `tests/m21_xmacro_undef.c`.
+- [ ] Replace the internal reuse of the lexer macro expansion engine with a dedicated preprocessing-token expander if full C preprocessor token spacing, source-location fidelity, or additional obscure macro edge cases require it.
 
 ## M22: GNU C Extensions & Kernel / TCC Compilation Support
 
-- [ ] Support GCC-style inline assembly (`__asm__`, `__asm__ __volatile__`, or `asm`) declarations and statements, mapping basic register constraints or treating them as inline pass-throughs.
-- [ ] Support standard GCC attribute tags (`__attribute__((...))`) and calling convention qualifiers for target compliance.
+- [x] Support covered GCC-style inline assembly (`__asm__`, `__asm__ __volatile__`, or `asm`) declarations and statements as inline pass-through template-only asm.
+- [x] Add tolerant parsing/skipping for covered GCC-style `asm` declarations/statements and common calling convention qualifiers, plus existing `__attribute__((...))` skipping coverage. Covered by `tests/m22_gnu_extensions.c`.
+- [x] Emit/preserve covered GNU `asm` forms in backend assembly instead of only accepting and skipping them. Covered by `tests/m22_gnu_extensions.c` assembly checks for top-level and statement asm templates.
+- [x] Support enum constant-expression initializers needed by external compiler sources. Covered by `tests/m22_enum_const_expr.c`.
+- [x] Support comma expressions in expression statements, control-flow conditions, and `for` step expressions. Covered by `tests/m22_comma_expr.c`.
+- [x] Support adjacent string literal concatenation in global `char[]` initializers and ordinary expression positions. Covered by `tests/m22_adjacent_string_array.c`.
+- [x] Support user labels and `goto` lowering for covered intra-function jumps. Covered by `tests/m22_goto_label.c`.
+- [x] Support prefix `++`/`--` on non-identifier scalar lvalues such as struct fields. Covered by `tests/m22_prefix_lvalue.c`.
+- [x] Preserve the `__b1cc__` predefined macro at preprocessing time so self-hosted common code keeps using the fixed-arity `sb_appendf` path after on-the-fly macro expansion. Verified by `b1cc -E src/common.c` selecting the fixed-arity branch and by the self-hosted corpus in `make test`.
+- [x] Support mixed local declarations where an array declarator is followed by simple scalar/pointer declarators, such as `char buf[4], *e;`. Covered by `tests/m22_mixed_local_declarators.c`.
+- [x] Evaluate conditional `?:` constant expressions inside global aggregate initializers used by TCC-style struct opcode tables. Covered by `tests/m22_tcc_struct_table_init.c`.
+- [x] Accept covered typedef-based global declarations where a macro places `static`/`extern` after the typedef name, such as TCC's `TCC_SEM(static tcc_compile_sem)`. Covered by `tests/m22_typedef_storage_after_type.c`.
+- [x] Support covered global function pointer declarations initialized with function symbols, such as TCC's `static void *(*reallocator)(...) = default_reallocator;`. Covered by `tests/m22_global_function_pointer_initializer.c`.
+- [x] Fold covered `__builtin_offsetof(Type, field)` expressions inside global aggregate initializers. Covered by `tests/m22_builtin_offsetof_initializer.c`.
+- [x] Expand string literals used as `char[N]` fields inside struct aggregate initializers. Covered by `tests/m22_struct_char_array_string_init.c`.
+- [x] Resolve local variables before global enum constants when names collide, so TCC-style loops such as `for (...; --n > 0;)` lower as lvalues. Covered by `tests/m22_local_shadows_enum.c`.
+- [x] Tolerate null constant address-lowering in covered TCC configuration/dead-code paths by lowering address requests for numeric zero to a null pointer constant.
+- [x] Accept GNU tail attributes after `struct/union` definitions, including packed nested fields used by B1NIX kernel headers. Covered by `tests/m22_struct_tail_attribute.c`.
+- [x] Tolerate GNU asm labels after function declarators/prototypes, such as kernel atomic builtin declarations. Covered by `tests/m22_function_asm_label.c`.
+- [x] Evaluate constant expressions in local array dimensions and tolerate covered runtime-sized local arrays with a conservative fixed fallback for object compilation, including mixed local declarators. Covered by `tests/m22_local_array_constexpr_dim.c`.
+- [x] Tolerate block-scope `extern` declarations/prototypes used by B1NIX kernel sources. Covered by `tests/m22_block_scope_extern.c`.
+- [x] Parse local variables declared with enum types. Covered by `tests/m22_local_enum_variable.c`.
+- [x] Parse covered function-pointer type casts such as `(void (*)(int))0` used by kernel signal macros. Covered by `tests/m22_function_pointer_type_cast.c`.
+- [x] Tolerate zero compound literals after casts, such as `(struct sigaction){0}` in B1NIX kernel signal handling. Covered by `tests/m22_compound_literal_zero.c`.
+- [x] Tolerate compound literals with array type casts such as `(char *[]){"root"}` in userspace libc tables. Covered by `tests/m22_compound_literal_array_cast.c`.
+- [x] Tolerate address-lowering of covered aggregate ternary expressions in kernel signal fallback assignments so object compilation can continue; full addressable aggregate ternary semantics remain future work.
+- [x] Support local `struct/union` definitions followed by a declarator, such as `struct k_sigevent { ... } sev;`. Covered by `tests/m22_local_struct_definition_declarator.c`.
+- [x] Support covered array designated initializers such as `[1] = 7` in global aggregate tables. Covered by `tests/m22_array_designated_initializer.c`.
+- [x] Support global pointer initializers that take the address of another global symbol, such as `FILE *stdin = &_stdin;`. Covered by `tests/m22_global_pointer_address_initializer.c`.
+- [x] Parse global arrays of function pointers such as `static void (*atexit_funcs[32])(void);`. Covered by `tests/m22_global_function_pointer_array.c`.
+- [x] Support global pointer and aggregate initializers with casted string literals, such as `char *program_invocation_name = (char *)"b1nix";` and `{ (char *)"UTC" }`. Covered by `tests/m22_global_pointer_casted_string.c`.
+- [x] Support static-local `char[N] = "..."` initializers used by userspace libc timezone state. Covered by `tests/m22_global_pointer_casted_string.c`.
+- [x] Support mixed static-local scalar declarations such as `static int probed, has_tls;`. Covered by `tests/m22_static_local_mixed_scalars.c`.
+- [ ] Map GNU asm operands/register constraints; operand/constraint forms are currently parsed for tolerance and skipped rather than emitted.
+- [ ] Implement semantic handling for GCC attributes that affect code generation, layout, symbols, or calling convention; current covered attributes are syntax-tolerated only.
 - [ ] Support additional C standard header definitions and structures needed to compile complex external C programs (like `b1nix` kernel or TCC).
 
 Skipped: full C/C++ upfront. Add features only when a test or B1NIX source needs them.

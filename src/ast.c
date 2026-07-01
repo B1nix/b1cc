@@ -1,5 +1,7 @@
 #include "ast.h"
-#include <stdlib.h>
+
+void *realloc(void *ptr, size_t size);
+void free(void *ptr);
 
 void token_array_init(TokenArray *arr) {
     arr->data = nullptr;

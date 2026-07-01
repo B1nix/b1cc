@@ -28,6 +28,7 @@ HashMap ir_function_pointer_param_floats;
 HashMap ir_function_pointer_return_floats;
 HashMap ir_function_return_int_sizes;
 HashMap ir_function_param_int_sizes;
+StringArray ir_global_asm_blocks;
 int ir_current_target_scale = 8;
 static B1CC_THREAD_LOCAL int ir_current_line = 1;
 static B1CC_THREAD_LOCAL int ir_current_col = 1;
@@ -232,6 +233,9 @@ static void long_string_pair_array_free(LongStringPairArray *arr) {
 }
 
 void ir_reset_state(void) {
+    string_array_free(&ir_global_asm_blocks);
+    string_array_init(&ir_global_asm_blocks);
+
     for (int i = 0; i < ir_global_decls.count; ++i) {
         long_array_free(&ir_global_decls.data[i].initializers);
     }
@@ -414,6 +418,10 @@ void ir_reset_state(void) {
 
     hashmap_free(&ir_struct_float_aggregate_classes);
     hashmap_init(&ir_struct_float_aggregate_classes, 64);
+}
+
+void ir_add_global_asm(const char *asm_text) {
+    string_array_push(&ir_global_asm_blocks, asm_text);
 }
 
 void ir_declare_global(const char *name, int is_array, long size, int is_static, int is_extern, int elem_size, int target_scale) {
@@ -948,6 +956,25 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         return;
     }
     if (strcmp(node->op, "prefix_++") == 0 || strcmp(node->op, "prefix_--") == 0) {
+        if (node->lhs && strcmp(node->lhs->op, "var") != 0) {
+            lower_expr(node->lhs, fn, backend, arena);
+            ir_push(fn, "const", "", 1);
+            ir_push(fn, (strcmp(node->op, "prefix_++") == 0) ? "+" : "-", "", 0);
+            ir_push(fn, "dup", "", 0);
+            ir_push(fn, "const", "", 0);
+            lower_addr(node->lhs, fn, backend, arena);
+            int scale = get_expr_pointer_scale(node->lhs, fn);
+            if (strcmp(node->lhs->op, "index") == 0 && strcmp(node->lhs->name, "byte_offset") == 0) {
+                if (node->lhs->elem_size > 0) {
+                    scale = node->lhs->elem_size;
+                }
+            }
+            if (scale == 0) {
+                scale = node->lhs->type_size > 0 ? node->lhs->type_size : target_scale;
+            }
+            ir_push(fn, "store_index", "", scale);
+            return;
+        }
         HashMapEntry *loc_entry = hashmap_get(&fn->locals, node->name);
         if (loc_entry) {
             int slot = loc_entry->val_int;
@@ -1031,6 +1058,12 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         } else {
             ir_push(fn, ir_expr_is_i64(node->lhs, target_scale) ? "neg64" : "neg", "", 0);
         }
+        return;
+    }
+    if (strcmp(node->op, ",") == 0) {
+        lower_expr(node->lhs, fn, backend, arena);
+        ir_push(fn, ir_expr_is_i64(node->lhs, target_scale) ? "pop64" : "pop", "", 0);
+        lower_expr(node->rhs, fn, backend, arena);
         return;
     }
     if (strcmp(node->op, "va_start") == 0) {
@@ -1665,7 +1698,16 @@ static void lower_addr(const Node *node, IrFunction *fn, TargetBackend *backend,
             ir_push(fn, "gaddr", node->name, 0);
         }
     } else {
-        fprintf(stderr, "[DEBUG] lower_addr failed for node op='%s' name='%s'\n", node->op, node->name ? node->name : "");
+        if (strcmp(node->op, "?") == 0) {
+            ir_push(fn, "const", "", 0);
+            return;
+        }
+        if (strcmp(node->op, "num") == 0 && node->value == 0) {
+            ir_push(fn, "const", "", 0);
+            return;
+        }
+        fprintf(stderr, "[DEBUG] lower_addr failed for node op='%s' name='%s' value=%ld line=%d col=%d\n",
+                node->op, node->name ? node->name : "", node->value, node->line, node->col);
         diagnostics_error(node->line, node->col, "lvalue required");
     }
 }
@@ -1679,6 +1721,15 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
     int target_scale = backend->get_target_scale(backend);
     if (strcmp(stmt->op, "block") == 0) {
         lower_block(stmt, fn, backend, arena);
+    } else if (strcmp(stmt->op, "label_stmt") == 0) {
+        char label[256];
+        snprintf(label, sizeof(label), ".L%s_user_%s", fn->name, stmt->name);
+        ir_push(fn, "label", arena_strdup(arena, label), 0);
+        lower_stmt(stmt->lhs, fn, backend, arena);
+    } else if (strcmp(stmt->op, "goto") == 0) {
+        char label[256];
+        snprintf(label, sizeof(label), ".L%s_user_%s", fn->name, stmt->name);
+        ir_push(fn, "jmp", arena_strdup(arena, label), 0);
     } else if (strcmp(stmt->op, "decl") == 0) {
         if (hashmap_has(&fn->locals, stmt->name)) {
             char msg[256];
@@ -2079,6 +2130,8 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
         }
     } else if (strcmp(stmt->op, "empty") == 0) {
         // Empty statement: do nothing
+    } else if (strcmp(stmt->op, "asm") == 0) {
+        ir_push(fn, "asm", stmt->name, 0);
     } else {
         char msg[256];
         snprintf(msg, sizeof(msg), "unknown AST statement %s", stmt->op);
