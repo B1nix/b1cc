@@ -258,4 +258,35 @@
 - [ ] Implement semantic handling for GCC attributes that affect code generation, layout, symbols, or calling convention; current covered attributes are syntax-tolerated only.
 - [ ] Support additional C standard header definitions and structures needed to compile complex external C programs (like `b1nix` kernel or TCC).
 
+## M23: Startup Assembly & Bootstrapping
+
+- [ ] Create minimal `crt0.S` startup for x86_64 B1NIX: `_start` entry point, stack setup, `.bss` zero-init, call `main`, `exit` syscall.
+- [ ] Create minimal `crt0.S` startup for i386 B1NIX with equivalent bootstrap sequence.
+- [ ] Emit `.globl _start` / `.type _start, @function` in startup assembly for linker visibility.
+- [ ] Support linker-visible entry point via `-e _start` or default entry in backend.
+- [ ] Add driver flags for startup assembly passthrough (`-nostartfiles`, `-nostdlib`).
+- [ ] Add regression test: compile crt0.S + minimal C kernel → executable → exits cleanly.
+- [ ] Document supported startup/exit sequence for each B1NIX target.
+
+## M24: Linker Script & Kernel Code Model
+
+- [ ] Create a minimal kernel linker script for x86_64 B1NIX: `.text`, `.rodata`, `.data`, `.bss` sections at defined virtual addresses.
+- [ ] Create equivalent kernel linker script for i386 B1NIX.
+- [ ] Add kernel code model support: `-mcmodel=small` / `-mcmodel=kernel` flags in driver and backend.
+- [ ] Emit position-independent or absolute addressing per code model in x86_64/i386 backends.
+- [ ] Support linker script passthrough via driver (`-T script.ld`).
+- [ ] Add `-nostdlib` / `-nodefaultlibs` flags to suppress default CRT/library linking.
+- [ ] Add regression test: kernel C sources + linker script → linked image at expected layout.
+- [ ] Document code model constraints and linker script anatomy.
+
+## M25: Kernel Image Building & Makefile Integration
+
+- [ ] Make b1cc a drop-in replacement for TCC in B1NIX kernel Makefile: `CC=b1cc` works without other changes.
+- [ ] Support full kernel build pipeline: startup asm → C compilation → object files → link with linker script → bootable image.
+- [ ] Support `-c` (compile to object) + `-T` (linker script) + `-o` (output image) in a single driver invocation.
+- [ ] Verify b1cc compiles a representative set of B1NIX kernel `.c` files in object mode.
+- [ ] Verify final image links and boots (or at least reaches a known entry point) under QEMU or equivalent.
+- [ ] Add integration test: full kernel build from Makefile with `CC=b1cc`.
+- [ ] Document the complete drop-in workflow: prerequisites, environment variables, expected output.
+
 Skipped: full C/C++ upfront. Add features only when a test or B1NIX source needs them.
