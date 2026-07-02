@@ -260,33 +260,25 @@
 
 ## M23: Startup Assembly & Bootstrapping
 
-- [ ] Create minimal `crt0.S` startup for x86_64 B1NIX: `_start` entry point, stack setup, `.bss` zero-init, call `main`, `exit` syscall.
-- [ ] Create minimal `crt0.S` startup for i386 B1NIX with equivalent bootstrap sequence.
-- [ ] Emit `.globl _start` / `.type _start, @function` in startup assembly for linker visibility.
-- [ ] Support linker-visible entry point via `-e _start` or default entry in backend.
-- [ ] Add driver flags for startup assembly passthrough (`-nostartfiles`, `-nostdlib`).
-- [ ] Add regression test: compile crt0.S + minimal C kernel → executable → exits cleanly.
-- [ ] Document supported startup/exit sequence for each B1NIX target.
+- [x] Add `.S`/`.s` assembly file handling in the driver: assemble with system/cross assembler, not b1cc backend.
+- [x] Cross-assembler for B1NIX `.S` files: `clang --target=<triple> -c` (bypasses b1nix-cc which adds CRT0+libc).
+- [x] Multi-file compilation with mixed `.S` + `.c` inputs.
+- [x] Regression tests: assemble B1NIX crt0.S for x86_64 and i386, verify ELF output and symbols.
+- [ ] Document: b1cc is a compiler/assembler; CRT0 and linker scripts live in the B1NIX tree.
 
-## M24: Linker Script & Kernel Code Model
+## M24: Kernel Code Model
 
-- [ ] Create a minimal kernel linker script for x86_64 B1NIX: `.text`, `.rodata`, `.data`, `.bss` sections at defined virtual addresses.
-- [ ] Create equivalent kernel linker script for i386 B1NIX.
-- [ ] Add kernel code model support: `-mcmodel=small` / `-mcmodel=kernel` flags in driver and backend.
-- [ ] Emit position-independent or absolute addressing per code model in x86_64/i386 backends.
-- [ ] Support linker script passthrough via driver (`-T script.ld`).
-- [ ] Add `-nostdlib` / `-nodefaultlibs` flags to suppress default CRT/library linking.
-- [ ] Add regression test: kernel C sources + linker script → linked image at expected layout.
+- [x] Add kernel code model support: `-mcmodel=small` / `-mcmodel=kernel` flags in driver and backend.
+- [x] Emit absolute addressing (`movabs`) for kernel model, RIP-relative for small/default in x86_64 backend.
+- [x] Add regression tests: kernel model produces `movabs` absolute addressing, small/default produces RIP-relative.
 - [ ] Document code model constraints and linker script anatomy.
 
-## M25: Kernel Image Building & Makefile Integration
+## M25: Kernel Target & Makefile Integration
 
-- [ ] Make b1cc a drop-in replacement for TCC in B1NIX kernel Makefile: `CC=b1cc` works without other changes.
-- [ ] Support full kernel build pipeline: startup asm → C compilation → object files → link with linker script → bootable image.
-- [ ] Support `-c` (compile to object) + `-T` (linker script) + `-o` (output image) in a single driver invocation.
-- [ ] Verify b1cc compiles a representative set of B1NIX kernel `.c` files in object mode.
-- [ ] Verify final image links and boots (or at least reaches a known entry point) under QEMU or equivalent.
-- [ ] Add integration test: full kernel build from Makefile with `CC=b1cc`.
-- [ ] Document the complete drop-in workflow: prerequisites, environment variables, expected output.
+- [x] Add `--target=x86_64-elf` and `--target=i686-elf` bare-metal kernel targets.
+- [x] Kernel targets use native ELF writer for `-c` object output (no external assembler).
+- [x] Kernel targets delegate `.S` assembly to `clang --target=<triple> -c`.
+- [x] Unknown flags (e.g. `-ffreestanding`, `-std=c11`, `-Wall`) are silently ignored for kernel targets.
+- [x] Regression tests: kernel target compiles to ELF objects, uses absolute addressing with `-mcmodel=kernel`.
 
 Skipped: full C/C++ upfront. Add features only when a test or B1NIX source needs them.

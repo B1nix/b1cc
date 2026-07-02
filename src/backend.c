@@ -102,7 +102,7 @@ static const char *peephole_optimize(const char *asm_text, const char *target, A
                         }
                     }
                 }
-            } else if (strcmp(target, "x86_64-b1nix") == 0) {
+            } else if (strcmp(target, "x86_64-b1nix") == 0 || strcmp(target, "x86_64-elf") == 0 || strcmp(target, "x86_64-unknown-elf") == 0) {
                 if (strncmp(cur_trim, "pushq ", 6) == 0 && strncmp(next_trim, "popq ", 5) == 0) {
                     const char *cur_reg = cur_trim + 6;
                     const char *next_reg = next_trim + 5;
@@ -111,7 +111,7 @@ static const char *peephole_optimize(const char *asm_text, const char *target, A
                         optimized = true;
                     }
                 }
-            } else if (strcmp(target, "i386-b1nix") == 0 || strcmp(target, "x86-b1nix") == 0) {
+            } else if (strcmp(target, "i386-b1nix") == 0 || strcmp(target, "x86-b1nix") == 0 || strcmp(target, "i686-elf") == 0 || strcmp(target, "i686-unknown-elf") == 0) {
                 if (strncmp(cur_trim, "pushl ", 6) == 0 && strncmp(next_trim, "popl ", 5) == 0) {
                     const char *cur_reg = cur_trim + 6;
                     const char *next_reg = next_trim + 5;
@@ -135,10 +135,13 @@ static const char *peephole_optimize(const char *asm_text, const char *target, A
     return res;
 }
 
-const char *backend_compile_asm(const char *src, const char *target, bool dump_ast_flag, bool dump_ir_flag, Arena *arena) {
+const char *backend_compile_asm(const char *src, const char *target, const char *mcmodel, bool dump_ast_flag, bool dump_ir_flag, Arena *arena) {
     ir_reset_state();
 
-    int target_scale = (strcmp(target, "i386-b1nix") == 0 || strcmp(target, "x86-b1nix") == 0) ? 4 : 8;
+    int target_scale = (strcmp(target, "i386-b1nix") == 0 || strcmp(target, "x86-b1nix") == 0 || strcmp(target, "i686-elf") == 0 || strcmp(target, "i686-unknown-elf") == 0) ? 4 : 8;
+
+    /* Set code model: 0=small (default), 1=kernel */
+    ir_code_model = (mcmodel && strcmp(mcmodel, "kernel") == 0) ? 1 : 0;
 
     HashMap macros;
     hashmap_init(&macros, 64);
@@ -178,9 +181,9 @@ const char *backend_compile_asm(const char *src, const char *target, bool dump_a
     TargetBackend *backend = nullptr;
     if (strcmp(target, "arm64-darwin") == 0) {
         backend = backend_create_arm64();
-    } else if (strcmp(target, "x86_64-b1nix") == 0) {
+    } else if (strcmp(target, "x86_64-b1nix") == 0 || strcmp(target, "x86_64-elf") == 0 || strcmp(target, "x86_64-unknown-elf") == 0) {
         backend = backend_create_x86_64();
-    } else if (strcmp(target, "i386-b1nix") == 0 || strcmp(target, "x86-b1nix") == 0) {
+    } else if (strcmp(target, "i386-b1nix") == 0 || strcmp(target, "x86-b1nix") == 0 || strcmp(target, "i686-elf") == 0 || strcmp(target, "i686-unknown-elf") == 0) {
         backend = backend_create_i386();
     } else {
         char msg[128];

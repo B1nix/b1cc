@@ -3061,9 +3061,13 @@ static void write_elf32_object(AsmModel *m, ByteBuf *out) {
 
 ElfObject elf_write_object(const char *asm_text, const char *target,
                            const char *src_path, Arena *arena) {
-    int is_x86_64 = (strcmp(target, "x86_64-b1nix") == 0);
+    int is_x86_64 = (strcmp(target, "x86_64-b1nix") == 0 ||
+                     strcmp(target, "x86_64-elf")   == 0 ||
+                     strcmp(target, "x86_64-unknown-elf") == 0);
     int is_i386   = (strcmp(target, "i386-b1nix")   == 0 ||
-                     strcmp(target, "x86-b1nix")     == 0);
+                     strcmp(target, "x86-b1nix")     == 0 ||
+                     strcmp(target, "i686-elf")      == 0 ||
+                     strcmp(target, "i686-unknown-elf") == 0);
 
     if (!is_x86_64 && !is_i386) {
         ElfObject empty = {NULL, 0};

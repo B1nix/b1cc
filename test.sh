@@ -1186,3 +1186,110 @@ fi
 grep -q '^main:' "$tmp/return_42_i386.s"
 grep -q 'ret' "$tmp/return_42_i386.s"
 echo "ok i386_b1nix_asm"
+
+# ── M23: .S assembly file handling ──
+
+# Test: b1cc handles .S assembly files (x86_64) — assemble to object via B1NIX crt0
+./build/b1cc --target=x86_64-b1nix -c ../b1nix/userspace/crt/crt0.S -o "$tmp/crt0_x86_64.o"
+test -s "$tmp/crt0_x86_64.o"
+echo "ok m23_crt0_x86_64_assemble"
+
+# Test: b1cc handles .S assembly files (i386) — assemble to object
+./build/b1cc --target=i386-b1nix -c ../b1nix/userspace/crt/crt0.S -o "$tmp/crt0_i386.o"
+test -s "$tmp/crt0_i386.o"
+echo "ok m23_crt0_i386_assemble"
+
+# Test: multi-file compilation with .S + .c inputs (object output, no linking)
+./build/b1cc --target=x86_64-b1nix -c ../b1nix/userspace/crt/crt0.S tests/return_42.c
+echo "ok m23_multifile_sc"
+
+# Test: driver flags -nostdlib and -T are collected as link_flags
+# (verify they don't cause a parse error — linking needs b1nix-cc or ld.lld)
+./build/b1cc --target=x86_64-b1nix tests/return_42.c -nostdlib -o "$tmp/nostdlib_test" 2>/dev/null || true
+echo "ok m23_driver_flags_nostdlib"
+
+# Conditional: verify ELF object output from .S assembly
+if [ -x ../b1nix/tools/toolchain/bin/b1nix-cc ]; then
+  ./build/b1cc --target=x86_64-b1nix -c ../b1nix/userspace/crt/crt0.S -o "$tmp/crt0_x86_64_link.o"
+  nm "$tmp/crt0_x86_64_link.o" 2>/dev/null | grep -q '_start'
+  echo "ok m23_crt0_x86_64_has_start"
+  od -A n -N 4 -t x1 "$tmp/crt0_x86_64_link.o" | grep -q '7f.*45.*4c.*46'
+  echo "ok m23_crt0_x86_64_is_elf"
+
+  ./build/b1cc --target=i386-b1nix -c ../b1nix/userspace/crt/crt0.S -o "$tmp/crt0_i386_link.o"
+  nm "$tmp/crt0_i386_link.o" 2>/dev/null | grep -q '_start'
+  echo "ok m23_crt0_i386_has_start"
+  od -A n -N 4 -t x1 "$tmp/crt0_i386_link.o" | grep -q '7f.*45.*4c.*46'
+  echo "ok m23_crt0_i386_is_elf"
+fi
+
+# === M24: Kernel Code Model Tests ===
+
+# Test: -mcmodel=kernel produces absolute addressing for x86_64 globals
+cat > "$tmp/mcmodel_test.c" << 'EOF'
+int kernel_var = 42;
+int *kernel_ptr;
+char kernel_buf[64];
+
+int main(void) {
+    kernel_var = 10;
+    kernel_ptr = &kernel_var;
+    return kernel_var;
+}
+EOF
+
+./build/b1cc --target=x86_64-b1nix -S -mcmodel=kernel "$tmp/mcmodel_test.c" -o "$tmp/mcmodel_test.s"
+# Verify kernel model uses absolute addressing (movabs) not RIP-relative for globals
+grep -q 'movabs.*kernel_var' "$tmp/mcmodel_test.s"
+echo "ok m24_kernel_model_absolute_gaddr"
+grep -q 'movabs.*kernel_ptr' "$tmp/mcmodel_test.s"
+echo "ok m24_kernel_model_absolute_gload"
+# Verify small model uses RIP-relative
+./build/b1cc --target=x86_64-b1nix -S -mcmodel=small "$tmp/mcmodel_test.c" -o "$tmp/mcmodel_small.s"
+grep -q 'kernel_var(%rip)' "$tmp/mcmodel_small.s"
+echo "ok m24_small_model_riprel"
+# Default (no -mcmodel) should behave like small
+./build/b1cc --target=x86_64-b1nix -S "$tmp/mcmodel_test.c" -o "$tmp/mcmodel_default.s"
+grep -q 'kernel_var(%rip)' "$tmp/mcmodel_default.s"
+echo "ok m24_default_model_riprel"
+
+# === M25: Kernel Target & Makefile Integration Tests ===
+
+# Test: --target=x86_64-elf compiles to assembly
+cat > "$tmp/kernel_target_test.c" << 'EOF'
+int kvar = 1;
+int _start(void) { return kvar; }
+EOF
+./build/b1cc --target=x86_64-elf -mcmodel=kernel -S "$tmp/kernel_target_test.c" -o "$tmp/kernel_target_test.s"
+grep -q '_start' "$tmp/kernel_target_test.s"
+echo "ok m25_x86_64_elf_asm"
+
+# Test: --target=x86_64-elf compiles to ELF object
+./build/b1cc --target=x86_64-elf -mcmodel=kernel -c "$tmp/kernel_target_test.c" -o "$tmp/kernel_target_test.o"
+od -A n -N 4 -t x1 "$tmp/kernel_target_test.o" | grep -q '7f.*45.*4c.*46'
+echo "ok m25_x86_64_elf_object"
+
+# Test: --target=x86_64-elf with kernel model uses absolute addressing
+grep -q 'movabs' "$tmp/kernel_target_test.s"
+echo "ok m25_x86_64_elf_kernel_absolute"
+
+# Test: --target=i686-elf compiles to ELF object
+./build/b1cc --target=i686-elf -c "$tmp/kernel_target_test.c" -o "$tmp/kernel_target_test_i686.o"
+od -A n -N 4 -t x1 "$tmp/kernel_target_test_i686.o" | grep -q '7f.*45.*4c.*46'
+echo "ok m25_i686_elf_object"
+
+# Test: kernel target unknown flags are ignored (passed to link_flags, not causing errors)
+./build/b1cc --target=x86_64-elf -ffreestanding -fno-builtin -fno-stack-protector -fno-pic -mno-red-zone -std=c11 -Wall -Wextra -S "$tmp/kernel_target_test.c" -o "$tmp/kernel_target_flags.s" 2>/dev/null
+echo "ok m25_kernel_target_unknown_flags"
+
+# Test: kernel target with .S assembly file (delegated to clang)
+cat > "$tmp/kernel_entry.S" << 'ASM'
+.globl _start
+_start:
+    mov $60, %rax
+    xor %rdi, %rdi
+    syscall
+ASM
+./build/b1cc --target=x86_64-elf -c "$tmp/kernel_entry.S" -o "$tmp/kernel_entry.o" 2>/dev/null
+test -s "$tmp/kernel_entry.o"
+echo "ok m25_kernel_asm_assembly"

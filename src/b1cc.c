@@ -54,6 +54,13 @@ static int exists(const char *path) {
     return 0;
 }
 
+static int has_suffix(const char *path, const char *suffix) {
+    size_t plen = strlen(path);
+    size_t slen = strlen(suffix);
+    if (plen < slen) return 0;
+    return strcmp(path + plen - slen, suffix) == 0;
+}
+
 static void define_object_macro(Arena *arena, const char *name, const char *body) {
     Macro *m = arena_alloc(arena, sizeof(Macro));
     m->is_function_like = false;
@@ -122,6 +129,7 @@ int main(int argc, char **argv) {
     bool emit_asm = false;
     bool compile_only = false;
     bool preprocess_only = false;
+    const char *mcmodel = "small";
     bool dump_ast = false;
     bool dump_ir = false;
     bool dump_symbols = false;
@@ -159,6 +167,8 @@ int main(int argc, char **argv) {
             dump_relocs = true;
         } else if (strncmp(arg, "--target=", 9) == 0) {
             target = arg + 9;
+        } else if (strncmp(arg, "-mcmodel=", 9) == 0) {
+            mcmodel = arg + 9;
         } else if (strcmp(arg, "-o") == 0) {
             if (++i == argc)
                 diagnostics_fatal("-o needs a path");
@@ -190,6 +200,9 @@ int main(int argc, char **argv) {
                 val = eq + 1;
             }
             define_object_macro(&arena, name, val);
+        } else if (strncmp(arg, "-isystem", 8) == 0) {
+            /* silently ignore -isystem (b1cc uses its own preprocessor) */
+            if (strcmp(arg, "-isystem") == 0) { ++i; } /* skip the path argument */
         } else if (arg[0] == '-' && strcmp(arg, "-") != 0) {
             string_array_push(&link_flags, arg);
         } else {
@@ -198,6 +211,8 @@ int main(int argc, char **argv) {
     }
 
     string_array_push(&preprocessor_driver_include_dirs, ".");
+    string_array_push(&preprocessor_driver_include_dirs, "userspace/include");
+    string_array_push(&preprocessor_driver_include_dirs, "include");
     string_array_push(&preprocessor_driver_include_dirs, "../b1nix/userspace/include");
     string_array_push(&preprocessor_driver_include_dirs, "/usr/include");
     string_array_push(&preprocessor_driver_include_dirs, "/usr/local/include");
@@ -212,17 +227,24 @@ int main(int argc, char **argv) {
     }
 
     const char *cc = "cc";
+    const char *cross_as = NULL;
     const char *prefix = "";
-    if (strcmp(target, "x86_64-b1nix") == 0 || strcmp(target, "i386-b1nix") == 0 || strcmp(target, "x86-b1nix") == 0) {
+    bool is_kernel_target = (strcmp(target, "x86_64-elf") == 0 || strcmp(target, "i686-elf") == 0 ||
+                             strcmp(target, "x86_64-unknown-elf") == 0 || strcmp(target, "i686-unknown-elf") == 0);
+    if (strcmp(target, "x86_64-b1nix") == 0 || strcmp(target, "i386-b1nix") == 0 || strcmp(target, "x86-b1nix") == 0 || is_kernel_target) {
         const char *env_cc = getenv("B1NIX_CC");
         cc = env_cc ? env_cc : "../b1nix/tools/toolchain/bin/b1nix-cc";
-        if (!preprocess_only && !emit_asm && !exists(cc))
+        if (!is_kernel_target && !preprocess_only && !emit_asm && !exists(cc))
             diagnostics_fatal("set B1NIX_CC or run from next to ../b1nix");
         
-        if (strcmp(target, "x86_64-b1nix") == 0) {
-            prefix = "B1NIX_ARCH=x86_64 ";
+        /* Cross-assembler for .S files: use clang directly, not b1nix-cc
+         * (b1nix-cc is a full driver that adds CRT0 + libc on link) */
+        if (strcmp(target, "x86_64-b1nix") == 0 || strcmp(target, "x86_64-elf") == 0 || strcmp(target, "x86_64-unknown-elf") == 0) {
+            prefix = is_kernel_target ? "" : "B1NIX_ARCH=x86_64 ";
+            cross_as = "clang --target=x86_64-unknown-elf -c";
         } else {
-            prefix = "B1NIX_ARCH=x86 ";
+            prefix = is_kernel_target ? "" : "B1NIX_ARCH=x86 ";
+            cross_as = "clang --target=i686-unknown-elf -c";
         }
     } else if (strcmp(target, "arm64-darwin") != 0) {
         char msg[256];
@@ -299,7 +321,7 @@ int main(int argc, char **argv) {
         for (int idx = 0; idx < inputs.count; ++idx) {
             const char *inp = inputs.data[idx];
             diagnostics_filepath = inp;
-            const char *asm_text = backend_compile_asm(read_file(inp, &arena), target, dump_ast, dump_ir, &arena);
+            const char *asm_text = backend_compile_asm(read_file(inp, &arena), target, mcmodel, dump_ast, dump_ir, &arena);
             const char *dest = output;
             if (!dest || !dest[0] || inputs.count > 1) {
                 char dest_buf[1024];
@@ -336,18 +358,56 @@ int main(int argc, char **argv) {
         /* Determine whether to use native ELF/Mach-O writer or host assembler */
         bool use_native_elf = (strcmp(target, "x86_64-b1nix") == 0 ||
                                strcmp(target, "i386-b1nix")   == 0 ||
-                               strcmp(target, "x86-b1nix")    == 0);
+                               strcmp(target, "x86-b1nix")    == 0 ||
+                               strcmp(target, "x86_64-elf")   == 0 ||
+                               strcmp(target, "i686-elf")     == 0 ||
+                               strcmp(target, "x86_64-unknown-elf") == 0 ||
+                               strcmp(target, "i686-unknown-elf")   == 0);
         bool use_native_macho = (strcmp(target, "arm64-darwin") == 0);
 
         for (int idx = 0; idx < inputs.count; ++idx) {
             const char *inp = inputs.data[idx];
-            size_t inp_len = strlen(inp);
-            if ((inp_len >= 2 && strcmp(inp + inp_len - 2, ".o") == 0) ||
-                (inp_len >= 2 && strcmp(inp + inp_len - 2, ".a") == 0)) {
+            if (has_suffix(inp, ".o") || has_suffix(inp, ".a")) {
+                continue;
+            }
+            /* .S assembly files: assemble with the system/cross assembler */
+            if (has_suffix(inp, ".S") || has_suffix(inp, ".s")) {
+                const char *dest_obj = output;
+                if (!dest_obj || !dest_obj[0] || inputs.count > 1) {
+                    char dest_buf[1024];
+                    const char *dot = strrchr(inp, '.');
+                    if (dot) {
+                        size_t len_base = dot - inp;
+                        snprintf(dest_buf, sizeof(dest_buf), "%.*s.o", (int)len_base, inp);
+                    } else {
+                        snprintf(dest_buf, sizeof(dest_buf), "%s.o", inp);
+                    }
+                    dest_obj = arena_strdup(&arena, dest_buf);
+                }
+                StringBuilder cmd;
+                sb_init(&cmd);
+                if (cross_as) {
+                    sb_append(&cmd, cross_as);
+                } else {
+                    sb_append(&cmd, shell_quote(cc, &arena));
+                    sb_append(&cmd, " -c");
+                }
+                sb_append(&cmd, " ");
+                sb_append(&cmd, shell_quote(inp, &arena));
+                sb_append(&cmd, " -o ");
+                sb_append(&cmd, shell_quote(dest_obj, &arena));
+                const char *cmd_str = sb_to_string(&cmd, &arena);
+                sb_free(&cmd);
+                int rc = system(cmd_str);
+                if (rc != 0) {
+                    arena_free(&arena);
+                    return 1;
+                }
+                dump_object(dest_obj, dump_symbols, dump_sections, dump_relocs, &arena);
                 continue;
             }
             diagnostics_filepath = inp;
-            const char *asm_text = backend_compile_asm(read_file(inp, &arena), target, dump_ast, dump_ir, &arena);
+            const char *asm_text = backend_compile_asm(read_file(inp, &arena), target, mcmodel, dump_ast, dump_ir, &arena);
 
             const char *dest_obj = output;
             if (!dest_obj || !dest_obj[0] || inputs.count > 1) {
@@ -439,9 +499,7 @@ int main(int argc, char **argv) {
 
     if (inputs.count == 1 && !compile_only && !emit_asm && !preprocess_only) {
         const char *inp = inputs.data[0];
-        size_t inp_len = strlen(inp);
-        if ((inp_len >= 2 && strcmp(inp + inp_len - 2, ".o") == 0) ||
-            (inp_len >= 2 && strcmp(inp + inp_len - 2, ".a") == 0)) {
+        if (has_suffix(inp, ".o") || has_suffix(inp, ".a")) {
             const char *out_name = (!output || !output[0]) ? "a.out" : output;
             StringBuilder cmd;
             sb_init(&cmd);
@@ -476,8 +534,44 @@ int main(int argc, char **argv) {
             return rc == 0 ? 0 : 1;
         }
 
+        /* .S assembly files: assemble with the system/cross assembler, don't compile through b1cc */
+        if (has_suffix(inp, ".S") || has_suffix(inp, ".s")) {
+            const char *out_name = (!output || !output[0]) ? "a.out" : output;
+            StringBuilder cmd;
+            sb_init(&cmd);
+            if (cross_as) {
+                sb_append(&cmd, cross_as);
+            } else {
+                sb_append(&cmd, shell_quote(cc, &arena));
+                sb_append(&cmd, " -c");
+            }
+            sb_append(&cmd, " ");
+            sb_append(&cmd, shell_quote(inp, &arena));
+            sb_append(&cmd, " -o ");
+            sb_append(&cmd, shell_quote(out_name, &arena));
+
+            const char *cmd_str = sb_to_string(&cmd, &arena);
+            sb_free(&cmd);
+
+            int rc = system(cmd_str);
+            string_array_free(&inputs);
+            string_array_free(&link_flags);
+            string_array_free(&preprocessor_driver_include_dirs);
+            for (int b = 0; b < preprocessor_driver_macros.bucket_count; ++b) {
+                HashMapEntry *curr = preprocessor_driver_macros.buckets[b];
+                while (curr) {
+                    Macro *m = (Macro *)curr->val_ptr;
+                    string_array_free(&m->params);
+                    curr = curr->next;
+                }
+            }
+            hashmap_free(&preprocessor_driver_macros);
+            arena_free(&arena);
+            return rc == 0 ? 0 : 1;
+        }
+
         diagnostics_filepath = inp;
-        const char *asm_text = backend_compile_asm(read_file(inp, &arena), target, dump_ast, dump_ir, &arena);
+        const char *asm_text = backend_compile_asm(read_file(inp, &arena), target, mcmodel, dump_ast, dump_ir, &arena);
         
         char tmp_asm[] = "/tmp/b1cc-XXXXXX.s";
         int fd = mkstemps(tmp_asm, 2);
@@ -528,14 +622,45 @@ int main(int argc, char **argv) {
     bool failed = false;
     for (int idx = 0; idx < inputs.count; ++idx) {
         const char *inp = inputs.data[idx];
-        size_t inp_len = strlen(inp);
-        if ((inp_len >= 2 && strcmp(inp + inp_len - 2, ".o") == 0) ||
-            (inp_len >= 2 && strcmp(inp + inp_len - 2, ".a") == 0)) {
+        if (has_suffix(inp, ".o") || has_suffix(inp, ".a")) {
             string_array_push(&link_cmd_args, inp);
             continue;
         }
+        /* .S assembly files: assemble with the system/cross assembler */
+        if (has_suffix(inp, ".S") || has_suffix(inp, ".s")) {
+            char tmp_obj[] = "/tmp/b1cc-XXXXXX.o";
+            int fd_obj = mkstemps(tmp_obj, 2);
+            if (fd_obj < 0) diagnostics_fatal("cannot create temporary file");
+            close(fd_obj);
+
+            string_array_push(&temp_objects, arena_strdup(&arena, tmp_obj));
+            string_array_push(&link_cmd_args, arena_strdup(&arena, tmp_obj));
+
+            StringBuilder cmd;
+            sb_init(&cmd);
+            if (cross_as) {
+                sb_append(&cmd, cross_as);
+            } else {
+                sb_append(&cmd, shell_quote(cc, &arena));
+                sb_append(&cmd, " -c");
+            }
+            sb_append(&cmd, " ");
+            sb_append(&cmd, shell_quote(inp, &arena));
+            sb_append(&cmd, " -o ");
+            sb_append(&cmd, shell_quote(tmp_obj, &arena));
+
+            const char *cmd_str = sb_to_string(&cmd, &arena);
+            sb_free(&cmd);
+
+            int rc = system(cmd_str);
+            if (rc != 0) {
+                failed = true;
+                break;
+            }
+            continue;
+        }
         diagnostics_filepath = inp;
-        const char *asm_text = backend_compile_asm(read_file(inp, &arena), target, dump_ast, dump_ir, &arena);
+        const char *asm_text = backend_compile_asm(read_file(inp, &arena), target, mcmodel, dump_ast, dump_ir, &arena);
         
         char tmp_asm[] = "/tmp/b1cc-XXXXXX.s";
         int fd_asm = mkstemps(tmp_asm, 2);

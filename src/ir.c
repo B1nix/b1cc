@@ -30,6 +30,7 @@ HashMap ir_function_return_int_sizes;
 HashMap ir_function_param_int_sizes;
 StringArray ir_global_asm_blocks;
 int ir_current_target_scale = 8;
+int ir_code_model = 0; /* 0=small, 1=kernel */
 static B1CC_THREAD_LOCAL int ir_current_line = 1;
 static B1CC_THREAD_LOCAL int ir_current_col = 1;
 
@@ -2354,9 +2355,9 @@ IrFunctionArray ir_lower_program(const NodeArray *ast, const char *target, Arena
     TargetBackend *backend = nullptr;
     if (strcmp(target, "arm64-darwin") == 0) {
         backend = backend_create_arm64();
-    } else if (strcmp(target, "x86_64-b1nix") == 0) {
+    } else if (strcmp(target, "x86_64-b1nix") == 0 || strcmp(target, "x86_64-elf") == 0 || strcmp(target, "x86_64-unknown-elf") == 0) {
         backend = backend_create_x86_64();
-    } else if (strcmp(target, "i386-b1nix") == 0 || strcmp(target, "x86-b1nix") == 0) {
+    } else if (strcmp(target, "i386-b1nix") == 0 || strcmp(target, "x86-b1nix") == 0 || strcmp(target, "i686-elf") == 0 || strcmp(target, "i686-unknown-elf") == 0) {
         backend = backend_create_i386();
     }
     int target_scale = backend->get_target_scale(backend);
