@@ -283,13 +283,13 @@
 
 ## M26: Dynamic Linking & PIC
 
-- [ ] Support `-fPIC` / `-fpie` flags for position-independent code generation.
-- [ ] Emit GOT-indirect addressing for external/global symbol access in PIC mode.
-- [ ] Emit PLT stubs for external function calls in PIC mode.
-- [ ] Emit dynamic relocations (`.rela.dyn`, `.rela.plt`) in ELF object output.
-- [ ] Mach-O stub/TLV sections for PIC on arm64-darwin (if needed).
-- [ ] Link against shared objects via b1nix-cc or direct ld.lld invocation.
-- [ ] Regression tests: PIC-compiled object links into a PIE executable and runs.
-- [ ] Integration: b1cc-compiled code replaces statically linked `b1nix-cc` path in B1NIX userspace.
+- [x] Support `-fPIC` / `-fpie` / `-fPIE` / `-fpic` flags for position-independent code generation on x86_64 and arm64-darwin.
+- [x] Emit GOT-indirect addressing (`symbol@GOTPCREL(%rip)`) for external/global symbol access in PIC mode on x86_64.
+- [x] Emit PLT stubs via `R_X86_64_PLT32` relocations for external function calls (ELF writer already emits PLT32 for all direct calls).
+- [ ] Emit dynamic relocations (`.rela.dyn`, `.rela.plt`) in ELF object output — deferred: b1cc produces relocatable objects; the linker creates dynamic sections from GOTPCREL/PLT32 relocations.
+- [ ] Mach-O stub/TLV sections for PIC on arm64-darwin — deferred (host `cc` already handles PIE by default).
+- [ ] Link against shared objects via b1nix-cc or direct ld.lld invocation — deferred; current driver links through b1nix-cc or host cc.
+- [x] Regression tests: PIC assembly verification (GOTPCREL pattern), PIC ELF object output, and PIC host-execution tests.
+- [ ] Integration: b1cc-compiled code replaces statically linked `b1nix-cc` path in B1NIX userspace — deferred; requires B1NIX tree. i386 PIC support also deferred as lower priority.
 
 Skipped: full C/C++ upfront. Add features only when a test or B1NIX source needs them.

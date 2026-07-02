@@ -31,6 +31,7 @@ HashMap ir_function_param_int_sizes;
 StringArray ir_global_asm_blocks;
 int ir_current_target_scale = 8;
 int ir_code_model = 0; /* 0=small, 1=kernel */
+int ir_pic_mode = 0;   /* 0=non-PIC, 1=PIC/PIE */
 static B1CC_THREAD_LOCAL int ir_current_line = 1;
 static B1CC_THREAD_LOCAL int ir_current_col = 1;
 

@@ -173,12 +173,17 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
     if (indirect_ret) {
         local_slots++;
     }
-    int frame = fn->has_call || (local_slots > 0);
+    int frame = fn->has_call || (local_slots > 0) || ir_pic_mode;
     if (frame) {
         sb_append(&out, "    pushl %ebp\n");
         sb_append(&out, "    movl %esp, %ebp\n");
         if (local_slots > 0) {
             sb_appendf(&out, "    subl $%d, %%esp\n", local_slots * 16);
+        }
+        if (ir_pic_mode) {
+            sb_append(&out, "    pushl %ebx\n");
+            sb_append(&out, "    call __x86.get_pc_thunk.bx\n");
+            sb_append(&out, "    addl $_GLOBAL_OFFSET_TABLE_, %ebx\n");
         }
         if (indirect_ret) {
             int off = -(local_slots * 16);
@@ -638,7 +643,7 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
                         sb_appendf(&out, "    movl %d(%%esp), %%eax\n", total_abi + total_ev);
                         sb_append(&out, "    call *%eax\n");
                     } else {
-                        sb_appendf(&out, "    call %s\n", inst->arg);
+                        sb_appendf(&out, "    call %s%s\n", inst->arg, ir_pic_mode ? "@PLT" : "");
                     }
                     sb_appendf(&out, "    addl $%d, %%esp\n", total_abi + total_ev + (strcmp(inst->op, "icall") == 0 ? 4 : 0));
                     if (retf) {
@@ -677,7 +682,7 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
                     sb_appendf(&out, "    movl %ld(%%esp), %%eax\n", stack_bytes + ret_val_bytes + (num_args - 1 - i) * 4);
                     sb_appendf(&out, "    movl %%eax, %ld(%%esp)\n", (i + 1) * 4);
                 }
-                sb_appendf(&out, "    call %s\n", inst->arg);
+                sb_appendf(&out, "    call %s%s\n", inst->arg, ir_pic_mode ? "@PLT" : "");
                 // Callee pops hidden pointer, so we only pop num_args * 4
                 sb_appendf(&out, "    addl $%ld, %%esp\n", num_args * 4);
                 // The return value buffer is now at the top of the stack. We do not push %eax.
@@ -715,7 +720,7 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
                         sb_appendf(&out, "    movl %%eax, %d(%%esp)\n", abioff[i]);
                     }
                 }
-                sb_appendf(&out, "    call %s\n", inst->arg);
+                sb_appendf(&out, "    call %s%s\n", inst->arg, ir_pic_mode ? "@PLT" : "");
                 sb_appendf(&out, "    addl $%d, %%esp\n", total_abi + total_ev);
                 if (ret_i64) {
                     sb_append(&out, "    pushl %edx\n");
@@ -733,36 +738,76 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
             int gsize = 4;
             HashMapEntry *ge = hashmap_get(&ir_global_var_elem_scales, inst->arg);
             if (ge) gsize = ge->val_int;
-            if (gsize == 1)
-                sb_appendf(&out, "    movsbl %s, %%eax\n", inst->arg);
-            else if (gsize == 2)
-                sb_appendf(&out, "    movswl %s, %%eax\n", inst->arg);
-            else
-                sb_appendf(&out, "    movl %s, %%eax\n", inst->arg);
-            sb_append(&out, "    pushl %eax\n");
+            if (ir_pic_mode) {
+                sb_appendf(&out, "    movl %s@GOT(%%ebx), %%eax\n", inst->arg);
+                sb_append(&out, "    movl (%eax), %eax\n");
+                if (gsize == 1)
+                    sb_append(&out, "    movsbl %al, %eax\n");
+                else if (gsize == 2)
+                    sb_append(&out, "    movswl %ax, %eax\n");
+                sb_append(&out, "    pushl %eax\n");
+            } else {
+                if (gsize == 1)
+                    sb_appendf(&out, "    movsbl %s, %%eax\n", inst->arg);
+                else if (gsize == 2)
+                    sb_appendf(&out, "    movswl %s, %%eax\n", inst->arg);
+                else
+                    sb_appendf(&out, "    movl %s, %%eax\n", inst->arg);
+                sb_append(&out, "    pushl %eax\n");
+            }
         } else if (strcmp(inst->op, "gload64") == 0) {
-            sb_appendf(&out, "    movl %s+4, %%eax\n", inst->arg);
-            sb_append(&out, "    pushl %eax\n");
-            sb_appendf(&out, "    movl %s, %%eax\n", inst->arg);
-            sb_append(&out, "    pushl %eax\n");
+            if (ir_pic_mode) {
+                sb_appendf(&out, "    movl %s@GOT(%%ebx), %%eax\n", inst->arg);
+                sb_append(&out, "    movl 4(%eax), %eax\n");
+                sb_append(&out, "    pushl %eax\n");
+                sb_appendf(&out, "    movl %s@GOT(%%ebx), %%eax\n", inst->arg);
+                sb_append(&out, "    movl (%eax), %eax\n");
+                sb_append(&out, "    pushl %eax\n");
+            } else {
+                sb_appendf(&out, "    movl %s+4, %%eax\n", inst->arg);
+                sb_append(&out, "    pushl %eax\n");
+                sb_appendf(&out, "    movl %s, %%eax\n", inst->arg);
+                sb_append(&out, "    pushl %eax\n");
+            }
         } else if (strcmp(inst->op, "gstore") == 0) {
             sb_append(&out, "    popl %eax\n");
             int gsize = 4;
             HashMapEntry *ge = hashmap_get(&ir_global_var_elem_scales, inst->arg);
             if (ge) gsize = ge->val_int;
-            if (gsize == 1)
-                sb_appendf(&out, "    movb %%al, %s\n", inst->arg);
-            else if (gsize == 2)
-                sb_appendf(&out, "    movw %%ax, %s\n", inst->arg);
-            else
-                sb_appendf(&out, "    movl %%eax, %s\n", inst->arg);
+            if (ir_pic_mode) {
+                sb_appendf(&out, "    movl %s@GOT(%%ebx), %%ecx\n", inst->arg);
+                if (gsize == 1)
+                    sb_append(&out, "    movb %al, (%ecx)\n");
+                else if (gsize == 2)
+                    sb_append(&out, "    movw %ax, (%ecx)\n");
+                else
+                    sb_append(&out, "    movl %eax, (%ecx)\n");
+            } else {
+                if (gsize == 1)
+                    sb_appendf(&out, "    movb %%al, %s\n", inst->arg);
+                else if (gsize == 2)
+                    sb_appendf(&out, "    movw %%ax, %s\n", inst->arg);
+                else
+                    sb_appendf(&out, "    movl %%eax, %s\n", inst->arg);
+            }
         } else if (strcmp(inst->op, "gstore64") == 0) {
             sb_append(&out, "    popl %eax\n");
-            sb_appendf(&out, "    movl %%eax, %s\n", inst->arg);
-            sb_append(&out, "    popl %eax\n");
-            sb_appendf(&out, "    movl %%eax, %s+4\n", inst->arg);
+            if (ir_pic_mode) {
+                sb_appendf(&out, "    movl %s@GOT(%%ebx), %%ecx\n", inst->arg);
+                sb_append(&out, "    movl %eax, (%ecx)\n");
+                sb_append(&out, "    popl %eax\n");
+                sb_append(&out, "    movl %eax, 4(%ecx)\n");
+            } else {
+                sb_appendf(&out, "    movl %%eax, %s\n", inst->arg);
+                sb_append(&out, "    popl %eax\n");
+                sb_appendf(&out, "    movl %%eax, %s+4\n", inst->arg);
+            }
         } else if (strcmp(inst->op, "gaddr") == 0) {
-            sb_appendf(&out, "    movl $%s, %%eax\n", inst->arg);
+            if (ir_pic_mode) {
+                sb_appendf(&out, "    movl %s@GOT(%%ebx), %%eax\n", inst->arg);
+            } else {
+                sb_appendf(&out, "    movl $%s, %%eax\n", inst->arg);
+            }
             sb_append(&out, "    pushl %eax\n");
         } else if (strcmp(inst->op, "store_index") == 0) {
             sb_append(&out, "    popl %eax\n");
@@ -794,19 +839,27 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
             i386_emit_block_copy(&out, "%ecx", "%edx", ret_size);
             sb_append(&out, "    movl %edx, %eax\n"); // Return hidden pointer in eax
             if (frame) {
+                if (ir_pic_mode)
+                    sb_append(&out, "    popl %ebx\n");
                 sb_append(&out, "    leave\n");
             }
             sb_append(&out, "    ret $4\n");
         } else if (strcmp(inst->op, "ret") == 0) {
             sb_append(&out, "    popl %eax\n");
-            if (frame)
+            if (frame) {
+                if (ir_pic_mode)
+                    sb_append(&out, "    popl %ebx\n");
                 sb_append(&out, "    leave\n");
+            }
             sb_append(&out, "    ret\n");
         } else if (strcmp(inst->op, "ret64") == 0) {
             sb_append(&out, "    popl %eax\n");
             sb_append(&out, "    popl %edx\n");
-            if (frame)
+            if (frame) {
+                if (ir_pic_mode)
+                    sb_append(&out, "    popl %ebx\n");
                 sb_append(&out, "    leave\n");
+            }
             sb_append(&out, "    ret\n");
         } else if (strcmp(inst->op, "extract_bits") == 0) {
             int bf_offset = (int)(inst->value & 0xFFFF);
@@ -906,8 +959,14 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
             int gsize = 4;
             HashMapEntry *ge = hashmap_get(&ir_global_var_elem_scales, inst->arg);
             if (ge) gsize = ge->val_int;
-            if (gsize == 4) sb_appendf(&out, "    flds %s\n", inst->arg);
-            else sb_appendf(&out, "    fldl %s\n", inst->arg);
+            if (ir_pic_mode) {
+                sb_appendf(&out, "    movl %s@GOT(%%ebx), %%eax\n", inst->arg);
+                if (gsize == 4) sb_append(&out, "    flds (%eax)\n");
+                else sb_append(&out, "    fldl (%eax)\n");
+            } else {
+                if (gsize == 4) sb_appendf(&out, "    flds %s\n", inst->arg);
+                else sb_appendf(&out, "    fldl %s\n", inst->arg);
+            }
             sb_append(&out, "    subl $8, %esp\n");
             sb_append(&out, "    fstpl (%esp)\n");
         } else if (strcmp(inst->op, "fgstore") == 0) {
@@ -916,8 +975,14 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
             if (ge) gsize = ge->val_int;
             sb_append(&out, "    fldl (%esp)\n");
             sb_append(&out, "    addl $8, %esp\n");
-            if (gsize == 4) sb_appendf(&out, "    fstps %s\n", inst->arg);
-            else sb_appendf(&out, "    fstpl %s\n", inst->arg);
+            if (ir_pic_mode) {
+                sb_appendf(&out, "    movl %s@GOT(%%ebx), %%eax\n", inst->arg);
+                if (gsize == 4) sb_append(&out, "    fstps (%eax)\n");
+                else sb_append(&out, "    fstpl (%eax)\n");
+            } else {
+                if (gsize == 4) sb_appendf(&out, "    fstps %s\n", inst->arg);
+                else sb_appendf(&out, "    fstpl %s\n", inst->arg);
+            }
         } else if (strcmp(inst->op, "fload_addr4") == 0 || strcmp(inst->op, "fload_addr8") == 0) {
             sb_append(&out, "    popl %eax\n");
             if (strcmp(inst->op, "fload_addr4") == 0) sb_append(&out, "    flds (%eax)\n");
@@ -934,8 +999,11 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
             /* return value in st0 (i386 returns float and double in st0) */
             sb_append(&out, "    fldl (%esp)\n");
             sb_append(&out, "    addl $8, %esp\n");
-            if (frame)
+            if (frame) {
+                if (ir_pic_mode)
+                    sb_append(&out, "    popl %ebx\n");
                 sb_append(&out, "    leave\n");
+            }
             sb_append(&out, "    ret\n");
         } else {
             char msg[128];
@@ -949,8 +1017,11 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
         has_explicit_ret = strcmp(last_op, "ret") == 0 || strcmp(last_op, "ret_agg") == 0;
     }
     if (!has_explicit_ret) {
-        if (frame)
+        if (frame) {
+            if (ir_pic_mode)
+                sb_append(&out, "    popl %ebx\n");
             sb_append(&out, "    leave\n");
+        }
         if (fn->return_aggregate_size > 0) {
             sb_append(&out, "    ret $4\n");
         } else {

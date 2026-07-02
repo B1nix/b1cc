@@ -71,6 +71,7 @@
 #define R_X86_64_NONE    0
 #define R_X86_64_32      1
 #define R_X86_64_PC32    2
+#define R_X86_64_GOTPCREL 9
 #define R_X86_64_PLT32   4
 #define R_X86_64_32S     11
 
@@ -78,6 +79,7 @@
 #define R_386_NONE   0
 #define R_386_32     1
 #define R_386_PC32   2
+#define R_386_GOT32  3
 #define R_386_PLT32  4
 
 /* =========================================================================
@@ -400,6 +402,7 @@ typedef struct {
     int      idx;       /* index register for MEM_IDX */
     int      scale;     /* scale (1,2,4,8) for MEM_IDX */
     int      is64;      /* 1 for 64-bit register */
+    int      is_gotpcrel; /* 1 for @GOTPCREL(%rip) addressing */
 } Operand;
 
 /* Determine operand size class from register name */
@@ -502,6 +505,13 @@ static Operand parse_operand_x64(const char **pp) {
             /* symbol */
             while (*q && *q != '(' && *q != '\n' && ns < 255) sym[ns++] = *q++;
             sym[ns] = 0;
+            /* Check for @GOTPCREL suffix (PIC mode) */
+            const char *got_suffix = strstr(sym, "@GOTPCREL");
+            if (got_suffix) {
+                ns = (int)(got_suffix - sym);
+                sym[ns] = 0;
+                op.is_gotpcrel = 1;
+            }
         }
 
         if (*q == '(') {
@@ -807,12 +817,12 @@ static int x64_encode_line(const char *line, ByteBuf *text, EncCtx *ctx,
             bb_write8(text, rex(1, d, 0));
             bb_write8(text, 0x8B);
             bb_write8(text, modrm_r0(d, 5)); /* mod=00, rm=101 = RIP-relative */
-            /* Relocation: R_X86_64_PC32 at current offset, addend=-4 */
+            /* Relocation: R_X86_64_PC32 or R_X86_64_GOTPCREL at current offset, addend=-4 */
             ElfReloc rel = {0};
             strncpy(rel.sym_name, src.sym, 255);
             rel.offset = text->size;
             rel.addend = -4;
-            rel.type   = R_X86_64_PC32;
+            rel.type   = src.is_gotpcrel ? R_X86_64_GOTPCREL : R_X86_64_PC32;
             relocarr_push(relocs, &rel);
             bb_write32le(text, 0); /* placeholder */
             return 1;
@@ -847,7 +857,7 @@ static int x64_encode_line(const char *line, ByteBuf *text, EncCtx *ctx,
             enc_mem_base(text, 0x89, src.reg, dst.base, 0, 0);
             return 1;
         }
-        /* movl %eax, sym(%rip) */
+        /* movl %eax, sym(%rip) or sym@GOTPCREL(%rip) */
         if (src.type == OT_REG32 && dst.type == OT_MEM_RIP) {
             int s = src.reg;
             if (s >= 8) bb_write8(text, rex(0,s,0));
@@ -857,7 +867,7 @@ static int x64_encode_line(const char *line, ByteBuf *text, EncCtx *ctx,
             strncpy(rel.sym_name, dst.sym, 255);
             rel.offset = text->size;
             rel.addend = -4;
-            rel.type   = R_X86_64_PC32;
+            rel.type   = dst.is_gotpcrel ? R_X86_64_GOTPCREL : R_X86_64_PC32;
             relocarr_push(relocs, &rel);
             bb_write32le(text, 0);
             return 1;
@@ -873,7 +883,7 @@ static int x64_encode_line(const char *line, ByteBuf *text, EncCtx *ctx,
         Operand dst = parse_operand_x64(&p);
         (void)src; (void)dst;
         /* Simplified: emit inline with REX if needed */
-        /* movb %al, sym(%rip) */
+        /* movb %al, sym(%rip) or sym@GOTPCREL(%rip) */
         if (src.type == OT_REG8 && dst.type == OT_MEM_RIP) {
             if (src.reg >= 4) bb_write8(text, rex(0, src.reg, 0));
             bb_write8(text, 0x88);
@@ -882,7 +892,7 @@ static int x64_encode_line(const char *line, ByteBuf *text, EncCtx *ctx,
             strncpy(rel.sym_name, dst.sym, 255);
             rel.offset = text->size;
             rel.addend = -4;
-            rel.type   = R_X86_64_PC32;
+            rel.type   = dst.is_gotpcrel ? R_X86_64_GOTPCREL : R_X86_64_PC32;
             relocarr_push(relocs, &rel);
             bb_write32le(text, 0);
             return 1;
@@ -921,7 +931,7 @@ static int x64_encode_line(const char *line, ByteBuf *text, EncCtx *ctx,
             strncpy(rel.sym_name, dst.sym, 255);
             rel.offset = text->size;
             rel.addend = -4;
-            rel.type   = R_X86_64_PC32;
+            rel.type   = dst.is_gotpcrel ? R_X86_64_GOTPCREL : R_X86_64_PC32;
             relocarr_push(relocs, &rel);
             bb_write32le(text, 0);
             return 1;
@@ -1203,7 +1213,7 @@ static int x64_encode_line(const char *line, ByteBuf *text, EncCtx *ctx,
             strncpy(rel.sym_name, src.sym, 255);
             rel.offset = text->size;
             rel.addend = -4;
-            rel.type   = R_X86_64_PC32;
+            rel.type   = src.is_gotpcrel ? R_X86_64_GOTPCREL : R_X86_64_PC32;
             relocarr_push(relocs, &rel);
             bb_write32le(text, 0);
             return 1;
@@ -1229,7 +1239,7 @@ static int x64_encode_line(const char *line, ByteBuf *text, EncCtx *ctx,
             strncpy(rel.sym_name, src.sym, 255);
             rel.offset = text->size;
             rel.addend = -4;
-            rel.type   = R_X86_64_PC32;
+            rel.type   = src.is_gotpcrel ? R_X86_64_GOTPCREL : R_X86_64_PC32;
             relocarr_push(relocs, &rel);
             bb_write32le(text, 0);
             return 1;
@@ -1254,7 +1264,7 @@ static int x64_encode_line(const char *line, ByteBuf *text, EncCtx *ctx,
             strncpy(rel.sym_name, src.sym, 255);
             rel.offset = text->size;
             rel.addend = -4;
-            rel.type   = R_X86_64_PC32;
+            rel.type   = src.is_gotpcrel ? R_X86_64_GOTPCREL : R_X86_64_PC32;
             relocarr_push(relocs, &rel);
             bb_write32le(text, 0);
             return 1;
@@ -1280,7 +1290,7 @@ static int x64_encode_line(const char *line, ByteBuf *text, EncCtx *ctx,
             strncpy(rel.sym_name, src.sym, 255);
             rel.offset = text->size;
             rel.addend = -4;
-            rel.type   = R_X86_64_PC32;
+            rel.type   = src.is_gotpcrel ? R_X86_64_GOTPCREL : R_X86_64_PC32;
             relocarr_push(relocs, &rel);
             bb_write32le(text, 0);
             return 1;
@@ -1299,7 +1309,7 @@ static int x64_encode_line(const char *line, ByteBuf *text, EncCtx *ctx,
         return 1;
     }
 
-    /* ---- leaq sym(%rip), %rax ---- */
+    /* ---- leaq sym(%rip) / sym@GOTPCREL(%rip), %rax ---- */
     if (strcmp(mnem, "leaq") == 0) {
         Operand src = parse_operand_x64(&p);
         if (*p == ',') p++;
@@ -1313,7 +1323,7 @@ static int x64_encode_line(const char *line, ByteBuf *text, EncCtx *ctx,
             strncpy(rel.sym_name, src.sym, 255);
             rel.offset = text->size;
             rel.addend = -4;
-            rel.type   = R_X86_64_PC32;
+            rel.type   = src.is_gotpcrel ? R_X86_64_GOTPCREL : R_X86_64_PC32;
             relocarr_push(relocs, &rel);
             bb_write32le(text, 0);
             return 1;
@@ -2293,6 +2303,20 @@ static void i386_emit_modrm_mem(ByteBuf *out, int reg, const Operand *mem, uint8
     int base = mem->base;
     int rb = base & 7;
     int32_t disp = (int32_t)mem->imm;
+
+    /* GOT-relative: symbol@GOT(%reg) — use R_386_GOT32 relocation */
+    if (mem->is_gotpcrel && mem->sym[0]) {
+        bb_write8(out, modrm_r0(reg & 7, rb));
+        ElfReloc rel = {0};
+        strncpy(rel.sym_name, mem->sym, sizeof(rel.sym_name) - 1);
+        rel.offset = out->size;
+        rel.type = R_386_GOT32;
+        rel.addend = -4;
+        relocarr_push(relocs, &rel);
+        bb_write32le(out, 0);
+        return;
+    }
+
     if (disp == 0 && rb != 5) {
         bb_write8(out, modrm_r0(reg & 7, rb));
         if (rb == 4) bb_write8(out, 0x24);
@@ -2392,7 +2416,29 @@ static Operand parse_operand_i386(const char **pp) {
 
     if (*p && *p != ',' && *p != '\n') {
         p = parse_symbol_name(p, op.sym, sizeof(op.sym));
-        op.type = OT_SYM;
+        const char *got_suffix = strstr(op.sym, "@GOT");
+        if (got_suffix && *p == '(') {
+            /* symbol@GOT(%reg) — GOT-relative addressing */
+            int sym_len = (int)(got_suffix - op.sym);
+            op.sym[sym_len] = 0;
+            op.is_gotpcrel = 1;
+            p++;
+            char base[16]; int nb = 0;
+            while (*p && *p != ')' && nb < 15) base[nb++] = *p++;
+            base[nb] = 0;
+            op.base = x64_reg_num(base);
+            if (*p == ')') p++;
+            op.type = OT_MEM_BASE;
+            op.imm = 0;
+        } else if (got_suffix) {
+            /* plain symbol@GOT without (reg) — strip suffix, keep as symbol */
+            int sym_len = (int)(got_suffix - op.sym);
+            op.sym[sym_len] = 0;
+            op.type = OT_SYM;
+            op.is_gotpcrel = 1;
+        } else {
+            op.type = OT_SYM;
+        }
         *pp = p;
         return op;
     }
@@ -2636,9 +2682,18 @@ static int i386_encode_line(const char *line, ByteBuf *text, EncCtx *ctx,
             parse_symbol_name(p, sym, sizeof(sym));
             bb_write8(text, 0xE8);
             ElfReloc rel = {0};
-            strncpy(rel.sym_name, sym, sizeof(rel.sym_name) - 1);
+            int use_plt = 0;
+            const char *plt = strstr(sym, "@PLT");
+            if (plt) {
+                int sym_len = (int)(plt - sym);
+                strncpy(rel.sym_name, sym, sym_len > 255 ? 255 : (size_t)sym_len);
+                rel.sym_name[sym_len] = 0;
+                use_plt = 1;
+            } else {
+                strncpy(rel.sym_name, sym, sizeof(rel.sym_name) - 1);
+            }
             rel.offset = text->size;
-            rel.type = R_386_PC32;
+            rel.type = use_plt ? R_386_PLT32 : R_386_PC32;
             relocarr_push(relocs, &rel);
             bb_write32le(text, 0);
         }

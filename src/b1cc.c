@@ -135,6 +135,7 @@ int main(int argc, char **argv) {
     bool dump_symbols = false;
     bool dump_sections = false;
     bool dump_relocs = false;
+    bool pic_mode = false;
 
     StringArray inputs;
     string_array_init(&inputs);
@@ -169,6 +170,10 @@ int main(int argc, char **argv) {
             target = arg + 9;
         } else if (strncmp(arg, "-mcmodel=", 9) == 0) {
             mcmodel = arg + 9;
+        } else if (strcmp(arg, "-fPIC") == 0 || strcmp(arg, "-fpic") == 0 || strcmp(arg, "-fpie") == 0 || strcmp(arg, "-fPIE") == 0) {
+            pic_mode = true;
+        } else if (strcmp(arg, "-fno-pic") == 0 || strcmp(arg, "-fno-pie") == 0 || strcmp(arg, "-fno-PIE") == 0) {
+            pic_mode = false;
         } else if (strcmp(arg, "-o") == 0) {
             if (++i == argc)
                 diagnostics_fatal("-o needs a path");
@@ -216,6 +221,8 @@ int main(int argc, char **argv) {
     string_array_push(&preprocessor_driver_include_dirs, "../b1nix/userspace/include");
     string_array_push(&preprocessor_driver_include_dirs, "/usr/include");
     string_array_push(&preprocessor_driver_include_dirs, "/usr/local/include");
+
+    ir_pic_mode = pic_mode ? 1 : 0;
 
     if (inputs.count == 0)
         diagnostics_fatal("usage: b1cc [-S] [-c] [-E] [-fdump-ast] [-fdump-ir] input.c ... [-o output]");

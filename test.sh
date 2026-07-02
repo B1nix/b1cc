@@ -1293,3 +1293,68 @@ ASM
 ./build/b1cc --target=x86_64-elf -c "$tmp/kernel_entry.S" -o "$tmp/kernel_entry.o" 2>/dev/null
 test -s "$tmp/kernel_entry.o"
 echo "ok m25_kernel_asm_assembly"
+
+# === M26: Dynamic Linking & PIC Tests ===
+
+# Test: -fPIC produces GOT-indirect addressing in x86_64 assembly
+./build/b1cc --target=x86_64-b1nix -fPIC -S tests/m26_pic_basic.c -o "$tmp/m26_pic_basic.s"
+grep -q 'GOTPCREL' "$tmp/m26_pic_basic.s"
+echo "ok m26_pic_asm_gotpcrel"
+
+# Test: -fpie also produces GOT-indirect addressing
+./build/b1cc --target=x86_64-b1nix -fpie -S tests/m26_pic_basic.c -o "$tmp/m26_pic_pie.s"
+grep -q 'GOTPCREL' "$tmp/m26_pic_pie.s"
+echo "ok m26_pie_asm_gotpcrel"
+
+# Test: -fPIC produces valid ELF object with native ELF writer
+./build/b1cc --target=x86_64-b1nix -fPIC -c tests/m26_pic_basic.c -o "$tmp/m26_pic_basic.o"
+test -s "$tmp/m26_pic_basic.o"
+echo "ok m26_pic_elf_object"
+
+# Test: ELF object from PIC has R_X86_64_GOTPCREL relocations
+./build/b1cc --target=x86_64-b1nix -fPIC -c -fdump-relocs tests/m26_pic_basic.c -o "$tmp/m26_pic_reloc.o" > "$tmp/m26_pic_reloc.txt" 2>&1
+grep -q 'R_X86_64_GOTPCREL' "$tmp/m26_pic_reloc.txt"
+echo "ok m26_pic_elf_gotpcrel_reloc"
+
+# Test: non-PIC (default) does not contain GOTPCREL references
+./build/b1cc --target=x86_64-b1nix -S tests/m26_pic_basic.c -o "$tmp/m26_pic_nopic.s"
+if grep -q 'GOTPCREL' "$tmp/m26_pic_nopic.s"; then
+    echo "FAIL: non-PIC mode should not contain GOTPCREL"
+    exit 1
+fi
+echo "ok m26_nopic_no_gotpcrel"
+
+# Test: -fPIC compiles correctly on host (arm64-darwin)
+./build/b1cc -fPIC tests/m26_pic_basic.c -o "$tmp/m26_pic_basic_host"
+set +e
+"$tmp/m26_pic_basic_host"
+rc=$?
+set -e
+test "$rc" = 10
+echo "ok m26_pic_host_exec"
+
+# M26 — i386 PIC tests
+./build/b1cc --target=i386-b1nix -fPIC -S tests/m26_pic_basic.c -o "$tmp/m26_pic_i386.s"
+grep -q '@GOT(%ebx)' "$tmp/m26_pic_i386.s"
+echo "ok m26_pic_i386_asm_got"
+
+./build/b1cc --target=i386-b1nix -fPIC -c tests/m26_pic_basic.c -o "$tmp/m26_pic_i386.o"
+test -s "$tmp/m26_pic_i386.o"
+echo "ok m26_pic_i386_elf_object"
+
+./build/b1cc --target=i386-b1nix -fPIC -c -fdump-relocs tests/m26_pic_basic.c -o "$tmp/m26_pic_i386_reloc.o" > "$tmp/m26_pic_i386_reloc.txt" 2>&1
+grep -q 'R_386_GOT32' "$tmp/m26_pic_i386_reloc.txt"
+echo "ok m26_pic_i386_elf_got32_reloc"
+
+# i386 PIC: check @PLT suffix on function calls
+./build/b1cc --target=i386-b1nix -fPIC -S tests/puts.c -o "$tmp/m26_pic_i386_plt.s"
+grep -q '@PLT' "$tmp/m26_pic_i386_plt.s"
+echo "ok m26_pic_i386_asm_plt"
+
+# i386 non-PIC: no @GOT(%ebx)
+./build/b1cc --target=i386-b1nix -S tests/m26_pic_basic.c -o "$tmp/m26_pic_i386_nopic.s"
+if grep -q '@GOT' "$tmp/m26_pic_i386_nopic.s"; then
+    echo "FAIL: @GOT should not be present in non-PIC output"
+    exit 1
+fi
+echo "ok m26_pic_i386_nopic_no_got"

@@ -819,7 +819,17 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
             HashMapEntry *ge = hashmap_get(&ir_global_var_elem_scales, inst->arg);
             if (ge) gsize = ge->val_int;
 
-            if (ir_code_model == 1) {
+            if (ir_pic_mode) {
+                sb_appendf(&out, "    movq %s@GOTPCREL(%%rip), %%rcx\n", inst->arg);
+                if (gsize == 1)
+                    sb_append(&out, "    movsbl (%rcx), %eax\n");
+                else if (gsize == 2)
+                    sb_append(&out, "    movswq (%rcx), %rax\n");
+                else if (gsize == 4)
+                    sb_append(&out, "    movslq (%rcx), %rax\n");
+                else
+                    sb_append(&out, "    movq (%rcx), %rax\n");
+            } else if (ir_code_model == 1) {
                 /* Kernel model: load address first, then dereference */
                 sb_appendf(&out, "    movabs $%s, %%rcx\n", inst->arg);
                 if (gsize == 1)
@@ -847,7 +857,17 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
             HashMapEntry *ge = hashmap_get(&ir_global_var_elem_scales, inst->arg);
             if (ge) gsize = ge->val_int;
 
-            if (ir_code_model == 1) {
+            if (ir_pic_mode) {
+                sb_appendf(&out, "    movq %s@GOTPCREL(%%rip), %%rcx\n", inst->arg);
+                if (gsize == 1)
+                    sb_append(&out, "    movb %al, (%rcx)\n");
+                else if (gsize == 2)
+                    sb_append(&out, "    movw %ax, (%rcx)\n");
+                else if (gsize == 4)
+                    sb_append(&out, "    movl %eax, (%rcx)\n");
+                else
+                    sb_append(&out, "    movq %rax, (%rcx)\n");
+            } else if (ir_code_model == 1) {
                 /* Kernel model: load address first, then store through register */
                 sb_appendf(&out, "    movabs $%s, %%rcx\n", inst->arg);
                 if (gsize == 1)
@@ -869,7 +889,9 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                     sb_appendf(&out, "    movq %%rax, %s(%%rip)\n", inst->arg);
             }
         } else if (strcmp(inst->op, "gaddr") == 0) {
-            if (ir_code_model == 1) {
+            if (ir_pic_mode) {
+                sb_appendf(&out, "    movq %s@GOTPCREL(%%rip), %%rax\n", inst->arg);
+            } else if (ir_code_model == 1) {
                 /* Kernel model: absolute address (data may be >2GB from code) */
                 sb_appendf(&out, "    movabs $%s, %%rax\n", inst->arg);
             } else {
@@ -1037,7 +1059,14 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
             int gsize = 8;
             HashMapEntry *ge = hashmap_get(&ir_global_var_elem_scales, inst->arg);
             if (ge) gsize = ge->val_int;
-            if (ir_code_model == 1) {
+            if (ir_pic_mode) {
+                sb_appendf(&out, "    movq %s@GOTPCREL(%%rip), %%rcx\n", inst->arg);
+                if (gsize == 4) {
+                    sb_append(&out, "    cvtss2sd (%rcx), %xmm0\n");
+                } else {
+                    sb_append(&out, "    movsd (%rcx), %xmm0\n");
+                }
+            } else if (ir_code_model == 1) {
                 /* Kernel model: load address first, then access through register */
                 sb_appendf(&out, "    movabs $%s, %%rcx\n", inst->arg);
                 if (gsize == 4) {
@@ -1060,7 +1089,15 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
             if (ge) gsize = ge->val_int;
             sb_append(&out, "    movsd (%rsp), %xmm0\n");
             sb_append(&out, "    addq $8, %rsp\n");
-            if (ir_code_model == 1) {
+            if (ir_pic_mode) {
+                sb_appendf(&out, "    movq %s@GOTPCREL(%%rip), %%rcx\n", inst->arg);
+                if (gsize == 4) {
+                    sb_append(&out, "    cvtsd2ss %xmm0, %xmm0\n");
+                    sb_append(&out, "    movss %xmm0, (%rcx)\n");
+                } else {
+                    sb_append(&out, "    movsd %xmm0, (%rcx)\n");
+                }
+            } else if (ir_code_model == 1) {
                 /* Kernel model: load address first, then store through register */
                 sb_appendf(&out, "    movabs $%s, %%rcx\n", inst->arg);
                 if (gsize == 4) {

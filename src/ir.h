@@ -164,6 +164,7 @@ extern HashMap ir_function_return_int_sizes;
 extern HashMap ir_function_param_int_sizes;
 extern int ir_current_target_scale;
 extern int ir_code_model; /* 0=small (default), 1=kernel */
+extern int ir_pic_mode;  /* 0=non-PIC (default), 1=PIC/PIE */
 extern StringArray ir_global_asm_blocks;
 
 void ir_set_function_pointer_signature(const char *name, const IntArray *param_floats, int return_float);
