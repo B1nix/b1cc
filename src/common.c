@@ -140,6 +140,31 @@ void sb_free(StringBuilder *sb) {
     sb->cap = 0;
 }
 
+const char *escape_asm_string(const char *s, Arena *arena) {
+    StringBuilder sb;
+    sb_init(&sb);
+    size_t len = strlen(s);
+    size_t i = 0;
+    while (i < len) {
+        if (s[i] == '\\' && i + 1 < len) {
+            char next = s[i + 1];
+            if (next == '\'' || next == '?') {
+                sb_append_char(&sb, next);
+            } else {
+                sb_append_char(&sb, '\\');
+                sb_append_char(&sb, next);
+            }
+            i += 2;
+        } else {
+            sb_append_char(&sb, s[i]);
+            i++;
+        }
+    }
+    const char *res = sb_to_string(&sb, arena);
+    sb_free(&sb);
+    return res;
+}
+
 // --- Hash Map ---
 
 static unsigned int hash_key(const char *str) {

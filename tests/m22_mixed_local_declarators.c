@@ -17,6 +17,7 @@ int main(void) {
     };
     char buf[4], *e;
     char left[2], right[3], *p;
+    char *name, scratch[4];
     struct Pair first, second = {0};
     AliasPair alias_first, alias_second = {0};
     CTypeLike ctype_first, ctype_second = {0};
@@ -30,8 +31,12 @@ int main(void) {
     right[0] = 'b';
     right[1] = 'c';
     p = right;
+    name = scratch;
+    scratch[0] = 'z';
+    scratch[1] = 0;
     if (left[0] != 'a') return 3;
     if (p[1] != 'c') return 4;
+    if (name[0] != 'z') return 11;
     first.x = 10;
     first.y = 20;
     if (second.x != 0) return 5;

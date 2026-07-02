@@ -416,6 +416,18 @@ grep -q 'generated_alpha' "$tmp/m21_xmacro_undef.i"
 ! grep -q 'M21_ITEM' "$tmp/m21_xmacro_undef.i"
 echo "ok m21_xmacro_undef"
 
+mkdir -p "$tmp/preferred/include" "$tmp/fallback/include"
+printf '%s\n' '#define WHICH_HEADER 42' > "$tmp/preferred/include/shadowed.h"
+printf '%s\n' '#define WHICH_HEADER 1' > "$tmp/fallback/include/shadowed.h"
+printf '%s\n' '#include <shadowed.h>' 'int main(void) { return WHICH_HEADER; }' > "$tmp/include_precedence.c"
+./build/b1cc -I "$tmp/preferred/include" -I "$tmp/fallback/include" "$tmp/include_precedence.c" -o "$tmp/include_precedence"
+set +e
+"$tmp/include_precedence"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok include_precedence"
+
 ./build/b1cc -I tests/include tests/m21_repeat_xmacro.c -o "$tmp/m21_repeat_xmacro"
 set +e
 "$tmp/m21_repeat_xmacro"
@@ -571,6 +583,14 @@ set -e
 test "$rc" = 42
 echo "ok m22_enum_const_expr"
 
+./build/b1cc tests/m22_enum_zero_case.c -o "$tmp/m22_enum_zero_case"
+set +e
+"$tmp/m22_enum_zero_case"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_enum_zero_case"
+
 ./build/b1cc tests/m22_comma_expr.c -o "$tmp/m22_comma_expr"
 set +e
 "$tmp/m22_comma_expr"
@@ -611,6 +631,46 @@ set -e
 test "$rc" = 42
 echo "ok m22_mixed_local_declarators"
 
+./build/b1cc tests/m22_short_int_function.c -o "$tmp/m22_short_int_function"
+set +e
+"$tmp/m22_short_int_function"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_short_int_function"
+
+./build/b1cc tests/m22_anonymous_union_scalar_init.c -o "$tmp/m22_anonymous_union_scalar_init"
+set +e
+"$tmp/m22_anonymous_union_scalar_init"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_anonymous_union_scalar_init"
+
+./build/b1cc tests/m22_static_local_struct_array_inferred.c -o "$tmp/m22_static_local_struct_array_inferred"
+set +e
+"$tmp/m22_static_local_struct_array_inferred"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_static_local_struct_array_inferred"
+
+./build/b1cc tests/m22_post_array_attribute.c -o "$tmp/m22_post_array_attribute"
+set +e
+"$tmp/m22_post_array_attribute"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_post_array_attribute"
+
+./build/b1cc tests/m22_array_range_designator.c -o "$tmp/m22_array_range_designator"
+set +e
+"$tmp/m22_array_range_designator"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_array_range_designator"
+
 ./build/b1cc tests/m22_tcc_struct_table_init.c -o "$tmp/m22_tcc_struct_table_init"
 set +e
 "$tmp/m22_tcc_struct_table_init"
@@ -626,6 +686,22 @@ rc=$?
 set -e
 test "$rc" = 42
 echo "ok m22_typedef_storage_after_type"
+
+./build/b1cc tests/m22_typedef_multi_alias_pointer.c -o "$tmp/m22_typedef_multi_alias_pointer"
+set +e
+"$tmp/m22_typedef_multi_alias_pointer"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_typedef_multi_alias_pointer"
+
+./build/b1cc tests/m22_typedef_array_alias.c -o "$tmp/m22_typedef_array_alias"
+set +e
+"$tmp/m22_typedef_array_alias"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_typedef_array_alias"
 
 ./build/b1cc tests/m22_global_function_pointer_initializer.c -o "$tmp/m22_global_function_pointer_initializer"
 set +e
@@ -723,6 +799,22 @@ set -e
 test "$rc" = 42
 echo "ok m22_compound_literal_array_cast"
 
+./build/b1cc tests/m22_compound_literal_designated_union_arg.c -o "$tmp/m22_compound_literal_designated_union_arg"
+set +e
+"$tmp/m22_compound_literal_designated_union_arg"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_compound_literal_designated_union_arg"
+
+./build/b1cc tests/m22_compound_literal_small_struct_assign.c -o "$tmp/m22_compound_literal_small_struct_assign"
+set +e
+"$tmp/m22_compound_literal_small_struct_assign"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_compound_literal_small_struct_assign"
+
 ./build/b1cc tests/m22_local_struct_definition_declarator.c -o "$tmp/m22_local_struct_definition_declarator"
 set +e
 "$tmp/m22_local_struct_definition_declarator"
@@ -754,6 +846,58 @@ rc=$?
 set -e
 test "$rc" = 42
 echo "ok m22_global_function_pointer_array"
+
+./build/b1cc tests/m22_global_struct_function_pointer_field.c -o "$tmp/m22_global_struct_function_pointer_field"
+set +e
+"$tmp/m22_global_struct_function_pointer_field"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_global_struct_function_pointer_field"
+
+./build/b1cc tests/m22_struct_function_pointer_return_pointer_field.c -o "$tmp/m22_struct_function_pointer_return_pointer_field"
+set +e
+"$tmp/m22_struct_function_pointer_return_pointer_field"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_struct_function_pointer_return_pointer_field"
+
+./build/b1cc --target=x86_64-b1nix tests/m22_global_struct_casted_symbol_field.c -S -o "$tmp/m22_global_struct_casted_symbol_field.s"
+grep -q 'blob' "$tmp/m22_global_struct_casted_symbol_field.s"
+echo "ok m22_global_struct_casted_symbol_field_asm"
+
+./build/b1cc tests/m22_aggregate_call_argument.c -o "$tmp/m22_aggregate_call_argument"
+set +e
+"$tmp/m22_aggregate_call_argument"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_aggregate_call_argument"
+
+./build/b1cc tests/m22_aggregate_return_call.c -o "$tmp/m22_aggregate_return_call"
+set +e
+"$tmp/m22_aggregate_return_call"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_aggregate_return_call"
+
+./build/b1cc tests/m22_local_function_prototype.c -o "$tmp/m22_local_function_prototype"
+set +e
+"$tmp/m22_local_function_prototype"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_local_function_prototype"
+
+./build/b1cc tests/m22_local_function_pointer_array_inferred.c -o "$tmp/m22_local_function_pointer_array_inferred"
+set +e
+"$tmp/m22_local_function_pointer_array_inferred"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m22_local_function_pointer_array_inferred"
 
 ./build/b1cc tests/m22_static_local_mixed_scalars.c -o "$tmp/m22_static_local_mixed_scalars"
 set +e
@@ -834,6 +978,12 @@ grep -q 'adcl' "$tmp/m19_long_long_i386.s"
 grep -q '__divdi3' "$tmp/m19_long_long_i386.s"
 grep -q '__moddi3' "$tmp/m19_long_long_i386.s"
 echo "ok m19_long_long_i386_asm"
+
+./build/b1cc --target=i386-b1nix tests/m22_i386_inline_asm_labels.c -S -o "$tmp/m22_i386_inline_asm_labels.s"
+grep -q 'movl %edx, %eax' "$tmp/m22_i386_inline_asm_labels.s"
+grep -q '.Li386_one_cmp_high' "$tmp/m22_i386_inline_asm_labels.s"
+grep -q '.Li386_two_cmp_high' "$tmp/m22_i386_inline_asm_labels.s"
+echo "ok m22_i386_inline_asm_labels_asm"
 
 ./build/b1cc tests/m14_qualifiers.c -o "$tmp/m14_qualifiers"
 set +e

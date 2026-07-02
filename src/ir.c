@@ -928,6 +928,14 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         ir_push(fn, "fconst", "", ir_double_to_bits(node->fvalue));
         return;
     }
+    if (strcmp(node->op, "compound_literal") == 0) {
+        lower_addr(node, fn, backend, arena);
+        if (node->value <= target_scale) {
+            ir_push(fn, "const", "", 0);
+            ir_push(fn, "index", "", node->value);
+        }
+        return;
+    }
     if (strcmp(node->op, "cast") == 0) {
         lower_expr(node->lhs, fn, backend, arena);
         int src_float = ir_expr_is_float(node->lhs);
@@ -978,14 +986,18 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         HashMapEntry *loc_entry = hashmap_get(&fn->locals, node->name);
         if (loc_entry) {
             int slot = loc_entry->val_int;
+            int scale = get_expr_pointer_scale(node->lhs, fn);
+            int step = scale > 0 ? scale : 1;
             ir_push(fn, "load", "", slot);
-            ir_push(fn, "const", "", 1);
+            ir_push(fn, "const", "", step);
             ir_push(fn, (strcmp(node->op, "prefix_++") == 0) ? "+" : "-", "", 0);
             ir_push(fn, "store", "", slot);
             ir_push(fn, "load", "", slot);
         } else if (hashmap_has(&ir_global_vars, node->name)) {
+            int scale = get_expr_pointer_scale(node->lhs, fn);
+            int step = scale > 0 ? scale : 1;
             ir_push(fn, "gload", node->name, 0);
-            ir_push(fn, "const", "", 1);
+            ir_push(fn, "const", "", step);
             ir_push(fn, (strcmp(node->op, "prefix_++") == 0) ? "+" : "-", "", 0);
             ir_push(fn, "gstore", node->name, 0);
             ir_push(fn, "gload", node->name, 0);
@@ -997,7 +1009,7 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         return;
     }
     if (strcmp(node->op, "postfix_++") == 0 || strcmp(node->op, "postfix_--") == 0) {
-        if (node->lhs) {
+        if (node->lhs && strcmp(node->lhs->op, "var") != 0) {
             lower_expr(node->lhs, fn, backend, arena);
             ir_push(fn, "dup", "", 0);
             ir_push(fn, "const", "", 1);
@@ -1023,15 +1035,19 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         HashMapEntry *loc_entry = hashmap_get(&fn->locals, node->name);
         if (loc_entry) {
             int slot = loc_entry->val_int;
+            int scale = get_expr_pointer_scale(node->lhs, fn);
+            int step = scale > 0 ? scale : 1;
             ir_push(fn, "load", "", slot);
             ir_push(fn, "load", "", slot);
-            ir_push(fn, "const", "", 1);
+            ir_push(fn, "const", "", step);
             ir_push(fn, (strcmp(node->op, "postfix_++") == 0) ? "+" : "-", "", 0);
             ir_push(fn, "store", "", slot);
         } else if (hashmap_has(&ir_global_vars, node->name)) {
+            int scale = get_expr_pointer_scale(node->lhs, fn);
+            int step = scale > 0 ? scale : 1;
             ir_push(fn, "gload", node->name, 0);
             ir_push(fn, "gload", node->name, 0);
-            ir_push(fn, "const", "", 1);
+            ir_push(fn, "const", "", step);
             ir_push(fn, (strcmp(node->op, "postfix_++") == 0) ? "+" : "-", "", 0);
             ir_push(fn, "gstore", node->name, 0);
         } else {
@@ -1118,11 +1134,18 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         if (scale == 0) scale = target_scale;
 
         int rhs_is_call = (strcmp(node->rhs->op, "call") == 0);
-        if (scale > 8 && !rhs_is_call) {
-            lower_addr(node->rhs, fn, backend, arena);
-            lower_addr(node->lhs, fn, backend, arena);
-            ir_push(fn, "copy", "", scale);
-            lower_addr(node->lhs, fn, backend, arena);
+        if (scale > 8) {
+            if (rhs_is_call) {
+                lower_expr(node->rhs, fn, backend, arena);
+                lower_addr(node->lhs, fn, backend, arena);
+                ir_push(fn, "store_agg", "", scale);
+                lower_addr(node->lhs, fn, backend, arena);
+            } else {
+                lower_addr(node->rhs, fn, backend, arena);
+                lower_addr(node->lhs, fn, backend, arena);
+                ir_push(fn, "copy", "", scale);
+                lower_addr(node->lhs, fn, backend, arena);
+            }
         } else {
             int is_bf = (strcmp(node->lhs->op, "index") == 0 &&
                          strcmp(node->lhs->name, "byte_offset") == 0 &&
@@ -1160,20 +1183,35 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
             int size = ir_get_var_type_size(node->name);
             int is_flt = ir_get_var_float(node->name);
             int rhs_is_call = (strcmp(node->lhs->op, "call") == 0);
-            if (size > 8 && !rhs_is_call) {
-                lower_addr(node->lhs, fn, backend, arena);
+            if (size > 8) {
                 char local_key[512];
                 snprintf(local_key, sizeof(local_key), "%s$%s", fn->name, node->name);
-                if (hashmap_has(&ir_local_array_dims, local_key)) {
-                    ir_push(fn, "load", "", loc_entry->val_int);
+                if (rhs_is_call) {
+                    lower_expr(node->lhs, fn, backend, arena);
+                    if (hashmap_has(&ir_local_array_dims, local_key)) {
+                        ir_push(fn, "load", "", loc_entry->val_int);
+                    } else {
+                        ir_push(fn, "addr", "", loc_entry->val_int);
+                    }
+                    ir_push(fn, "store_agg", "", size);
+                    if (hashmap_has(&ir_local_array_dims, local_key)) {
+                        ir_push(fn, "load", "", loc_entry->val_int);
+                    } else {
+                        ir_push(fn, "addr", "", loc_entry->val_int);
+                    }
                 } else {
-                    ir_push(fn, "addr", "", loc_entry->val_int);
-                }
-                ir_push(fn, "copy", "", size);
-                if (hashmap_has(&ir_local_array_dims, local_key)) {
-                    ir_push(fn, "load", "", loc_entry->val_int);
-                } else {
-                    ir_push(fn, "addr", "", loc_entry->val_int);
+                    lower_addr(node->lhs, fn, backend, arena);
+                    if (hashmap_has(&ir_local_array_dims, local_key)) {
+                        ir_push(fn, "load", "", loc_entry->val_int);
+                    } else {
+                        ir_push(fn, "addr", "", loc_entry->val_int);
+                    }
+                    ir_push(fn, "copy", "", size);
+                    if (hashmap_has(&ir_local_array_dims, local_key)) {
+                        ir_push(fn, "load", "", loc_entry->val_int);
+                    } else {
+                        ir_push(fn, "addr", "", loc_entry->val_int);
+                    }
                 }
             } else if (is_flt) {
                 lower_expr(node->lhs, fn, backend, arena);
@@ -1186,16 +1224,7 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
                     ir_push(fn, node->lhs->is_unsigned ? "zext64" : "sext64", "", 0);
                 }
                 ir_push(fn, "dup", "", 0);
-                if (size > 8) {
-                    char local_key[512];
-                    snprintf(local_key, sizeof(local_key), "%s$%s", fn->name, node->name);
-                    if (hashmap_has(&ir_local_array_dims, local_key)) {
-                        ir_push(fn, "load", "", loc_entry->val_int);
-                    } else {
-                        ir_push(fn, "addr", "", loc_entry->val_int);
-                    }
-                    ir_push(fn, "store_agg", "", size);
-                } else if (target_scale == 4 && size == 8) {
+                if (target_scale == 4 && size == 8) {
                     ir_push(fn, "store64", "", loc_entry->val_int);
                 } else {
                     ir_push(fn, "store", "", loc_entry->val_int);
@@ -1205,11 +1234,18 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
             int size = ir_get_var_type_size(node->name);
             int is_flt = ir_get_var_float(node->name);
             int rhs_is_call = (strcmp(node->lhs->op, "call") == 0);
-            if (size > 8 && !rhs_is_call) {
-                lower_addr(node->lhs, fn, backend, arena);
-                ir_push(fn, "gaddr", node->name, 0);
-                ir_push(fn, "copy", "", size);
-                ir_push(fn, "gaddr", node->name, 0);
+            if (size > 8) {
+                if (rhs_is_call) {
+                    lower_expr(node->lhs, fn, backend, arena);
+                    ir_push(fn, "gaddr", node->name, 0);
+                    ir_push(fn, "store_agg", "", size);
+                    ir_push(fn, "gaddr", node->name, 0);
+                } else {
+                    lower_addr(node->lhs, fn, backend, arena);
+                    ir_push(fn, "gaddr", node->name, 0);
+                    ir_push(fn, "copy", "", size);
+                    ir_push(fn, "gaddr", node->name, 0);
+                }
             } else if (is_flt) {
                 lower_expr(node->lhs, fn, backend, arena);
                 if (!ir_expr_is_float(node->lhs)) ir_push(fn, "i2f", "", 0);
@@ -1221,10 +1257,7 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
                     ir_push(fn, node->lhs->is_unsigned ? "zext64" : "sext64", "", 0);
                 }
                 ir_push(fn, "dup", "", 0);
-                if (size > 8) {
-                    ir_push(fn, "gaddr", node->name, 0);
-                    ir_push(fn, "store_agg", "", size);
-                } else if (target_scale == 4 && size == 8) {
+                if (target_scale == 4 && size == 8) {
                     ir_push(fn, "gstore64", node->name, 0);
                 } else {
                     ir_push(fn, "gstore", node->name, 0);
@@ -1304,7 +1337,29 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         for (int k = 0; k < node->body.count; ++k) {
             int agg_size = (agg_sizes && k < agg_sizes->count) ? agg_sizes->data[k] : 0;
             if (agg_size > 0) {
-                lower_addr(node->body.data[k], fn, backend, arena);
+                if (strcmp(node->body.data[k]->op, "call") == 0) {
+                    lower_expr(node->body.data[k], fn, backend, arena);
+                    int slots = (agg_size + 15) / 16;
+                    if (slots < 1) slots = 1;
+                    int base_slot = fn->locals.size;
+                    for (int s = 0; s < slots; ++s) {
+                        char tmp_name[128];
+                        snprintf(tmp_name, sizeof(tmp_name), "$call_arg_agg%d$%d", base_slot, s);
+                        hashmap_put(&fn->locals, arena_strdup(arena, tmp_name), nullptr, base_slot + s);
+                    }
+                    int addr_slot = base_slot + slots - 1;
+                    if (agg_size > target_scale) {
+                        ir_push(fn, "addr", "", addr_slot);
+                        ir_push(fn, "store_agg", "", agg_size);
+                    } else {
+                        ir_push(fn, "const", "", 0);
+                        ir_push(fn, "addr", "", addr_slot);
+                        ir_push(fn, "store_index", "", agg_size);
+                    }
+                    ir_push(fn, "addr", "", addr_slot);
+                } else {
+                    lower_addr(node->body.data[k], fn, backend, arena);
+                }
             } else {
                 int param_float = (param_floats && k < param_floats->count) ? param_floats->data[k] : 0;
                 lower_expr(node->body.data[k], fn, backend, arena);
@@ -1587,7 +1642,9 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
     ir_push(fn, op, "", 0);
 }
 
-static void collect_cases(const Node *node, LongStringPairArray *cases, const char **default_label, IrFunction *fn, Arena *arena) {
+static void collect_cases_recursive(const Node *node, LongStringPairArray *cases, const char **default_label, IrFunction *fn, Arena *arena) {
+    if (!node) return;
+    if (strcmp(node->op, "switch") == 0) return;
     if (strcmp(node->op, "case") == 0) {
         char label[128];
         snprintf(label, sizeof(label), ".Lcase_%s_%d", fn->name, fn->label_id++);
@@ -1607,10 +1664,18 @@ static void collect_cases(const Node *node, LongStringPairArray *cases, const ch
         *default_label = label_dup;
     }
     for (int k = 0; k < node->body.count; ++k) {
-        if (node->body.data[k]) collect_cases(node->body.data[k], cases, default_label, fn, arena);
+        if (node->body.data[k]) collect_cases_recursive(node->body.data[k], cases, default_label, fn, arena);
     }
-    if (node->lhs) collect_cases(node->lhs, cases, default_label, fn, arena);
-    if (node->rhs) collect_cases(node->rhs, cases, default_label, fn, arena);
+    if (node->lhs) collect_cases_recursive(node->lhs, cases, default_label, fn, arena);
+    if (node->rhs) collect_cases_recursive(node->rhs, cases, default_label, fn, arena);
+}
+
+static void collect_cases(const Node *node, LongStringPairArray *cases, const char **default_label, IrFunction *fn, Arena *arena) {
+    for (int k = 0; k < node->body.count; ++k) {
+        if (node->body.data[k]) collect_cases_recursive(node->body.data[k], cases, default_label, fn, arena);
+    }
+    if (node->lhs) collect_cases_recursive(node->lhs, cases, default_label, fn, arena);
+    if (node->rhs) collect_cases_recursive(node->rhs, cases, default_label, fn, arena);
 }
 
 static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend, Arena *arena);
@@ -1628,6 +1693,44 @@ static void lower_addr(const Node *node, IrFunction *fn, TargetBackend *backend,
         ir_current_col = node->col;
     }
     int target_scale = backend->get_target_scale(backend);
+    if (strcmp(node->op, "compound_literal") == 0) {
+        int size = (int)node->value;
+        int slots = (size + 15) / 16;
+        if (slots < 1) slots = 1;
+        int base_slot = fn->locals.size;
+        for (int s = 0; s < slots; ++s) {
+            char tmp_name[128];
+            snprintf(tmp_name, sizeof(tmp_name), "$compound%d$%d", base_slot, s);
+            hashmap_put(&fn->locals, arena_strdup(arena, tmp_name), nullptr, base_slot + s);
+        }
+        int addr_slot = base_slot + slots - 1;
+
+        for (int off = 0; off < size; off += target_scale) {
+            int chunk = size - off;
+            if (chunk > target_scale) chunk = target_scale;
+            ir_push(fn, "const", "", 0);
+            ir_push(fn, "const", "", 0);
+            ir_push(fn, "addr", "", addr_slot);
+            ir_push(fn, "const", "", off);
+            ir_push(fn, "+", "", 0);
+            ir_push(fn, "store_index", "", chunk);
+        }
+
+        for (int k = 0; k < node->body.count; ++k) {
+            const Node *item = node->body.data[k];
+            if (strcmp(item->op, "init_item") != 0) continue;
+            int item_size = atoi(item->name);
+            lower_expr(item->lhs, fn, backend, arena);
+            ir_push(fn, "const", "", 0);
+            ir_push(fn, "addr", "", addr_slot);
+            ir_push(fn, "const", "", item->value);
+            ir_push(fn, "+", "", 0);
+            ir_push(fn, "store_index", "", item_size);
+        }
+
+        ir_push(fn, "addr", "", addr_slot);
+        return;
+    }
     if (strcmp(node->op, "unary_*") == 0) {
         lower_expr(node->lhs, fn, backend, arena);
         return;
@@ -1862,7 +1965,29 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
         }
     } else if (strcmp(stmt->op, "return") == 0) {
         if (current_func_ret_aggregate_size > 0) {
-            lower_addr(stmt->lhs, fn, backend, arena);
+            if (stmt->lhs && strcmp(stmt->lhs->op, "call") == 0) {
+                lower_expr(stmt->lhs, fn, backend, arena);
+                int slots = (current_func_ret_aggregate_size + 15) / 16;
+                if (slots < 1) slots = 1;
+                int base_slot = fn->locals.size;
+                for (int s = 0; s < slots; ++s) {
+                    char tmp_name[128];
+                    snprintf(tmp_name, sizeof(tmp_name), "$return_agg%d$%d", base_slot, s);
+                    hashmap_put(&fn->locals, arena_strdup(arena, tmp_name), nullptr, base_slot + s);
+                }
+                int addr_slot = base_slot + slots - 1;
+                if (current_func_ret_aggregate_size > target_scale) {
+                    ir_push(fn, "addr", "", addr_slot);
+                    ir_push(fn, "store_agg", "", current_func_ret_aggregate_size);
+                } else {
+                    ir_push(fn, "const", "", 0);
+                    ir_push(fn, "addr", "", addr_slot);
+                    ir_push(fn, "store_index", "", current_func_ret_aggregate_size);
+                }
+                ir_push(fn, "addr", "", addr_slot);
+            } else {
+                lower_addr(stmt->lhs, fn, backend, arena);
+            }
             ir_push(fn, "ret_agg", "", current_func_ret_aggregate_size);
             return;
         }
@@ -2124,11 +2249,16 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
         if (scale == 0) scale = target_scale;
 
         int rhs_is_call = (strcmp(stmt->rhs->op, "call") == 0);
-
-        if (scale > 8 && !rhs_is_call) {
-            lower_addr(stmt->rhs, fn, backend, arena);
-            lower_addr(stmt->lhs, fn, backend, arena);
-            ir_push(fn, "copy", "", scale);
+        if (scale > 8) {
+            if (rhs_is_call) {
+                lower_expr(stmt->rhs, fn, backend, arena);
+                lower_addr(stmt->lhs, fn, backend, arena);
+                ir_push(fn, "store_agg", "", scale);
+            } else {
+                lower_addr(stmt->rhs, fn, backend, arena);
+                lower_addr(stmt->lhs, fn, backend, arena);
+                ir_push(fn, "copy", "", scale);
+            }
         } else {
             /* Check if this is a bitfield store */
             int is_bf = (strcmp(stmt->lhs->op, "index") == 0 &&

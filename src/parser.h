@@ -9,6 +9,7 @@ typedef struct {
     int pos;
     int target_scale;
     const char *current_func_name;
+    const char *last_parsed_typedef;
     HashMap current_static_locals;
     
     HashMap *scopes;
@@ -32,6 +33,7 @@ typedef struct {
     HashMap global_typedefs;
     HashMap global_typedef_sizes;
     HashMap global_typedef_struct_tags;
+    HashMap global_typedef_dims;
     HashMap global_enums;
     HashMap constexpr_vars;
     HashMap global_structs;

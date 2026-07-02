@@ -207,7 +207,8 @@ static const char *arm64_emit_globals(TargetBackend *self, const IrGlobalVarArra
             const IrGlobalVar *g = &globals->data[i];
             for (int k = 0; k < g->strings.count; ++k) {
                 if (g->strings.data[k].second) {
-                    sb_appendf(&out, "%s:\n    .asciz \"%s\"\n", g->strings.data[k].first, g->strings.data[k].second);
+                    const char *escaped = escape_asm_string(g->strings.data[k].second, arena);
+                    sb_appendf(&out, "%s:\n    .asciz \"%s\"\n", g->strings.data[k].first, escaped);
                 }
             }
         }
@@ -227,7 +228,8 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
     if (fn->strings.count > 0) {
         sb_append(&out, ".cstring\n");
         for (int i = 0; i < fn->strings.count; ++i) {
-            sb_appendf(&out, "%s:\n    .asciz \"%s\"\n", fn->strings.data[i].first, fn->strings.data[i].second);
+            const char *escaped = escape_asm_string(fn->strings.data[i].second, arena);
+            sb_appendf(&out, "%s:\n    .asciz \"%s\"\n", fn->strings.data[i].first, escaped);
         }
     }
     sb_append(&out, ".text\n");

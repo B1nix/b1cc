@@ -50,6 +50,7 @@ void sb_appendf(StringBuilder *sb, const char *fmt, ...);
 #endif
 char *sb_to_string(StringBuilder *sb, Arena *a);
 void sb_free(StringBuilder *sb);
+const char *escape_asm_string(const char *s, Arena *arena);
 
 // --- Hash Map ---
 typedef struct HashMapEntry {

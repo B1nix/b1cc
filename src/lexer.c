@@ -187,6 +187,36 @@ TokenArray lex(const char *src, HashMap *macros, HashMap *active_macros, Arena *
                 push_token(&out, arena_strndup(arena, src + char_start, i - char_start), tok_line, tok_col);
                 continue;
             }
+            if (strcmp(ident, "__LINE__") == 0) {
+                char buf[32];
+                snprintf(buf, sizeof(buf), "%d", preprocessor_current_line);
+                push_token(&out, arena_strdup(arena, buf), tok_line, tok_col);
+                continue;
+            }
+            if (strcmp(ident, "__FILE__") == 0) {
+                StringBuilder sb;
+                sb_init(&sb);
+                sb_append_char(&sb, '"');
+                for (const char *p = preprocessor_current_file; *p; p++) {
+                    if (*p == '\\') {
+                        sb_append(&sb, "\\\\");
+                    } else if (*p == '"') {
+                        sb_append(&sb, "\\\"");
+                    } else {
+                        sb_append_char(&sb, *p);
+                    }
+                }
+                sb_append_char(&sb, '"');
+                push_token(&out, sb_to_string(&sb, arena), tok_line, tok_col);
+                sb_free(&sb);
+                continue;
+            }
+            if (strcmp(ident, "__COUNTER__") == 0) {
+                char buf[32];
+                snprintf(buf, sizeof(buf), "%d", preprocessor_counter++);
+                push_token(&out, arena_strdup(arena, buf), tok_line, tok_col);
+                continue;
+            }
             HashMapEntry *macro_entry = macros ? hashmap_get(macros, ident) : nullptr;
             int is_active = active_macros ? hashmap_has(active_macros, ident) : 0;
 
@@ -282,6 +312,40 @@ TokenArray lex(const char *src, HashMap *macros, HashMap *active_macros, Arena *
                                 sb_free(&current_arg);
                                 sb_init(&current_arg);
                                 CONSUME(1);
+                            } else if (next_c == '"') {
+                                sb_append_char(&current_arg, next_c);
+                                CONSUME(1);
+                                while (i < src_len && src[i] != '"') {
+                                    if (src[i] == '\\' && i + 1 < src_len) {
+                                        sb_append_char(&current_arg, src[i]);
+                                        sb_append_char(&current_arg, src[i + 1]);
+                                        CONSUME(2);
+                                    } else {
+                                        sb_append_char(&current_arg, src[i]);
+                                        CONSUME(1);
+                                    }
+                                }
+                                if (i < src_len) {
+                                    sb_append_char(&current_arg, src[i]);
+                                    CONSUME(1);
+                                }
+                            } else if (next_c == '\'') {
+                                sb_append_char(&current_arg, next_c);
+                                CONSUME(1);
+                                while (i < src_len && src[i] != '\'') {
+                                    if (src[i] == '\\' && i + 1 < src_len) {
+                                        sb_append_char(&current_arg, src[i]);
+                                        sb_append_char(&current_arg, src[i + 1]);
+                                        CONSUME(2);
+                                    } else {
+                                        sb_append_char(&current_arg, src[i]);
+                                        CONSUME(1);
+                                    }
+                                }
+                                if (i < src_len) {
+                                    sb_append_char(&current_arg, src[i]);
+                                    CONSUME(1);
+                                }
                             } else {
                                 sb_append_char(&current_arg, next_c);
                                 CONSUME(1);

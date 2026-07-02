@@ -7,6 +7,9 @@
 
 StringArray preprocessor_driver_include_dirs;
 HashMap preprocessor_driver_macros;
+int preprocessor_current_line = 1;
+const char *preprocessor_current_file = "";
+int preprocessor_counter = 0;
 
 void cond_state_array_init(CondStateArray *arr) {
     arr->data = nullptr;
@@ -506,15 +509,17 @@ static const char *expand_active_line(const char *line, HashMap *macros, Arena *
         if (strcmp(expanded, current) == 0) {
             return expanded;
         }
-        if (strstr(expanded, "->") || strstr(expanded, " -> ")) {
-            return expanded;
-        }
         current = expanded;
     }
     return current;
 }
 
 const char *preprocessor_preprocess(const char *raw_src, const char *filepath, StringArray *include_dirs, HashMap *macros, HashMap *included_files, Arena *arena) {
+    int parent_line = preprocessor_current_line;
+    const char *parent_file = preprocessor_current_file;
+    preprocessor_current_line = 1;
+    preprocessor_current_file = filepath;
+
     const char *src = join_continuation_lines(strip_comments(raw_src, arena), arena);
     StringBuilder out;
     sb_init(&out);
@@ -752,6 +757,7 @@ const char *preprocessor_preprocess(const char *raw_src, const char *filepath, S
                         else if (extra[c_i] == ')' && paren_depth > 0) paren_depth--;
                     }
                     next_i = extra_end < src_len ? extra_end + 1 : src_len;
+                    preprocessor_current_line++;
                 }
                 const char *logical_line = sb_to_string(&logical, arena);
                 sb_free(&logical);
@@ -762,11 +768,14 @@ const char *preprocessor_preprocess(const char *raw_src, const char *filepath, S
             }
         }
 
+        preprocessor_current_line++;
         i = next_i;
     }
 
     cond_state_array_free(&cond_stack);
     const char *res = sb_to_string(&out, arena);
     sb_free(&out);
+    preprocessor_current_line = parent_line;
+    preprocessor_current_file = parent_file;
     return res;
 }

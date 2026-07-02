@@ -601,6 +601,7 @@ static void parse_function_pointer_param_floats(ParserState *p, IntArray *out) {
 
 static int parse_base_type(ParserState *p) {
     p->last_parsed_struct_tag = "";
+    p->last_parsed_typedef = "";
     skip_attribute(p);
     int base_size = p->target_scale;
     p->last_type_unsigned = 0;
@@ -721,7 +722,7 @@ static int parse_base_type(ParserState *p) {
                         struct_alignment = field_align;
                     }
                     
-                    int is_anon = (strcmp(peek(p), ";") == 0 || strcmp(peek(p), ",") == 0);
+                    int is_anon = !is_func_ptr_field && (strcmp(peek(p), ";") == 0 || strcmp(peek(p), ",") == 0);
                     if (is_anon && f_tag[0]) {
                         hfa_valid = 0;
                         // Anonymous struct/union flattening!
@@ -998,6 +999,7 @@ static int parse_base_type(ParserState *p) {
             base_size = 1;
             p->last_type_bool = 1;
         } else if (strcmp(t, "short") == 0) {
+            if (strcmp(peek(p), "int") == 0) take(p, nullptr);
             base_size = 2;
         } else if (strcmp(t, "int") == 0) {
             base_size = 4;
@@ -1025,6 +1027,7 @@ static int parse_base_type(ParserState *p) {
         } else {
             HashMapEntry *typedef_size = hashmap_get(&p->global_typedef_sizes, t);
             if (typedef_size) {
+                p->last_parsed_typedef = t;
                 base_size = typedef_size->val_int;
                 HashMapEntry *typedef_tag = hashmap_get(&p->global_typedef_struct_tags, t);
                 if (typedef_tag) {
@@ -1227,6 +1230,13 @@ static Node *primary(ParserState *p) {
         n->is_bool = 1;
         return n;
     }
+    if (strcmp(peek(p), "__func__") == 0 || strcmp(peek(p), "__FUNCTION__") == 0) {
+        take(p, nullptr);
+        Node *n = create_node(p, "str", tok_line, tok_col);
+        n->name = p->current_func_name ? p->current_func_name : "";
+        n->type_size = p->target_scale;
+        return n;
+    }
     if (strcmp(peek(p), "__builtin_offsetof") == 0) {
         take(p, "__builtin_offsetof");
         take(p, "(");
@@ -1240,18 +1250,26 @@ static Node *primary(ParserState *p) {
             tag = typedef_tag ? (const char *)typedef_tag->val_ptr : type_name;
         }
         take(p, ",");
-        const char *field_name = take(p, nullptr);
-        while (strcmp(peek(p), ".") == 0) {
+        long total_offset = 0;
+        const char *current_tag = tag;
+        while (1) {
+            const char *field_name = take(p, nullptr);
+            char key[512];
+            snprintf(key, sizeof(key), "%s.%s", current_tag, field_name);
+            HashMapEntry *off_entry = hashmap_get(&p->global_struct_field_offsets_by_tag, key);
+            if (!off_entry) parser_error(p, "unknown field in __builtin_offsetof");
+            total_offset += off_entry->val_int;
+            if (strcmp(peek(p), ".") != 0) {
+                break;
+            }
             take(p, ".");
-            field_name = take(p, nullptr);
+            HashMapEntry *tag_entry = hashmap_get(&p->global_struct_field_tags, key);
+            if (!tag_entry) parser_error(p, "unknown nested field in __builtin_offsetof");
+            current_tag = (const char *)tag_entry->val_ptr;
         }
         take(p, ")");
-        char key[512];
-        snprintf(key, sizeof(key), "%s.%s", tag, field_name);
-        HashMapEntry *off_entry = hashmap_get(&p->global_struct_field_offsets_by_tag, key);
-        if (!off_entry) parser_error(p, "unknown field in __builtin_offsetof");
         Node *n = create_node(p, "num", tok_line, tok_col);
-        n->value = off_entry->val_int;
+        n->value = total_offset;
         n->type_size = p->target_scale;
         n->is_unsigned = 1;
         return n;
@@ -1681,9 +1699,17 @@ static Node *unary(ParserState *p) {
     }
     if (paren_starts_type_name(p)) {
         take(p, "(");
+        const char *compound_struct_tag = "";
+        if ((strcmp(peek(p), "struct") == 0 || strcmp(peek(p), "union") == 0) &&
+            p->pos + 1 < p->tokens.count && strcmp(p->tokens.data[p->pos + 1].text, "{") != 0) {
+            compound_struct_tag = p->tokens.data[p->pos + 1].text;
+        }
         int is_unsigned_cast = 0;
         int is_bool_cast = 0;
         int base_size = parse_base_type(p);
+        if (!compound_struct_tag[0] && p->last_parsed_struct_tag && p->last_parsed_struct_tag[0]) {
+            compound_struct_tag = p->last_parsed_struct_tag;
+        }
         is_unsigned_cast = p->last_type_unsigned;
         is_bool_cast = p->last_type_bool;
         int is_float_cast = p->last_type_float;
@@ -1723,6 +1749,67 @@ static Node *unary(ParserState *p) {
         }
         take(p, ")");
         if (strcmp(peek(p), "{") == 0) {
+            if (compound_struct_tag[0]) {
+                Node *compound = create_node(p, "compound_literal", tok_line, tok_col);
+                compound->value = base_size;
+                compound->type_size = base_size;
+                compound->type_tag = compound_struct_tag;
+                take(p, "{");
+                long positional_offset = 0;
+                while (strcmp(peek(p), "}") != 0) {
+                    long offset = positional_offset;
+                    int field_size = base_size;
+                    if (strcmp(peek(p), ".") == 0) {
+                        take(p, ".");
+                        const char *field_name = take(p, nullptr);
+                        char key[512];
+                        snprintf(key, sizeof(key), "%s.%s", compound_struct_tag, field_name);
+                        HashMapEntry *off_entry = hashmap_get(&p->global_struct_field_offsets_by_tag, key);
+                        HashMapEntry *sz_entry = hashmap_get(&p->global_struct_field_sizes_by_tag, key);
+                        if (!off_entry || !sz_entry) {
+                            parser_error(p, "unknown field in compound literal");
+                        }
+                        offset = off_entry->val_int;
+                        field_size = sz_entry->val_int;
+                        take(p, "=");
+                    }
+                    Node *val;
+                    if (strcmp(peek(p), "{") == 0) {
+                        take(p, "{");
+                        if (strcmp(peek(p), "}") == 0) {
+                            val = create_node(p, "num", tok_line, tok_col);
+                            val->value = 0;
+                            val->type_size = field_size;
+                        } else {
+                            val = expr(p);
+                            while (strcmp(peek(p), ",") == 0) {
+                                take(p, ",");
+                                if (strcmp(peek(p), "}") == 0) break;
+                                expr(p);
+                            }
+                        }
+                        take(p, "}");
+                    } else {
+                        val = expr(p);
+                    }
+                    Node *item = create_node(p, "init_item", tok_line, tok_col);
+                    item->value = offset;
+                    char size_buf[64];
+                    snprintf(size_buf, sizeof(size_buf), "%d", field_size);
+                    item->name = arena_strdup(p->arena, size_buf);
+                    item->lhs = val;
+                    node_array_push(&compound->body, item);
+                    positional_offset += field_size;
+                    if (strcmp(peek(p), ",") == 0) {
+                        take(p, ",");
+                        if (strcmp(peek(p), "}") == 0) break;
+                    } else {
+                        break;
+                    }
+                }
+                take(p, "}");
+                return compound;
+            }
             take(p, "{");
             if (strcmp(peek(p), "}") != 0) {
                 if (peek(p)[0] == '"') {
@@ -2129,6 +2216,42 @@ static void init_element_array_free(InitElementArray *arr) {
 
 static void parse_aggregate_init(ParserState *p, long base_offset, const char *struct_tag, const LongArray *array_dims, size_t dim_idx, int base_type_size, InitElementArray *inits);
 
+static void parse_array_element_init(ParserState *p, long elem_offset, const char *struct_tag, const LongArray *array_dims, size_t dim_idx, int base_type_size, long elem_total_size, InitElementArray *inits) {
+    if (dim_idx + 1 < (size_t)array_dims->count) {
+        if (strcmp(peek(p), "{") != 0) {
+            long flat_count = 1;
+            for (size_t k = dim_idx + 1; k < (size_t)array_dims->count; ++k) {
+                flat_count *= array_dims->data[k];
+            }
+            for (long flat_idx = 0; flat_idx < flat_count; ++flat_idx) {
+                Node *val = expr(p);
+                InitElement item;
+                item.offset = elem_offset + flat_idx * base_type_size;
+                item.val = val;
+                item.size = base_type_size;
+                init_element_array_push(inits, &item);
+                if (flat_idx + 1 < flat_count && strcmp(peek(p), ",") == 0) {
+                    take(p, ",");
+                }
+            }
+        } else {
+            parse_aggregate_init(p, elem_offset, struct_tag, array_dims, dim_idx + 1, base_type_size, inits);
+        }
+    } else {
+        if (struct_tag && struct_tag[0]) {
+            parse_aggregate_init(p, elem_offset, struct_tag, nullptr, 0, base_type_size, inits);
+        } else {
+            Node *val = expr(p);
+            InitElement item;
+            item.offset = elem_offset;
+            item.val = val;
+            item.size = base_type_size;
+            init_element_array_push(inits, &item);
+        }
+    }
+    (void)elem_total_size;
+}
+
 static void parse_aggregate_init_internal(ParserState *p, long base_offset, const char *struct_tag, const LongArray *array_dims, size_t dim_idx, int base_type_size, InitElementArray *inits, int has_braces) {
     (void)has_braces;
     if (array_dims && dim_idx < (size_t)array_dims->count) {
@@ -2184,43 +2307,43 @@ static void parse_aggregate_init_internal(ParserState *p, long base_offset, cons
                 take(p, "[");
                 Node *designator_expr = expr(p);
                 long designated_idx = eval_const(p, designator_expr);
+                long range_end = designated_idx;
+                int has_range = 0;
+                if (strcmp(peek(p), "...") == 0) {
+                    take(p, "...");
+                    Node *end_expr = expr(p);
+                    range_end = eval_const(p, end_expr);
+                    has_range = 1;
+                }
                 take(p, "]");
                 take(p, "=");
                 idx = designated_idx;
-            }
-            long elem_offset = idx * elem_total_size;
-            if (dim_idx + 1 < (size_t)array_dims->count) {
-                if (strcmp(peek(p), "{") != 0) {
-                    long flat_count = 1;
-                    for (size_t k = dim_idx + 1; k < (size_t)array_dims->count; ++k) {
-                        flat_count *= array_dims->data[k];
-                    }
-                    for (long flat_idx = 0; flat_idx < flat_count; ++flat_idx) {
-                        Node *val = expr(p);
-                        InitElement item;
-                        item.offset = base_offset + elem_offset + flat_idx * base_type_size;
-                        item.val = val;
-                        item.size = base_type_size;
-                        init_element_array_push(inits, &item);
-                        if (flat_idx + 1 < flat_count && strcmp(peek(p), ",") == 0) {
-                            take(p, ",");
+                if (has_range) {
+                    InitElementArray elem_inits;
+                    init_element_array_init(&elem_inits);
+                    parse_array_element_init(p, 0, struct_tag, array_dims, dim_idx, base_type_size, elem_total_size, &elem_inits);
+                    for (long r = designated_idx; r <= range_end; ++r) {
+                        long range_elem_offset = r * elem_total_size;
+                        for (int e_i = 0; e_i < elem_inits.count; ++e_i) {
+                            InitElement item;
+                            item.offset = base_offset + range_elem_offset + elem_inits.data[e_i].offset;
+                            item.val = elem_inits.data[e_i].val;
+                            item.size = elem_inits.data[e_i].size;
+                            init_element_array_push(inits, &item);
                         }
                     }
-                } else {
-                    parse_aggregate_init(p, base_offset + elem_offset, struct_tag, array_dims, dim_idx + 1, base_type_size, inits);
-                }
-            } else {
-                if (struct_tag && struct_tag[0]) {
-                    parse_aggregate_init(p, base_offset + elem_offset, struct_tag, nullptr, 0, base_type_size, inits);
-                } else {
-                    Node *val = expr(p);
-                    InitElement item;
-                    item.offset = base_offset + elem_offset;
-                    item.val = val;
-                    item.size = base_type_size;
-                    init_element_array_push(inits, &item);
+                    init_element_array_free(&elem_inits);
+                    idx = range_end;
+                    if (strcmp(peek(p), ",") == 0) {
+                        take(p, ",");
+                    } else {
+                        break;
+                    }
+                    continue;
                 }
             }
+            long elem_offset = idx * elem_total_size;
+            parse_array_element_init(p, base_offset + elem_offset, struct_tag, array_dims, dim_idx, base_type_size, elem_total_size, inits);
 
             if (strcmp(peek(p), ",") == 0) {
                 take(p, ",");
@@ -2246,10 +2369,11 @@ static void parse_aggregate_init_internal(ParserState *p, long base_offset, cons
                 curr = curr->next;
             }
         }
-        // Bubble sort entries by offset (val_int)
+        // Bubble sort entries by offset (val_int) and then alphabetically by key
         for (int j = 0; j < f_count; ++j) {
             for (int k = j + 1; k < f_count; ++k) {
-                if (entries[j]->val_int > entries[k]->val_int) {
+                if (entries[j]->val_int > entries[k]->val_int ||
+                    (entries[j]->val_int == entries[k]->val_int && strcmp(entries[j]->key, entries[k]->key) > 0)) {
                     HashMapEntry *tmp = entries[j];
                     entries[j] = entries[k];
                     entries[k] = tmp;
@@ -2302,7 +2426,25 @@ static void parse_aggregate_init_internal(ParserState *p, long base_offset, cons
             if ((sub_dims && sub_dims->count > 0) || (sub_tag && sub_tag[0] && !field_is_pointer)) {
                 parse_aggregate_init(p, base_offset + field_offset, sub_tag, sub_dims, 0, field_size, inits);
             } else {
-                Node *val = expr(p);
+                Node *val;
+                if (strcmp(peek(p), "{") == 0) {
+                    take(p, "{");
+                    if (strcmp(peek(p), "}") == 0) {
+                        val = create_node(p, "num", 1, 1);
+                        val->value = 0;
+                        val->type_size = field_size;
+                    } else {
+                        val = expr(p);
+                        while (strcmp(peek(p), ",") == 0) {
+                            take(p, ",");
+                            if (strcmp(peek(p), "}") == 0) break;
+                            expr(p);
+                        }
+                    }
+                    take(p, "}");
+                } else {
+                    val = expr(p);
+                }
                 InitElement item;
                 item.offset = base_offset + field_offset;
                 item.val = val;
@@ -2586,7 +2728,7 @@ static Node *stmt(ParserState *p) {
                 take(p, "=");
                 val = (int)eval_const(p, expr(p));
             }
-            hashmap_put(&p->global_enums, name, (void *)(long)val, 0);
+            hashmap_put(&p->global_enums, name, nullptr, val);
             val++;
             if (strcmp(peek(p), ",") == 0) {
                 take(p, ",");
@@ -2915,6 +3057,8 @@ static Node *stmt(ParserState *p) {
         
         const char *name = "";
         int is_func_ptr = 0;
+        LongArray func_ptr_dims;
+        long_array_init(&func_ptr_dims);
         IntArray func_ptr_param_floats;
         int_array_init(&func_ptr_param_floats);
         int has_func_ptr_signature = 0;
@@ -2926,6 +3070,16 @@ static Node *stmt(ParserState *p) {
             }
             skip_type_qualifiers(p);
             name = take(p, nullptr);
+            while (strcmp(peek(p), "[") == 0) {
+                take(p, "[");
+                long dim_size = 0;
+                if (strcmp(peek(p), "]") != 0) {
+                    Node *dim_expr = expr(p);
+                    dim_size = const_expr_has_runtime_var(p, dim_expr) ? 64 : eval_const(p, dim_expr);
+                }
+                take(p, "]");
+                long_array_push(&func_ptr_dims, dim_size);
+            }
             take(p, ")");
             parse_function_pointer_param_floats(p, &func_ptr_param_floats);
             has_func_ptr_signature = 1;
@@ -2934,6 +3088,20 @@ static Node *stmt(ParserState *p) {
             name = take(p, nullptr);
         }
         skip_attribute_and_asm(p);
+
+        if (!is_func_ptr && strcmp(peek(p), "(") == 0) {
+            int depth = 0;
+            do {
+                if (strcmp(peek(p), "(") == 0) depth++;
+                else if (strcmp(peek(p), ")") == 0) depth--;
+                take(p, nullptr);
+            } while (depth > 0 && strcmp(peek(p), "EOF") != 0);
+            skip_attribute_and_asm(p);
+            take(p, ";");
+            long_array_free(&func_ptr_dims);
+            int_array_free(&func_ptr_param_floats);
+            return create_node(p, "block", tok_line, tok_col);
+        }
         
         int is_pointer = (stars > 0 || is_func_ptr);
         int elem_scale = 1;
@@ -2943,11 +3111,14 @@ static Node *stmt(ParserState *p) {
             elem_scale = p->target_scale;
         }
         
-        int is_aggregate = (strcmp(peek(p), "[") == 0 || (struct_tag[0] && stars == 0));
+        int is_aggregate = (func_ptr_dims.count > 0 || strcmp(peek(p), "[") == 0 || (struct_tag[0] && stars == 0));
         
         if (is_aggregate) {
             LongArray dims;
             long_array_init(&dims);
+            for (int fd_i = 0; fd_i < func_ptr_dims.count; ++fd_i) {
+                long_array_push(&dims, func_ptr_dims.data[fd_i]);
+            }
             if (strcmp(peek(p), "[") == 0) {
                 while (strcmp(peek(p), "[") == 0) {
                     take(p, "[");
@@ -3059,6 +3230,23 @@ static Node *stmt(ParserState *p) {
                         init_element_array_push(&parsed_inits, &item);
                     }
                 }
+
+                if (orig_dims.count > 0 && orig_dims.data[0] > 0 && dims.count > 0 && dims.data[0] == 0) {
+                    long inferred_total = 1;
+                    for (int d_i = 0; d_i < orig_dims.count; ++d_i) {
+                        if (orig_dims.data[d_i] > 0) {
+                            inferred_total *= orig_dims.data[d_i];
+                        }
+                    }
+                    if (struct_tag[0]) {
+                        long struct_slots = (orig_base_size + p->target_scale - 1) / p->target_scale;
+                        total_size = inferred_total * struct_slots;
+                        dims.data[0] = total_size;
+                    } else {
+                        total_size = inferred_total;
+                        dims.data[0] = orig_dims.data[0];
+                    }
+                }
                 
                 LongArray inits;
                 long_array_init(&inits);
@@ -3072,7 +3260,11 @@ static Node *stmt(ParserState *p) {
                     long total_byte_size = total_size * base_size;
                     char *byte_buf = calloc(total_byte_size + 1, 1);
                     for (int item_i = 0; item_i < parsed_inits.count; ++item_i) {
-                        long val = eval_const(p, parsed_inits.data[item_i].val);
+                        Node *init_val = parsed_inits.data[item_i].val;
+                        if (strcmp(init_val->op, "cast") == 0 && init_val->lhs && strcmp(init_val->lhs->op, "str") == 0) {
+                            init_val = init_val->lhs;
+                        }
+                        long val = strcmp(init_val->op, "str") == 0 ? 0 : eval_const(p, init_val);
                         for (int b = 0; b < parsed_inits.data[item_i].size; ++b) {
                             if (parsed_inits.data[item_i].offset + b < total_byte_size) {
                                 byte_buf[parsed_inits.data[item_i].offset + b] = (val >> (b * 8)) & 0xff;
@@ -3100,6 +3292,8 @@ static Node *stmt(ParserState *p) {
                 
                 take(p, ";");
                 long_array_free(&orig_dims);
+                long_array_free(&func_ptr_dims);
+                int_array_free(&func_ptr_param_floats);
                 return create_node(p, "block", tok_line, tok_col);
             } else {
                 char unique_name[256];
@@ -3123,12 +3317,12 @@ static Node *stmt(ParserState *p) {
                 const char *local_key_dup = arena_strdup(p->arena, local_key);
                 
                 ir_set_local_array_dims(local_key_dup, dims);
-                if (stars > 0) {
+                if (stars > 0 || is_func_ptr) {
                     base_size = p->target_scale;
                     orig_base_size = p->target_scale;
                 }
                 ir_set_local_array_base_size(local_key_dup, base_size);
-                ir_set_local_var_is_pointer(local_key_dup, stars > 0);
+                ir_set_local_var_is_pointer(local_key_dup, stars > 0 || is_func_ptr);
                 ir_set_local_var_elem_scale(local_key_dup, elem_scale);
                 
                 hashmap_put(&p->value_sizes, unique_name_dup, nullptr, total_size * base_size);
@@ -3140,6 +3334,20 @@ static Node *stmt(ParserState *p) {
                         InitElementArray local_inits;
                         init_element_array_init(&local_inits);
                         parse_aggregate_init(p, 0, struct_tag, &orig_dims, 0, orig_base_size, &local_inits);
+                        if (dims.count > 0 && dims.data[0] == 0 && orig_dims.count > 0 && orig_dims.data[0] > 0) {
+                            long inferred_total = 1;
+                            for (int d_i = 0; d_i < orig_dims.count; ++d_i) {
+                                if (orig_dims.data[d_i] > 0) {
+                                    inferred_total *= orig_dims.data[d_i];
+                                }
+                            }
+                            total_size = inferred_total;
+                            dims.data[0] = orig_dims.data[0];
+                            node->value = total_size;
+                            ir_set_local_array_dims(local_key_dup, dims);
+                            ir_set_local_array_base_size(local_key_dup, base_size);
+                            hashmap_put(&p->value_sizes, unique_name_dup, nullptr, total_size * base_size);
+                        }
                         for (int item_i = 0; item_i < local_inits.count; ++item_i) {
                             Node *item_node = create_node(p, "init_item", tok_line, tok_col);
                             item_node->value = local_inits.data[item_i].offset;
@@ -3354,15 +3562,20 @@ static Node *stmt(ParserState *p) {
                         }
                         node_array_push(&block->body, next_node);
                     }
-                    take(p, ";");
-                    long_array_free(&orig_dims);
-                    return block;
+                take(p, ";");
+                long_array_free(&orig_dims);
+                long_array_free(&func_ptr_dims);
+                int_array_free(&func_ptr_param_floats);
+                return block;
                 }
                 take(p, ";");
                 long_array_free(&orig_dims);
+                long_array_free(&func_ptr_dims);
+                int_array_free(&func_ptr_param_floats);
                 return node;
             }
         }
+        long_array_free(&func_ptr_dims);
         
         // Scalar variables
         if (is_static) {
@@ -3505,6 +3718,45 @@ static Node *stmt(ParserState *p) {
                         diagnostics_error(tok_line, tok_col, "redefinition of local variable");
                     }
                     hashmap_put(&p->scopes[p->scope_count - 1], next_name, (void *)next_unique_name_dup, 0);
+
+                    if (strcmp(peek(p), "[") == 0) {
+                        LongArray next_dims;
+                        long_array_init(&next_dims);
+                        long next_total_size = 1;
+                        while (strcmp(peek(p), "[") == 0) {
+                            take(p, "[");
+                            long dim_size = 0;
+                            if (strcmp(peek(p), "]") != 0) {
+                                Node *dim_expr = expr(p);
+                                dim_size = const_expr_has_runtime_var(p, dim_expr) ? 64 : eval_const(p, dim_expr);
+                            }
+                            take(p, "]");
+                            long_array_push(&next_dims, dim_size);
+                            next_total_size *= dim_size;
+                        }
+
+                        int next_array_base_size = next_stars > 0 ? p->target_scale : base_size;
+                        Node *next_array = create_node(p, "array_decl", tok_line, tok_col);
+                        next_array->name = next_unique_name_dup;
+                        next_array->value = next_total_size;
+
+                        char next_array_key[512];
+                        snprintf(next_array_key, sizeof(next_array_key), "%s$%s", p->current_func_name, next_unique_name_dup);
+                        const char *next_array_key_dup = arena_strdup(p->arena, next_array_key);
+
+                        ir_set_local_array_dims(next_array_key_dup, next_dims);
+                        ir_set_local_array_base_size(next_array_key_dup, next_array_base_size);
+                        ir_set_local_var_is_pointer(next_array_key_dup, next_stars > 0);
+                        ir_set_local_var_elem_scale(next_array_key_dup, next_stars > 0 ? p->target_scale : 1);
+
+                        hashmap_put(&p->value_sizes, next_unique_name_dup, nullptr, next_total_size * next_array_base_size);
+                        hashmap_put(&p->bool_vars, next_unique_name_dup, nullptr, is_bool && next_stars == 0);
+                        hashmap_put(&p->float_vars, next_unique_name_dup, nullptr, base_float && next_stars == 0);
+
+                        node_array_push(&block->body, next_array);
+                        int_array_free(&next_func_ptr_param_floats);
+                        continue;
+                    }
                     
                     Node *next_node = create_node(p, "decl", tok_line, tok_col);
                     next_node->name = next_unique_name_dup;
@@ -4184,6 +4436,7 @@ static void global_decl(ParserState *p, int is_static, int is_extern) {
             }
             type_size = (int)(type_size * total_arr_count);
         }
+        skip_attribute_and_asm(p);
 
         hashmap_put(&p->unsigned_vars, name, nullptr, is_unsigned_var);
         hashmap_put(&p->bool_vars, name, nullptr, is_bool);
@@ -4307,6 +4560,12 @@ static void global_decl(ParserState *p, int is_static, int is_extern) {
                             if (strcmp(init_val->op, "cast") == 0 && init_val->lhs && strcmp(init_val->lhs->op, "str") == 0) {
                                 init_val = init_val->lhs;
                             }
+                            Node *symbol_val = init_val;
+                            if (strcmp(symbol_val->op, "cast") == 0 && symbol_val->lhs &&
+                                (strcmp(symbol_val->lhs->op, "var") == 0 ||
+                                 (strcmp(symbol_val->lhs->op, "unary_&") == 0 && symbol_val->lhs->lhs && strcmp(symbol_val->lhs->lhs->op, "var") == 0))) {
+                                symbol_val = symbol_val->lhs;
+                            }
                             if (strcmp(init_val->op, "str") == 0) {
                                 char label[256];
                                 snprintf(label, sizeof(label), ".Lstr_glob_%s_%d", name, strings.count);
@@ -4318,6 +4577,18 @@ static void global_decl(ParserState *p, int is_static, int is_extern) {
                                 if (inits.data[k].offset < type_size) {
                                     byte_is_str[inits.data[k].offset] = 1;
                                     byte_str_idx[inits.data[k].offset] = str_idx;
+                                }
+                            } else if (strcmp(symbol_val->op, "var") == 0 ||
+                                       (strcmp(symbol_val->op, "unary_&") == 0 && symbol_val->lhs && strcmp(symbol_val->lhs->op, "var") == 0)) {
+                                const char *sym_name = strcmp(symbol_val->op, "var") == 0 ? symbol_val->name : symbol_val->lhs->name;
+                                StringPair sp;
+                                sp.first = arena_strdup(p->arena, sym_name);
+                                sp.second = nullptr;
+                                string_pair_array_push(&strings, &sp);
+                                int sym_idx = strings.count - 1;
+                                if (inits.data[k].offset < type_size) {
+                                    byte_is_str[inits.data[k].offset] = 1;
+                                    byte_str_idx[inits.data[k].offset] = sym_idx;
                                 }
                             } else {
                                 long val = eval_const(p, inits.data[k].val);
@@ -4351,12 +4622,27 @@ static void global_decl(ParserState *p, int is_static, int is_extern) {
                                     if (strcmp(init_val->op, "cast") == 0 && init_val->lhs && strcmp(init_val->lhs->op, "str") == 0) {
                                         init_val = init_val->lhs;
                                     }
+                                    Node *symbol_val = init_val;
+                                    if (strcmp(symbol_val->op, "cast") == 0 && symbol_val->lhs &&
+                                        (strcmp(symbol_val->lhs->op, "var") == 0 ||
+                                         (strcmp(symbol_val->lhs->op, "unary_&") == 0 && symbol_val->lhs->lhs && strcmp(symbol_val->lhs->lhs->op, "var") == 0))) {
+                                        symbol_val = symbol_val->lhs;
+                                    }
                                     if (strcmp(init_val->op, "str") == 0) {
                                         char label[256];
                                         snprintf(label, sizeof(label), ".Lstr_glob_%s_%d", name, strings.count);
                                         StringPair sp;
                                         sp.first = arena_strdup(p->arena, label);
                                         sp.second = arena_strdup(p->arena, init_val->name);
+                                        string_pair_array_push(&strings, &sp);
+                                        str_idx = strings.count - 1;
+                                        element_is_str = 1;
+                                    } else if (strcmp(symbol_val->op, "var") == 0 ||
+                                               (strcmp(symbol_val->op, "unary_&") == 0 && symbol_val->lhs && strcmp(symbol_val->lhs->op, "var") == 0)) {
+                                        const char *sym_name = strcmp(symbol_val->op, "var") == 0 ? symbol_val->name : symbol_val->lhs->name;
+                                        StringPair sp;
+                                        sp.first = arena_strdup(p->arena, sym_name);
+                                        sp.second = nullptr;
                                         string_pair_array_push(&strings, &sp);
                                         str_idx = strings.count - 1;
                                         element_is_str = 1;
@@ -4503,6 +4789,7 @@ static void parser_state_cleanup(ParserState *state) {
     hashmap_free(&state->global_typedefs);
     hashmap_free(&state->global_typedef_sizes);
     hashmap_free(&state->global_typedef_struct_tags);
+    hashmap_free(&state->global_typedef_dims);
     hashmap_free(&state->global_enums);
     hashmap_free(&state->constexpr_vars);
     
@@ -4572,6 +4859,7 @@ NodeArray parser_parse(const TokenArray *tokens, int target_scale, Arena *arena)
     hashmap_init(&state.global_typedefs, 64);
     hashmap_init(&state.global_typedef_sizes, 64);
     hashmap_init(&state.global_typedef_struct_tags, 64);
+    hashmap_init(&state.global_typedef_dims, 64);
     hashmap_put(&state.global_typedefs, "__builtin_va_list", nullptr, 1);
     hashmap_put(&state.global_typedef_sizes, "__builtin_va_list", nullptr, state.target_scale);
     hashmap_init(&state.global_enums, 64);
@@ -4655,53 +4943,55 @@ NodeArray parser_parse(const TokenArray *tokens, int target_scale, Arena *arena)
             take(&state, "typedef");
             int typedef_base_size = parse_base_type(&state);
             const char *typedef_struct_tag = state.last_parsed_struct_tag;
-            int typedef_stars = 0;
-            while (strcmp(peek(&state), "*") == 0) {
-                take(&state, "*");
-                typedef_stars++;
-            }
-            skip_attribute(&state);
-            const char *alias = "";
-            int alias_size = (typedef_stars > 0) ? state.target_scale : typedef_base_size;
-            const char *alias_struct_tag = (typedef_stars == 0) ? typedef_struct_tag : "";
-            if (strcmp(peek(&state), "(") == 0 &&
-                state.pos + 1 < state.tokens.count &&
-                strcmp(state.tokens.data[state.pos + 1].text, "*") == 0) {
-                take(&state, "(");
-                take(&state, "*");
-                skip_type_qualifiers(&state);
-                alias = take(&state, nullptr);
-                take(&state, ")");
-                if (strcmp(peek(&state), "(") == 0) {
-                    int depth = 0;
-                    int keep_scanning = 1;
-                    while (keep_scanning && state.pos < state.tokens.count) {
-                        if (strcmp(peek(&state), "(") == 0) depth++;
-                        else if (strcmp(peek(&state), ")") == 0) depth--;
-                        take(&state, nullptr);
-                        if (depth <= 0) {
-                            keep_scanning = 0;
-                        }
-                    }
+            while (1) {
+                int typedef_stars = 0;
+                while (strcmp(peek(&state), "*") == 0) {
+                    take(&state, "*");
+                    typedef_stars++;
                 }
-                alias_size = state.target_scale;
-                alias_struct_tag = "";
-            } else {
-                alias = take(&state, nullptr);
-                if (strcmp(peek(&state), "(") == 0) {
-                    int depth = 0;
-                    int keep_scanning = 1;
-                    while (keep_scanning && state.pos < state.tokens.count) {
-                        if (strcmp(peek(&state), "(") == 0) depth++;
-                        else if (strcmp(peek(&state), ")") == 0) depth--;
-                        take(&state, nullptr);
-                        if (depth <= 0) {
-                            keep_scanning = 0;
+                skip_attribute(&state);
+                const char *alias = "";
+                int alias_size = (typedef_stars > 0) ? state.target_scale : typedef_base_size;
+                const char *alias_struct_tag = (typedef_stars == 0) ? typedef_struct_tag : "";
+                if (strcmp(peek(&state), "(") == 0 &&
+                    state.pos + 1 < state.tokens.count &&
+                    strcmp(state.tokens.data[state.pos + 1].text, "*") == 0) {
+                    take(&state, "(");
+                    take(&state, "*");
+                    skip_type_qualifiers(&state);
+                    alias = take(&state, nullptr);
+                    take(&state, ")");
+                    if (strcmp(peek(&state), "(") == 0) {
+                        int depth = 0;
+                        int keep_scanning = 1;
+                        while (keep_scanning && state.pos < state.tokens.count) {
+                            if (strcmp(peek(&state), "(") == 0) depth++;
+                            else if (strcmp(peek(&state), ")") == 0) depth--;
+                            take(&state, nullptr);
+                            if (depth <= 0) {
+                                keep_scanning = 0;
+                            }
                         }
                     }
                     alias_size = state.target_scale;
                     alias_struct_tag = "";
                 } else {
+                    alias = take(&state, nullptr);
+                    if (strcmp(peek(&state), "(") == 0) {
+                        int depth = 0;
+                        int keep_scanning = 1;
+                        while (keep_scanning && state.pos < state.tokens.count) {
+                            if (strcmp(peek(&state), "(") == 0) depth++;
+                            else if (strcmp(peek(&state), ")") == 0) depth--;
+                            take(&state, nullptr);
+                            if (depth <= 0) {
+                                keep_scanning = 0;
+                            }
+                        }
+                        alias_size = state.target_scale;
+                        alias_struct_tag = "";
+                    }
+                    LongArray *alias_dims = nullptr;
                     while (strcmp(peek(&state), "[") == 0) {
                         take(&state, "[");
                         if (strcmp(peek(&state), "]") != 0) {
@@ -4709,25 +4999,38 @@ NodeArray parser_parse(const TokenArray *tokens, int target_scale, Arena *arena)
                             long dim = eval_const(&state, dim_expr);
                             if (dim > 0) {
                                 alias_size = (int)(alias_size * dim);
+                                if (!alias_dims) {
+                                    alias_dims = arena_alloc(state.arena, sizeof(LongArray));
+                                    long_array_init(alias_dims);
+                                }
+                                long_array_push(alias_dims, dim);
                             }
                         }
                         take(&state, "]");
                     }
+                    if (alias_dims) {
+                        hashmap_put(&state.global_typedef_dims, alias, alias_dims, 0);
+                    }
                 }
+                if ((!alias_struct_tag || !alias_struct_tag[0]) && typedef_stars == 0 && hashmap_has(&state.global_structs, alias)) {
+                    alias_struct_tag = alias;
+                    HashMapEntry *struct_size = hashmap_get(&state.global_struct_sizes, alias);
+                    if (struct_size) {
+                        alias_size = struct_size->val_int;
+                    }
+                }
+                hashmap_put(&state.global_typedefs, alias, nullptr, 1);
+                hashmap_put(&state.global_typedef_sizes, alias, nullptr, alias_size);
+                if (alias_struct_tag && alias_struct_tag[0]) {
+                    hashmap_put(&state.global_typedef_struct_tags, alias, (void *)alias_struct_tag, 0);
+                }
+                if (strcmp(peek(&state), ",") == 0) {
+                    take(&state, ",");
+                    continue;
+                }
+                break;
             }
             take(&state, ";");
-            if ((!alias_struct_tag || !alias_struct_tag[0]) && typedef_stars == 0 && hashmap_has(&state.global_structs, alias)) {
-                alias_struct_tag = alias;
-                HashMapEntry *struct_size = hashmap_get(&state.global_struct_sizes, alias);
-                if (struct_size) {
-                    alias_size = struct_size->val_int;
-                }
-            }
-            hashmap_put(&state.global_typedefs, alias, nullptr, 1);
-            hashmap_put(&state.global_typedef_sizes, alias, nullptr, alias_size);
-            if (alias_struct_tag && alias_struct_tag[0]) {
-                hashmap_put(&state.global_typedef_struct_tags, alias, (void *)alias_struct_tag, 0);
-            }
         } else if (is_function_decl(&state)) {
             Node *fn = function(&state, is_static);
             if (fn) {

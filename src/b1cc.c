@@ -138,10 +138,6 @@ int main(int argc, char **argv) {
     string_array_init(&preprocessor_driver_include_dirs);
     hashmap_init(&preprocessor_driver_macros, 64);
     define_object_macro(&arena, "__b1cc__", "1");
-    string_array_push(&preprocessor_driver_include_dirs, ".");
-    string_array_push(&preprocessor_driver_include_dirs, "../b1nix/userspace/include");
-    string_array_push(&preprocessor_driver_include_dirs, "/usr/include");
-    string_array_push(&preprocessor_driver_include_dirs, "/usr/local/include");
 
     for (int i = 1; i < argc; ++i) {
         const char *arg = argv[i];
@@ -200,6 +196,11 @@ int main(int argc, char **argv) {
             string_array_push(&inputs, arg);
         }
     }
+
+    string_array_push(&preprocessor_driver_include_dirs, ".");
+    string_array_push(&preprocessor_driver_include_dirs, "../b1nix/userspace/include");
+    string_array_push(&preprocessor_driver_include_dirs, "/usr/include");
+    string_array_push(&preprocessor_driver_include_dirs, "/usr/local/include");
 
     if (inputs.count == 0)
         diagnostics_fatal("usage: b1cc [-S] [-c] [-E] [-fdump-ast] [-fdump-ir] input.c ... [-o output]");
