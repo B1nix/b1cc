@@ -934,7 +934,7 @@ static int arm64_encode_line(const char *line, ByteBuf *text, EncCtx *ctx,
         return 1;
     }
 
-    if (strcmp(mnem, "sdiv") == 0) {
+    if (strcmp(mnem, "sdiv") == 0 || strcmp(mnem, "udiv") == 0) {
         Reg rd = parse_reg(&p);
         if (*p == ',') p++;
         Reg rn = parse_reg(&p);
@@ -942,7 +942,8 @@ static int arm64_encode_line(const char *line, ByteBuf *text, EncCtx *ctx,
         Reg rm = parse_reg(&p);
         
         int sf = (rd.type == REG_X) ? 1 : 0;
-        uint32_t val = (sf << 31) | 0x1ac00c00 | (rm.num << 16) | (rn.num << 5) | rd.num;
+        uint32_t val = (sf << 31) | (strcmp(mnem, "udiv") == 0 ? 0x1ac00800 : 0x1ac00c00) |
+                       (rm.num << 16) | (rn.num << 5) | rd.num;
         bb_write32le(text, val);
         return 1;
     }

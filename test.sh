@@ -1637,3 +1637,155 @@ rc=$?
 set -e
 test "$rc" = 42
 echo "ok m27_unsigned_short_for_update_wrap"
+
+./build/b1cc tests/m28_comma_lvalue.c -o "$tmp/m28_comma_lvalue"
+set +e
+"$tmp/m28_comma_lvalue"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m28_comma_lvalue"
+
+./build/b1cc tests/m28_local_pointer_array.c -o "$tmp/m28_local_pointer_array"
+set +e
+"$tmp/m28_local_pointer_array"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m28_local_pointer_array"
+
+./build/b1cc tests/m28_comma_aggregate_value.c -o "$tmp/m28_comma_aggregate_value"
+set +e
+"$tmp/m28_comma_aggregate_value"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m28_comma_aggregate_value"
+
+./build/b1cc tests/m28_comma_aggregate_assignment_arg.c -o "$tmp/m28_comma_aggregate_assignment_arg"
+set +e
+"$tmp/m28_comma_aggregate_assignment_arg"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m28_comma_aggregate_assignment_arg"
+
+./build/b1cc tests/m28_narrow_local_pointer_store_load.c -o "$tmp/m28_narrow_local_pointer_store_load"
+set +e
+"$tmp/m28_narrow_local_pointer_store_load"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m28_narrow_local_pointer_store_load"
+
+./build/b1cc tests/m28_global_pointer_array.c -o "$tmp/m28_global_pointer_array"
+set +e
+"$tmp/m28_global_pointer_array"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m28_global_pointer_array"
+
+./build/b1cc tests/m28_unary_promoted_unsigned.c -o "$tmp/m28_unary_promoted_unsigned"
+set +e
+"$tmp/m28_unary_promoted_unsigned"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok m28_unary_promoted_unsigned"
+
+./build/b1cc tests/m28_comma_aggregate_call.c -o "$tmp/m28_comma_aggregate_call"
+set +e
+"$tmp/m28_comma_aggregate_call"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m28_comma_aggregate_call"
+
+./build/b1cc tests/m28_comma_discarded_aggregate_call_once.c -o "$tmp/m28_comma_discarded_aggregate_call_once"
+set +e
+"$tmp/m28_comma_discarded_aggregate_call_once"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m28_comma_discarded_aggregate_call_once"
+
+./build/b1cc tests/m28_unsigned_longlong_initializer.c -o "$tmp/m28_unsigned_longlong_initializer"
+set +e
+"$tmp/m28_unsigned_longlong_initializer"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m28_unsigned_longlong_initializer"
+
+./build/b1cc tests/m28_large_hex_ll_unsigned_compare.c -o "$tmp/m28_large_hex_ll_unsigned_compare"
+set +e
+"$tmp/m28_large_hex_ll_unsigned_compare"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m28_large_hex_ll_unsigned_compare"
+
+./build/b1cc tests/m28_bitfield_initializer_copy.c -o "$tmp/m28_bitfield_initializer_copy"
+set +e
+"$tmp/m28_bitfield_initializer_copy"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m28_bitfield_initializer_copy"
+
+./build/b1cc tests/m28_signed_bitfield_load.c -o "$tmp/m28_signed_bitfield_load"
+set +e
+"$tmp/m28_signed_bitfield_load"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m28_signed_bitfield_load"
+
+./build/b1cc tests/m28_union_bitfield_initializer.c -o "$tmp/m28_union_bitfield_initializer"
+set +e
+"$tmp/m28_union_bitfield_initializer"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m28_union_bitfield_initializer"
+
+./build/b1cc tests/m28_unsigned_equality_conversion.c -o "$tmp/m28_unsigned_equality_conversion"
+set +e
+"$tmp/m28_unsigned_equality_conversion"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m28_unsigned_equality_conversion"
+
+./build/b1cc tests/m28_unsigned_mod64.c -o "$tmp/m28_unsigned_mod64"
+set +e
+"$tmp/m28_unsigned_mod64"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m28_unsigned_mod64"
+
+./build/b1cc tests/m28_bitwise_wide_conversion.c -o "$tmp/m28_bitwise_wide_conversion"
+set +e
+"$tmp/m28_bitwise_wide_conversion"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m28_bitwise_wide_conversion"
+
+./build/b1cc tests/m28_unsigned_cast_mod_assignment_expr.c -o "$tmp/m28_unsigned_cast_mod_assignment_expr"
+set +e
+"$tmp/m28_unsigned_cast_mod_assignment_expr"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m28_unsigned_cast_mod_assignment_expr"
+
+./build/b1cc tests/m28_local_union_array_initializer.c -o "$tmp/m28_local_union_array_initializer"
+set +e
+"$tmp/m28_local_union_array_initializer"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m28_local_union_array_initializer"

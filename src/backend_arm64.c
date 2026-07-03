@@ -490,7 +490,8 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
             }
             sb_append(&out, "    str x0, [sp, #-16]!\n");
         } else if (strcmp(inst->op, "+") == 0 || strcmp(inst->op, "-") == 0 || strcmp(inst->op, "*") == 0 ||
-                   strcmp(inst->op, "/") == 0 || strcmp(inst->op, "%") == 0 || strcmp(inst->op, "==") == 0 || strcmp(inst->op, "!=") == 0 ||
+                   strcmp(inst->op, "/") == 0 || strcmp(inst->op, "%") == 0 || strcmp(inst->op, "u/") == 0 || strcmp(inst->op, "u%") == 0 ||
+                   strcmp(inst->op, "==") == 0 || strcmp(inst->op, "!=") == 0 ||
                    strcmp(inst->op, "<") == 0 || strcmp(inst->op, ">") == 0 || strcmp(inst->op, "<=") == 0 ||
                    strcmp(inst->op, "u<") == 0 || strcmp(inst->op, "u>") == 0 || strcmp(inst->op, "u<=") == 0 ||
                    strcmp(inst->op, "u>=") == 0 || strcmp(inst->op, "u>>") == 0 ||
@@ -518,8 +519,14 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                 sb_append(&out, "    mul x0, x1, x0\n");
             else if (strcmp(inst->op, "/") == 0)
                 sb_append(&out, "    sdiv x0, x1, x0\n");
+            else if (strcmp(inst->op, "u/") == 0)
+                sb_append(&out, "    udiv x0, x1, x0\n");
             else if (strcmp(inst->op, "%") == 0) {
                 sb_append(&out, "    sdiv x2, x1, x0\n");
+                sb_append(&out, "    msub x0, x2, x0, x1\n");
+            }
+            else if (strcmp(inst->op, "u%") == 0) {
+                sb_append(&out, "    udiv x2, x1, x0\n");
                 sb_append(&out, "    msub x0, x2, x0, x1\n");
             }
             else if (strcmp(inst->op, "&") == 0)
@@ -1125,6 +1132,15 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
             sb_append(&out, "    ldr x0, [sp], #16\n");
             /* UBFX: unsigned bit-field extract: x0 = x0[bf_offset + bf_width - 1 : bf_offset] */
             sb_appendf(&out, "    ubfx x0, x0, #%d, #%d\n", bf_offset, bf_width);
+            sb_append(&out, "    str x0, [sp, #-16]!\n");
+        } else if (strcmp(inst->op, "sext_bits") == 0) {
+            int width = (int)inst->value;
+            int shift = 64 - width;
+            sb_append(&out, "    ldr x0, [sp], #16\n");
+            if (width > 0 && width < 64) {
+                sb_appendf(&out, "    lsl x0, x0, #%d\n", shift);
+                sb_appendf(&out, "    asr x0, x0, #%d\n", shift);
+            }
             sb_append(&out, "    str x0, [sp, #-16]!\n");
         } else if (strcmp(inst->op, "insert_bits") == 0) {
             /* Stack: [top] dest_addr, offset(0), value */

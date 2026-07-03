@@ -324,12 +324,9 @@
 
 Goal: use the current M27 csmith profile as the baseline, then remove restrictions one feature family at a time by adding real compiler support and regression coverage. Do not mark a restriction as lifted until the corresponding generated programs compile, run, and pass differential checks.
 
-Current M27 baseline profile:
+Current M28 csmith profile: all M27 `--no-*` feature-family restrictions listed below are lifted. Shape limits remain intentionally small while the compiler-side feature surface is hardened.
 
 ```sh
---no-longlong --no-float --no-consts --no-volatiles
---no-jumps --no-bitfields --no-packed-struct --no-builtins
---no-divs --no-comma-operators
 --max-funcs 2 --max-block-depth 2 --max-block-size 2
 --max-expr-complexity 4 --max-array-dim 1
 --max-array-len-per-dim 3
@@ -337,16 +334,34 @@ Current M27 baseline profile:
 --max-union-fields 1
 ```
 
-- [ ] Lift `--no-longlong`: complete `long long` parsing, integer conversion, constant folding, ABI lowering, backend arithmetic/comparison, and object/debug coverage on supported targets.
-- [ ] Lift `--no-float`: complete scalar float/double expression semantics beyond the existing ABI smoke coverage, including conversions, comparisons, arithmetic, returns, and calls.
-- [ ] Lift `--no-consts`: preserve const-qualified objects through parser/IR diagnostics while allowing generated const globals/locals that do not require runtime mutation.
-- [ ] Lift `--no-volatiles`: preserve volatile load/store side effects and ordering in IR/backends.
-- [ ] Lift `--no-jumps`: support csmith-generated `goto`, labels, `break`, and `continue` forms with correct control-flow lowering.
-- [ ] Lift `--no-bitfields`: complete bitfield layout, signedness, loads, stores, assignments, and aggregate initialization for generated structs/unions.
-- [ ] Lift `--no-packed-struct`: implement packed layout/alignment and unaligned load/store lowering where targets require it.
-- [ ] Lift `--no-builtins`: parse/lower the csmith builtin subset or map it to supported runtime/helper calls.
-- [ ] Lift `--no-divs`: complete signed/unsigned division and modulo semantics, including narrowing and target backend edge cases.
-- [ ] Lift `--no-comma-operators`: complete comma-expression value and side-effect ordering in every expression context.
+- [x] Lift `--no-longlong`: complete `long long` parsing, integer conversion, constant folding, ABI lowering, backend arithmetic/comparison, and object/debug coverage for the current csmith profile. Covered by M19/M27/M28 regressions plus `tests/m28_unsigned_longlong_initializer.c` and `tests/m28_large_hex_ll_unsigned_compare.c`.
+- [x] Lift `--no-float`: scalar float/double csmith generation is enabled for the current shape-limited profile. Existing M18/M19 ABI/scalar tests continue to pass; no compiler-side csmith failures remain in the final first-thousand run.
+- [x] Lift `--no-consts`: const-qualified generated objects compile and run under the current profile, including const union fields in local aggregate arrays. Covered by `tests/m28_local_union_array_initializer.c`.
+- [x] Lift `--no-volatiles`: volatile globals and pointer-side-effect paths compile and run under the current profile. Seed 800 also covers volatile pointer participation around the fixed local union array initializer path.
+- [x] Lift `--no-jumps`: csmith-generated jumps are enabled under the current shape limits; existing goto/label/break/continue lowering tests remain green.
+- [x] Lift `--no-bitfields`: generated bitfield layout, signed loads, aggregate initialization, and union bitfield initialization are enabled for the current profile. Covered by `tests/m28_bitfield_initializer_copy.c`, `tests/m28_signed_bitfield_load.c`, and `tests/m28_union_bitfield_initializer.c`.
+- [x] Lift `--no-packed-struct`: packed structs are enabled under the current shape limits; the 50-seed gate and final 1000-seed run have no compiler-side failures.
+- [x] Lift `--no-builtins`: csmith helper/builtin surface used by the current profile compiles and runs; no compiler-side failures remain in the final first-thousand run.
+- [x] Lift `--no-divs`: signed/unsigned division and modulo are enabled, including unsigned 64-bit modulo and unsigned casts feeding modulo. Covered by `tests/m28_unsigned_mod64.c` and `tests/m28_unsigned_cast_mod_assignment_expr.c`.
+- [x] Lift `--no-comma-operators`: comma-expression value, lvalue, aggregate value, aggregate call, and discarded aggregate-call side-effect paths are enabled. Covered by `tests/m28_comma_lvalue.c`, `tests/m28_comma_aggregate_value.c`, `tests/m28_comma_aggregate_assignment_arg.c`, `tests/m28_comma_aggregate_call.c`, and `tests/m28_comma_discarded_aggregate_call_once.c`.
 - [ ] Raise shape limits gradually: functions beyond 2, deeper blocks, larger block sizes, expression complexity above 4, multidimensional arrays, arrays longer than 3, pointer depth above 1, and wider struct/union field counts.
+
+M28 validation log:
+
+- Per user instruction, each feature-family flag lift was gated with 50 csmith seeds; after all family flags were removed, the final broad run was 1000 seeds from offset 0.
+- 50-seed gates:
+  - comma operators: **50 PASS / 0 FAIL / 0 NOC**.
+  - divisions/modulo: **50 PASS / 0 FAIL / 0 NOC**.
+  - consts: **50 PASS / 0 FAIL / 0 NOC**.
+  - jumps: **50 PASS / 0 FAIL / 0 NOC**.
+  - builtins: **50 PASS / 0 FAIL / 0 NOC**.
+  - long long: **48 PASS / 0 FAIL / 2 NOC**, reference timeouts at seeds 5 and 25.
+  - volatiles: **47 PASS / 0 FAIL / 3 NOC**, reference timeouts at seeds 5, 25, and 33.
+  - bitfields: **49 PASS / 0 FAIL / 1 NOC**, reference timeout at seed 25.
+  - packed structs: **49 PASS / 0 FAIL / 1 NOC**, reference timeout at seed 25.
+  - floats: **49 PASS / 0 FAIL / 1 NOC**, reference timeout at seed 25.
+- Final full-family run after the M28 fixes (`python3 csmith_batch.py 1000 0`, seeds 1..1000): **973 PASS / 0 FAIL / 27 NOC**.
+- Final NOC breakdown: all 27 are reference-only timeouts, at seeds 25, 113, 127, 206, 221, 232, 258, 267, 299, 313, 332, 350, 399, 411, 462, 515, 541, 551, 580, 586, 627, 707, 855, 874, 880, 917, and 944. There were **0 checksum FAIL**, **0 b1cc compile NOC**, **0 assembly NOC**, and **0 b1cc execution timeout NOC** in the final run.
+- Focused M28 fixes added regression coverage for comma lvalues/aggregate values, local/global pointer arrays, narrow local reload signedness, comma-wrapped aggregate calls, unsigned long long initializers, large hex LL unsigned comparisons, bitfield initializer packing/sign extension/union sizing, unsigned equality conversion, unsigned 64-bit modulo, bitwise usual conversions, unsigned integer casts feeding modulo, and local union array initializer stride.
 
 Skipped: full C/C++ upfront. Add features only when a test or B1NIX source needs them.

@@ -5,9 +5,6 @@ import subprocess, sys, os, tempfile, time
 CSMITH_INC = os.environ.get("CSMITH_PATH",
     "/opt/homebrew/Cellar/csmith/2.3.0/include/csmith-2.3.0")
 CSMITH_FLAGS = [
-    "--no-longlong", "--no-float", "--no-consts", "--no-volatiles",
-    "--no-jumps", "--no-bitfields", "--no-packed-struct", "--no-builtins",
-    "--no-divs", "--no-comma-operators",
     "--max-funcs", "2", "--max-block-depth", "2", "--max-block-size", "2",
     "--max-expr-complexity", "4", "--max-array-dim", "1",
     "--max-array-len-per-dim", "3",
