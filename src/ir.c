@@ -1136,13 +1136,14 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
             lower_expr(node->lhs, fn, backend, arena);
             ir_push(fn, "const", "", 1);
             ir_push(fn, (strcmp(node->op, "prefix_++") == 0) ? "+" : "-", "", 0);
-            ir_push(fn, "dup", "", 0);
-            ir_push(fn, "const", "", 0);
-            lower_addr(node->lhs, fn, backend, arena);
             int scale = get_lvalue_store_size(node->lhs, fn);
             if (scale == 0) {
                 scale = node->lhs->type_size > 0 ? node->lhs->type_size : target_scale;
             }
+            lower_cast_to_storage(fn, scale, lvalue_is_unsigned(node->lhs), target_scale);
+            ir_push(fn, "dup", "", 0);
+            ir_push(fn, "const", "", 0);
+            lower_addr(node->lhs, fn, backend, arena);
             ir_push(fn, "store_index", "", scale);
             return;
         }
@@ -1151,17 +1152,21 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
             int slot = loc_entry->val_int;
             int scale = get_expr_pointer_scale(node->lhs, fn);
             int step = scale > 0 ? scale : 1;
+            int size = ir_get_var_type_size(node->name);
             ir_push(fn, "load", "", slot);
             ir_push(fn, "const", "", step);
             ir_push(fn, (strcmp(node->op, "prefix_++") == 0) ? "+" : "-", "", 0);
+            lower_cast_to_storage(fn, size, ir_get_var_unsigned(node->name), target_scale);
             ir_push(fn, "store", "", slot);
             ir_push(fn, "load", "", slot);
         } else if (hashmap_has(&ir_global_vars, node->name)) {
             int scale = get_expr_pointer_scale(node->lhs, fn);
             int step = scale > 0 ? scale : 1;
+            int size = ir_get_var_type_size(node->name);
             ir_push(fn, "gload", node->name, 0);
             ir_push(fn, "const", "", step);
             ir_push(fn, (strcmp(node->op, "prefix_++") == 0) ? "+" : "-", "", 0);
+            lower_cast_to_storage(fn, size, ir_get_var_unsigned(node->name), target_scale);
             ir_push(fn, "gstore", node->name, 0);
             ir_push(fn, "gload", node->name, 0);
         } else {
@@ -1177,8 +1182,6 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
             ir_push(fn, "dup", "", 0);
             ir_push(fn, "const", "", 1);
             ir_push(fn, (strcmp(node->op, "postfix_++") == 0) ? "+" : "-", "", 0);
-            ir_push(fn, "const", "", 0);
-            lower_addr(node->lhs, fn, backend, arena);
             int scale = get_lvalue_store_size(node->lhs, fn);
             if (scale == 0) {
                 if (node->lhs->type_size > 0) {
@@ -1187,6 +1190,9 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
                     scale = target_scale;
                 }
             }
+            lower_cast_to_storage(fn, scale, lvalue_is_unsigned(node->lhs), target_scale);
+            ir_push(fn, "const", "", 0);
+            lower_addr(node->lhs, fn, backend, arena);
             ir_push(fn, "store_index", "", scale);
             return;
         }
@@ -1195,18 +1201,22 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
             int slot = loc_entry->val_int;
             int scale = get_expr_pointer_scale(node->lhs, fn);
             int step = scale > 0 ? scale : 1;
+            int size = ir_get_var_type_size(node->name);
             ir_push(fn, "load", "", slot);
             ir_push(fn, "load", "", slot);
             ir_push(fn, "const", "", step);
             ir_push(fn, (strcmp(node->op, "postfix_++") == 0) ? "+" : "-", "", 0);
+            lower_cast_to_storage(fn, size, ir_get_var_unsigned(node->name), target_scale);
             ir_push(fn, "store", "", slot);
         } else if (hashmap_has(&ir_global_vars, node->name)) {
             int scale = get_expr_pointer_scale(node->lhs, fn);
             int step = scale > 0 ? scale : 1;
+            int size = ir_get_var_type_size(node->name);
             ir_push(fn, "gload", node->name, 0);
             ir_push(fn, "gload", node->name, 0);
             ir_push(fn, "const", "", step);
             ir_push(fn, (strcmp(node->op, "postfix_++") == 0) ? "+" : "-", "", 0);
+            lower_cast_to_storage(fn, size, ir_get_var_unsigned(node->name), target_scale);
             ir_push(fn, "gstore", node->name, 0);
         } else {
             char msg[256];
@@ -2485,6 +2495,7 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
                     lower_addr(stmt->lhs, fn, backend, arena);
                     ir_push(fn, scale == 4 ? "fstore_addr4" : "fstore_addr8", "", 0);
                 } else {
+                    lower_cast_to_storage(fn, scale, lvalue_is_unsigned(stmt->lhs), target_scale);
                     ir_push(fn, "const", "", 0);
                     lower_addr(stmt->lhs, fn, backend, arena);
                     ir_push(fn, "store_index", "", scale);

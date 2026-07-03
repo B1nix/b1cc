@@ -1629,3 +1629,11 @@ rc=$?
 set -e
 test "$rc" = 42
 echo "ok m27_nested_struct_pointer_assignment_expr"
+
+./build/b1cc tests/m27_unsigned_short_for_update_wrap.c -o "$tmp/m27_unsigned_short_for_update_wrap"
+set +e
+"$tmp/m27_unsigned_short_for_update_wrap"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m27_unsigned_short_for_update_wrap"

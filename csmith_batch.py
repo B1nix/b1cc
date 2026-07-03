@@ -14,6 +14,7 @@ CSMITH_FLAGS = [
     "--max-pointer-depth", "1", "--max-struct-fields", "2",
     "--max-union-fields", "1",
 ]
+EXEC_TIMEOUT_SECONDS = 30
 
 COUNT = int(sys.argv[1]) if len(sys.argv) > 1 else 1000
 OFFSET = int(sys.argv[2]) if len(sys.argv) > 2 else 100
@@ -49,7 +50,7 @@ for i in range(1, COUNT + 1):
         continue
 
     try:
-        r = subprocess.run([ref_bin], capture_output=True, timeout=5)
+        r = subprocess.run([ref_bin], capture_output=True, timeout=EXEC_TIMEOUT_SECONDS)
         ref_out = r.stdout.decode()
     except subprocess.TimeoutExpired:
         print(f"NOC seed={seed}: ref timeout")
@@ -78,7 +79,7 @@ for i in range(1, COUNT + 1):
         continue
 
     try:
-        r = subprocess.run([f"{tmp}/t{seed}_b1"], capture_output=True, timeout=5)
+        r = subprocess.run([f"{tmp}/t{seed}_b1"], capture_output=True, timeout=EXEC_TIMEOUT_SECONDS)
         b1_out = r.stdout.decode()
     except subprocess.TimeoutExpired:
         print(f"NOC seed={seed}: b1 execution timeout")
