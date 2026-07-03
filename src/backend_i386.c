@@ -735,23 +735,36 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
             sb_appendf(&out, "    leal -%ld(%%ebp), %%eax\n", (inst->value + 1) * 16);
             sb_append(&out, "    pushl %eax\n");
         } else if (strcmp(inst->op, "gload") == 0) {
-            int gsize = 4;
-            HashMapEntry *ge = hashmap_get(&ir_global_var_elem_scales, inst->arg);
-            if (ge) gsize = ge->val_int;
+            int gsize = ir_get_global_storage_size(inst->arg);
+            if (gsize == 0) gsize = 4;
+            int g_is_unsigned = ir_get_var_unsigned(inst->arg);
             if (ir_pic_mode) {
                 sb_appendf(&out, "    movl %s@GOT(%%ebx), %%eax\n", inst->arg);
                 sb_append(&out, "    movl (%eax), %eax\n");
-                if (gsize == 1)
-                    sb_append(&out, "    movsbl %al, %eax\n");
-                else if (gsize == 2)
-                    sb_append(&out, "    movswl %ax, %eax\n");
+                if (gsize == 1) {
+                    if (g_is_unsigned)
+                        sb_append(&out, "    movzbl %al, %eax\n");
+                    else
+                        sb_append(&out, "    movsbl %al, %eax\n");
+                } else if (gsize == 2) {
+                    if (g_is_unsigned)
+                        sb_append(&out, "    movzwl %ax, %eax\n");
+                    else
+                        sb_append(&out, "    movswl %ax, %eax\n");
+                }
                 sb_append(&out, "    pushl %eax\n");
             } else {
-                if (gsize == 1)
-                    sb_appendf(&out, "    movsbl %s, %%eax\n", inst->arg);
-                else if (gsize == 2)
-                    sb_appendf(&out, "    movswl %s, %%eax\n", inst->arg);
-                else
+                if (gsize == 1) {
+                    if (g_is_unsigned)
+                        sb_appendf(&out, "    movzbl %s, %%eax\n", inst->arg);
+                    else
+                        sb_appendf(&out, "    movsbl %s, %%eax\n", inst->arg);
+                } else if (gsize == 2) {
+                    if (g_is_unsigned)
+                        sb_appendf(&out, "    movzwl %s, %%eax\n", inst->arg);
+                    else
+                        sb_appendf(&out, "    movswl %s, %%eax\n", inst->arg);
+                } else
                     sb_appendf(&out, "    movl %s, %%eax\n", inst->arg);
                 sb_append(&out, "    pushl %eax\n");
             }
@@ -771,9 +784,8 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
             }
         } else if (strcmp(inst->op, "gstore") == 0) {
             sb_append(&out, "    popl %eax\n");
-            int gsize = 4;
-            HashMapEntry *ge = hashmap_get(&ir_global_var_elem_scales, inst->arg);
-            if (ge) gsize = ge->val_int;
+            int gsize = ir_get_global_storage_size(inst->arg);
+            if (gsize == 0) gsize = 4;
             if (ir_pic_mode) {
                 sb_appendf(&out, "    movl %s@GOT(%%ebx), %%ecx\n", inst->arg);
                 if (gsize == 1)
@@ -809,7 +821,8 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
                 sb_appendf(&out, "    movl $%s, %%eax\n", inst->arg);
             }
             sb_append(&out, "    pushl %eax\n");
-        } else if (strcmp(inst->op, "store_index") == 0) {
+        } else if (strcmp(inst->op, "store_index") == 0 || strcmp(inst->op, "store_index_keep") == 0) {
+            int keep_value = strcmp(inst->op, "store_index_keep") == 0;
             sb_append(&out, "    popl %eax\n");
             sb_append(&out, "    popl %ecx\n");
             sb_append(&out, "    popl %edx\n");
@@ -821,6 +834,9 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
                 sb_append(&out, "    movl %edx, (%eax,%ecx,4)\n");
             } else {
                 sb_append(&out, "    movl %edx, (%eax,%ecx,8)\n");
+            }
+            if (keep_value) {
+                sb_append(&out, "    pushl %edx\n");
             }
         } else if (strcmp(inst->op, "store_agg") == 0) {
             sb_append(&out, "    popl %edx\n"); // dest_addr
@@ -956,9 +972,8 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
             sb_append(&out, "    addl $8, %esp\n");
             sb_appendf(&out, "    fstpl -%ld(%%ebp)\n", (inst->value + 1) * 16);
         } else if (strcmp(inst->op, "fgload") == 0) {
-            int gsize = 4;
-            HashMapEntry *ge = hashmap_get(&ir_global_var_elem_scales, inst->arg);
-            if (ge) gsize = ge->val_int;
+            int gsize = ir_get_global_storage_size(inst->arg);
+            if (gsize == 0) gsize = 4;
             if (ir_pic_mode) {
                 sb_appendf(&out, "    movl %s@GOT(%%ebx), %%eax\n", inst->arg);
                 if (gsize == 4) sb_append(&out, "    flds (%eax)\n");
@@ -970,9 +985,8 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
             sb_append(&out, "    subl $8, %esp\n");
             sb_append(&out, "    fstpl (%esp)\n");
         } else if (strcmp(inst->op, "fgstore") == 0) {
-            int gsize = 4;
-            HashMapEntry *ge = hashmap_get(&ir_global_var_elem_scales, inst->arg);
-            if (ge) gsize = ge->val_int;
+            int gsize = ir_get_global_storage_size(inst->arg);
+            if (gsize == 0) gsize = 4;
             sb_append(&out, "    fldl (%esp)\n");
             sb_append(&out, "    addl $8, %esp\n");
             if (ir_pic_mode) {

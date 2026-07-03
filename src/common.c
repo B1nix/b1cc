@@ -75,8 +75,10 @@ void sb_init(StringBuilder *sb) {
 void sb_append(StringBuilder *sb, const char *s) {
     if (!s) return;
     size_t slen = strlen(s);
-    if (sb->len + slen + 1 > sb->cap) {
-        sb->cap = sb->cap * 2 + slen + 16;
+    size_t needed = sb->len + slen + 1;
+    if (needed > sb->cap) {
+        size_t new_cap = needed + 16;
+        sb->cap = new_cap;
         sb->buf = realloc(sb->buf, sb->cap);
     }
     memcpy(sb->buf + sb->len, s, slen);
@@ -85,8 +87,10 @@ void sb_append(StringBuilder *sb, const char *s) {
 }
 
 void sb_append_char(StringBuilder *sb, char c) {
-    if (sb->len + 2 > sb->cap) {
-        sb->cap = sb->cap * 2 + 16;
+    size_t needed = sb->len + 2;
+    if (needed > sb->cap) {
+        size_t new_cap = needed + 16;
+        sb->cap = new_cap;
         sb->buf = realloc(sb->buf, sb->cap);
     }
     sb->buf[sb->len] = c;

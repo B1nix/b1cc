@@ -47,6 +47,28 @@ static void emit_load_fp(StringBuilder *out, int reg, int offset) {
     }
 }
 
+static void emit_narrow_int_to_x8(StringBuilder *out, int src_reg, int size, int is_unsigned) {
+    if (size == 1) {
+        if (is_unsigned) {
+            sb_appendf(out, "    and x8, x%d, #0xff\n", src_reg);
+        } else {
+            sb_appendf(out, "    sxtb x8, w%d\n", src_reg);
+        }
+    } else if (size == 2) {
+        if (is_unsigned) {
+            sb_appendf(out, "    and x8, x%d, #0xffff\n", src_reg);
+        } else {
+            sb_appendf(out, "    sxth x8, w%d\n", src_reg);
+        }
+    } else if (size == 4) {
+        if (is_unsigned) {
+            sb_appendf(out, "    mov w8, w%d\n", src_reg);
+        } else {
+            sb_appendf(out, "    sxtw x8, w%d\n", src_reg);
+        }
+    }
+}
+
 static void emit_block_copy(StringBuilder *out, const char *src_reg, const char *dest_reg, int size) {
     int offset = 0;
     while (size >= 8) {
@@ -281,6 +303,7 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
             int slot_idx = entry ? entry->val_int : i;
 
             int p_float = (prologue_floats && i < prologue_floats->count) ? prologue_floats->data[i] : 0;
+            int p_unsigned = ir_get_var_unsigned(fn->params.data[i]);
             if (p_float && v_word < 8) {
                 /* scalar float/double parameter passed in V0-V7 (AAPCS64) */
                 int off = -((slot_idx + 1) * 16);
@@ -337,19 +360,17 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                     if (in_regs) {
                         int p_size = (prologue_int_sizes && i < prologue_int_sizes->count) ? prologue_int_sizes->data[i] : 8;
                         if (agg_size == 0 && w == 0 && p_size > 0 && p_size < 8) {
-                            if (p_size == 1) {
-                                sb_appendf(&out, "    sxtb x8, w%d\n", abi_word + w);
-                            } else if (p_size == 2) {
-                                sb_appendf(&out, "    sxth x8, w%d\n", abi_word + w);
-                            } else {
-                                sb_appendf(&out, "    sxtw x8, w%d\n", abi_word + w);
-                            }
+                            emit_narrow_int_to_x8(&out, abi_word + w, p_size, p_unsigned);
                             emit_store_fp(&out, 8, off);
                         } else {
                             emit_store_fp(&out, abi_word + w, off);
                         }
                     } else {
+                        int p_size = (prologue_int_sizes && i < prologue_int_sizes->count) ? prologue_int_sizes->data[i] : 8;
                         emit_load_fp(&out, 8, 16 + stack_word * 8);
+                        if (agg_size == 0 && w == 0 && p_size > 0 && p_size < 8) {
+                            emit_narrow_int_to_x8(&out, 8, p_size, p_unsigned);
+                        }
                         emit_store_fp(&out, 8, off);
                         stack_word++;
                     }
@@ -930,18 +951,27 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
             emit_sub_imm(&out, "x0", "x29", (inst->value + 1) * 16);
             sb_append(&out, "    str x0, [sp, #-16]!\n");
         } else if (strcmp(inst->op, "gload") == 0) {
-            int gsize = 8;
-            HashMapEntry *ge = hashmap_get(&ir_global_var_elem_scales, inst->arg);
-            if (ge) gsize = ge->val_int;
+            int gsize = ir_get_global_storage_size(inst->arg);
+            if (gsize == 0) gsize = 8;
 
+            int g_is_unsigned = ir_get_var_unsigned(inst->arg);
             if (is_defined_global(inst->arg)) {
                 sb_appendf(&out, "    adrp x0, _%s@PAGE\n", inst->arg);
                 if (gsize == 1) {
-                    sb_appendf(&out, "    ldrsb x0, [x0, _%s@PAGEOFF]\n", inst->arg);
+                    if (g_is_unsigned)
+                        sb_appendf(&out, "    ldrb w0, [x0, _%s@PAGEOFF]\n", inst->arg);
+                    else
+                        sb_appendf(&out, "    ldrsb x0, [x0, _%s@PAGEOFF]\n", inst->arg);
                 } else if (gsize == 2) {
-                    sb_appendf(&out, "    ldrsh x0, [x0, _%s@PAGEOFF]\n", inst->arg);
+                    if (g_is_unsigned)
+                        sb_appendf(&out, "    ldrh w0, [x0, _%s@PAGEOFF]\n", inst->arg);
+                    else
+                        sb_appendf(&out, "    ldrsh x0, [x0, _%s@PAGEOFF]\n", inst->arg);
                 } else if (gsize == 4) {
-                    sb_appendf(&out, "    ldrsw x0, [x0, _%s@PAGEOFF]\n", inst->arg);
+                    if (g_is_unsigned)
+                        sb_appendf(&out, "    ldr w0, [x0, _%s@PAGEOFF]\n", inst->arg);
+                    else
+                        sb_appendf(&out, "    ldrsw x0, [x0, _%s@PAGEOFF]\n", inst->arg);
                 } else {
                     sb_appendf(&out, "    ldr x0, [x0, _%s@PAGEOFF]\n", inst->arg);
                 }
@@ -949,11 +979,20 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                 sb_appendf(&out, "    adrp x0, _%s@GOTPAGE\n", inst->arg);
                 sb_appendf(&out, "    ldr x0, [x0, _%s@GOTPAGEOFF]\n", inst->arg);
                 if (gsize == 1) {
-                    sb_append(&out, "    ldrsb x0, [x0]\n");
+                    if (g_is_unsigned)
+                        sb_append(&out, "    ldrb w0, [x0]\n");
+                    else
+                        sb_append(&out, "    ldrsb x0, [x0]\n");
                 } else if (gsize == 2) {
-                    sb_append(&out, "    ldrsh x0, [x0]\n");
+                    if (g_is_unsigned)
+                        sb_append(&out, "    ldrh w0, [x0]\n");
+                    else
+                        sb_append(&out, "    ldrsh x0, [x0]\n");
                 } else if (gsize == 4) {
-                    sb_append(&out, "    ldrsw x0, [x0]\n");
+                    if (g_is_unsigned)
+                        sb_append(&out, "    ldr w0, [x0]\n");
+                    else
+                        sb_append(&out, "    ldrsw x0, [x0]\n");
                 } else {
                     sb_append(&out, "    ldr x0, [x0]\n");
                 }
@@ -961,9 +1000,8 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
             sb_append(&out, "    str x0, [sp, #-16]!\n");
         } else if (strcmp(inst->op, "gstore") == 0) {
             sb_append(&out, "    ldr x0, [sp], #16\n");
-            int gsize = 8;
-            HashMapEntry *ge = hashmap_get(&ir_global_var_elem_scales, inst->arg);
-            if (ge) gsize = ge->val_int;
+            int gsize = ir_get_global_storage_size(inst->arg);
+            if (gsize == 0) gsize = 8;
 
             if (is_defined_global(inst->arg)) {
                 sb_appendf(&out, "    adrp x1, _%s@PAGE\n", inst->arg);
@@ -998,7 +1036,8 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                 sb_appendf(&out, "    ldr x0, [x0, _%s@GOTPAGEOFF]\n", inst->arg);
             }
             sb_append(&out, "    str x0, [sp, #-16]!\n");
-        } else if (strcmp(inst->op, "store_index") == 0) {
+        } else if (strcmp(inst->op, "store_index") == 0 || strcmp(inst->op, "store_index_keep") == 0) {
+            int keep_value = strcmp(inst->op, "store_index_keep") == 0;
             sb_append(&out, "    ldr x1, [sp], #16\n"); // dest_addr
             sb_append(&out, "    ldr x2, [sp], #16\n"); // offset
             if (inst->value > 8) {
@@ -1027,6 +1066,9 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                     sb_append(&out, "    str w0, [x1, x2, lsl #2]\n");
                 } else {
                     sb_append(&out, "    str x0, [x1, x2, lsl #3]\n");
+                }
+                if (keep_value) {
+                    sb_append(&out, "    str x0, [sp, #-16]!\n");
                 }
             }
         } else if (strcmp(inst->op, "store_agg") == 0) {
@@ -1161,9 +1203,8 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
             sb_append(&out, "    ldr x0, [sp], #16\n");
             emit_store_fp(&out, 0, -((inst->value + 1) * 16));
         } else if (strcmp(inst->op, "fgload") == 0) {
-            int gsize = 8;
-            HashMapEntry *ge = hashmap_get(&ir_global_var_elem_scales, inst->arg);
-            if (ge) gsize = ge->val_int;
+            int gsize = ir_get_global_storage_size(inst->arg);
+            if (gsize == 0) gsize = 8;
             if (is_defined_global(inst->arg)) {
                 sb_appendf(&out, "    adrp x1, _%s@PAGE\n", inst->arg);
                 sb_appendf(&out, "    add x1, x1, _%s@PAGEOFF\n", inst->arg);
@@ -1179,9 +1220,8 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
             }
             sb_append(&out, "    str d0, [sp, #-16]!\n");
         } else if (strcmp(inst->op, "fgstore") == 0) {
-            int gsize = 8;
-            HashMapEntry *ge = hashmap_get(&ir_global_var_elem_scales, inst->arg);
-            if (ge) gsize = ge->val_int;
+            int gsize = ir_get_global_storage_size(inst->arg);
+            if (gsize == 0) gsize = 8;
             sb_append(&out, "    ldr d0, [sp], #16\n");
             if (is_defined_global(inst->arg)) {
                 sb_appendf(&out, "    adrp x1, _%s@PAGE\n", inst->arg);

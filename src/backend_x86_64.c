@@ -815,47 +815,73 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
             sb_appendf(&out, "    leaq -%ld(%%rbp), %%rax\n", (inst->value + 1) * 16);
             sb_append(&out, "    pushq %rax\n");
         } else if (strcmp(inst->op, "gload") == 0) {
-            int gsize = 8;
-            HashMapEntry *ge = hashmap_get(&ir_global_var_elem_scales, inst->arg);
-            if (ge) gsize = ge->val_int;
+            int gsize = ir_get_global_storage_size(inst->arg);
+            if (gsize == 0) gsize = 8;
+            int g_is_unsigned = ir_get_var_unsigned(inst->arg);
 
             if (ir_pic_mode) {
                 sb_appendf(&out, "    movq %s@GOTPCREL(%%rip), %%rcx\n", inst->arg);
-                if (gsize == 1)
-                    sb_append(&out, "    movsbl (%rcx), %eax\n");
-                else if (gsize == 2)
-                    sb_append(&out, "    movswq (%rcx), %rax\n");
-                else if (gsize == 4)
-                    sb_append(&out, "    movslq (%rcx), %rax\n");
-                else
+                if (gsize == 1) {
+                    if (g_is_unsigned)
+                        sb_append(&out, "    movzbl (%rcx), %eax\n");
+                    else
+                        sb_append(&out, "    movsbl (%rcx), %eax\n");
+                } else if (gsize == 2) {
+                    if (g_is_unsigned)
+                        sb_append(&out, "    movzwq (%rcx), %rax\n");
+                    else
+                        sb_append(&out, "    movswq (%rcx), %rax\n");
+                } else if (gsize == 4) {
+                    if (g_is_unsigned)
+                        sb_append(&out, "    movl (%rcx), %eax\n");
+                    else
+                        sb_append(&out, "    movslq (%rcx), %rax\n");
+                } else
                     sb_append(&out, "    movq (%rcx), %rax\n");
             } else if (ir_code_model == 1) {
                 /* Kernel model: load address first, then dereference */
                 sb_appendf(&out, "    movabs $%s, %%rcx\n", inst->arg);
-                if (gsize == 1)
-                    sb_append(&out, "    movsbl (%rcx), %eax\n");
-                else if (gsize == 2)
-                    sb_append(&out, "    movswq (%rcx), %rax\n");
-                else if (gsize == 4)
-                    sb_append(&out, "    movslq (%rcx), %rax\n");
-                else
+                if (gsize == 1) {
+                    if (g_is_unsigned)
+                        sb_append(&out, "    movzbl (%rcx), %eax\n");
+                    else
+                        sb_append(&out, "    movsbl (%rcx), %eax\n");
+                } else if (gsize == 2) {
+                    if (g_is_unsigned)
+                        sb_append(&out, "    movzwq (%rcx), %rax\n");
+                    else
+                        sb_append(&out, "    movswq (%rcx), %rax\n");
+                } else if (gsize == 4) {
+                    if (g_is_unsigned)
+                        sb_append(&out, "    movl (%rcx), %eax\n");
+                    else
+                        sb_append(&out, "    movslq (%rcx), %rax\n");
+                } else
                     sb_append(&out, "    movq (%rcx), %rax\n");
             } else {
-                if (gsize == 1)
-                    sb_appendf(&out, "    movsbl %s(%%rip), %%eax\n", inst->arg);
-                else if (gsize == 2)
-                    sb_appendf(&out, "    movswq %s(%%rip), %%rax\n", inst->arg);
-                else if (gsize == 4)
-                    sb_appendf(&out, "    movslq %s(%%rip), %%rax\n", inst->arg);
-                else
+                if (gsize == 1) {
+                    if (g_is_unsigned)
+                        sb_appendf(&out, "    movzbl %s(%%rip), %%eax\n", inst->arg);
+                    else
+                        sb_appendf(&out, "    movsbl %s(%%rip), %%eax\n", inst->arg);
+                } else if (gsize == 2) {
+                    if (g_is_unsigned)
+                        sb_appendf(&out, "    movzwq %s(%%rip), %%rax\n", inst->arg);
+                    else
+                        sb_appendf(&out, "    movswq %s(%%rip), %%rax\n", inst->arg);
+                } else if (gsize == 4) {
+                    if (g_is_unsigned)
+                        sb_appendf(&out, "    movl %s(%%rip), %%eax\n", inst->arg);
+                    else
+                        sb_appendf(&out, "    movslq %s(%%rip), %%rax\n", inst->arg);
+                } else
                     sb_appendf(&out, "    movq %s(%%rip), %%rax\n", inst->arg);
             }
             sb_append(&out, "    pushq %rax\n");
         } else if (strcmp(inst->op, "gstore") == 0) {
             sb_append(&out, "    popq %rax\n");
-            int gsize = 8;
-            HashMapEntry *ge = hashmap_get(&ir_global_var_elem_scales, inst->arg);
-            if (ge) gsize = ge->val_int;
+            int gsize = ir_get_global_storage_size(inst->arg);
+            if (gsize == 0) gsize = 8;
 
             if (ir_pic_mode) {
                 sb_appendf(&out, "    movq %s@GOTPCREL(%%rip), %%rcx\n", inst->arg);
@@ -898,7 +924,8 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                 sb_appendf(&out, "    leaq %s(%%rip), %%rax\n", inst->arg);
             }
             sb_append(&out, "    pushq %rax\n");
-        } else if (strcmp(inst->op, "store_index") == 0) {
+        } else if (strcmp(inst->op, "store_index") == 0 || strcmp(inst->op, "store_index_keep") == 0) {
+            int keep_value = strcmp(inst->op, "store_index_keep") == 0;
             sb_append(&out, "    popq %rax\n"); // dest_addr
             sb_append(&out, "    popq %rcx\n"); // offset
             if (inst->value > 8) {
@@ -918,6 +945,9 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                     sb_append(&out, "    movl %edx, (%rax,%rcx,4)\n");
                 } else {
                     sb_append(&out, "    movq %rdx, (%rax,%rcx,8)\n");
+                }
+                if (keep_value) {
+                    sb_append(&out, "    pushq %rdx\n");
                 }
             }
         } else if (strcmp(inst->op, "store_agg") == 0) {
@@ -1056,9 +1086,8 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
             sb_append(&out, "    popq %rax\n");
             sb_appendf(&out, "    movq %%rax, -%ld(%%rbp)\n", (inst->value + 1) * 16);
         } else if (strcmp(inst->op, "fgload") == 0) {
-            int gsize = 8;
-            HashMapEntry *ge = hashmap_get(&ir_global_var_elem_scales, inst->arg);
-            if (ge) gsize = ge->val_int;
+            int gsize = ir_get_global_storage_size(inst->arg);
+            if (gsize == 0) gsize = 8;
             if (ir_pic_mode) {
                 sb_appendf(&out, "    movq %s@GOTPCREL(%%rip), %%rcx\n", inst->arg);
                 if (gsize == 4) {
@@ -1084,9 +1113,8 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
             sb_append(&out, "    subq $8, %rsp\n");
             sb_append(&out, "    movsd %xmm0, (%rsp)\n");
         } else if (strcmp(inst->op, "fgstore") == 0) {
-            int gsize = 8;
-            HashMapEntry *ge = hashmap_get(&ir_global_var_elem_scales, inst->arg);
-            if (ge) gsize = ge->val_int;
+            int gsize = ir_get_global_storage_size(inst->arg);
+            if (gsize == 0) gsize = 8;
             sb_append(&out, "    movsd (%rsp), %xmm0\n");
             sb_append(&out, "    addq $8, %rsp\n");
             if (ir_pic_mode) {

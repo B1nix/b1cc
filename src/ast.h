@@ -49,7 +49,10 @@ struct Node {
     LongArray array_dims;
     int elem_size;
     int pointee_size;
+    int pointee_unsigned;
+    int pointee_unsigned_known;
     int is_unsigned;
+    int compare_unsigned;
     int type_size;
     int is_bool;
     int is_float;     /* node yields a floating-point (float/double) value */

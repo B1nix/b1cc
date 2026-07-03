@@ -96,7 +96,10 @@ static Node *create_node(ParserState *p, const char *op, int line, int col) {
     long_array_init(&node->array_dims);
     node->elem_size = 0;
     node->pointee_size = 0;
+    node->pointee_unsigned = 0;
+    node->pointee_unsigned_known = 0;
     node->is_unsigned = 0;
+    node->compare_unsigned = 0;
     node->type_size = 8;
     node->is_bool = 0;
     node->is_float = 0;
@@ -194,6 +197,59 @@ static long eval_const(ParserState *p, const Node *node) {
     }
     parser_error(p, "invalid constant expression");
     return 0;
+}
+
+static int node_address_ref(ParserState *p, const Node *node, const char **base, long *offset) {
+    if (!node) return 0;
+    if (strcmp(node->op, "cast") == 0) {
+        return node_address_ref(p, node->lhs, base, offset);
+    }
+    if (strcmp(node->op, "unary_&") == 0) {
+        return node_address_ref(p, node->lhs, base, offset);
+    }
+    if (strcmp(node->op, "var") == 0) {
+        *base = node->name;
+        *offset = 0;
+        return 1;
+    }
+    if (strcmp(node->op, "index") == 0) {
+        const char *inner_base = nullptr;
+        long inner_offset = 0;
+        if (!node_address_ref(p, node->lhs, &inner_base, &inner_offset)) return 0;
+        long idx = eval_const(p, node->rhs);
+        long scale = 1;
+        if (strcmp(node->name, "byte_offset") == 0) {
+            scale = 1;
+        } else if (node->elem_size > 0) {
+            scale = node->elem_size;
+        } else if (node->type_size > 0) {
+            scale = node->type_size;
+        } else if (node->lhs && strcmp(node->lhs->op, "var") == 0) {
+            char local_key[512];
+            snprintf(local_key, sizeof(local_key), "%s$%s", p->current_func_name ? p->current_func_name : "", node->lhs->name);
+            int base_size = ir_get_local_array_base_size(local_key);
+            if (base_size == 0) base_size = ir_get_global_array_base_size(node->lhs->name);
+            if (base_size > 0) scale = base_size;
+        }
+        *base = inner_base;
+        *offset = inner_offset + idx * scale;
+        return 1;
+    }
+    return 0;
+}
+
+static int format_address_ref(ParserState *p, const Node *node, char *buf, size_t buf_size) {
+    const char *base = nullptr;
+    long offset = 0;
+    if (!node_address_ref(p, node, &base, &offset) || !base || !base[0]) return 0;
+    if (offset == 0) {
+        snprintf(buf, buf_size, "%s", base);
+    } else if (offset > 0) {
+        snprintf(buf, buf_size, "%s+%ld", base, offset);
+    } else {
+        snprintf(buf, buf_size, "%s%ld", base, offset);
+    }
+    return 1;
 }
 
 static int alignof_type(const ParserState *p, int base_size, const char *struct_tag, int stars) {
@@ -452,19 +508,30 @@ static void append_string_literal_bytes(ParserState *p, LongArray *out, const ch
     if (len < 2 || tok[0] != '"' || tok[len - 1] != '"') {
         return;
     }
-    for (size_t i = 1; i + 1 < len; ++i) {
-        unsigned char ch;
-        if (tok[i] == '\\' && i + 1 < len - 1) {
-            i++;
-            if (tok[i] == 'n') ch = '\n';
-            else if (tok[i] == 't') ch = '\t';
-            else if (tok[i] == 'r') ch = '\r';
-            else if (tok[i] == '0') ch = '\0';
-            else ch = (unsigned char)tok[i];
+    int start_count = out->count;
+    int saw_escape = 0;
+    const char *cur = tok + 1;
+    while (*cur != '"') {
+        long ch;
+        if (*cur == '\\' && cur[1] != '"') {
+            saw_escape = 1;
+            cur++;
+            if (*cur == 'n') ch = '\n';
+            else if (*cur == 't') ch = '\t';
+            else if (*cur == 'r') ch = '\r';
+            else if (*cur == '0') ch = '\0';
+            else ch = *cur;
         } else {
-            ch = (unsigned char)tok[i];
+            ch = *cur;
         }
         long_array_push(out, ch);
+        cur++;
+    }
+    if (!saw_escape) {
+        int raw_count = (int)len - 2;
+        if (out->count - start_count == raw_count - 1 && raw_count > 0) {
+            long_array_push(out, tok[len - 2]);
+        }
     }
     (void)p;
 }
@@ -672,6 +739,7 @@ static int parse_base_type(ParserState *p) {
             hashmap_init(fields, 16);
             while (strcmp(peek(p), "}") != 0) {
                 int field_base_size = parse_base_type(p);
+                int field_base_is_unsigned = p->last_type_unsigned;
                 int field_base_is_float = p->last_type_float;
                 const char *f_tag = p->last_parsed_struct_tag;
                 while (1) {
@@ -747,6 +815,8 @@ static int parse_base_type(ParserState *p) {
                                     int sub_total = tot_e ? tot_e->val_int : sub_size;
                                     HashMapEntry *tag_e = hashmap_get(&p->global_struct_field_tags, f_key);
                                     const char *sub_tag = tag_e ? (const char *)tag_e->val_ptr : "";
+                                    HashMapEntry *sub_unsigned = hashmap_get(&p->global_struct_field_unsigned_by_tag, f_key);
+                                    int sub_unsigned_val = sub_unsigned ? sub_unsigned->val_int : 0;
                                     HashMapEntry *sub_dims_entry = hashmap_get(&p->global_struct_field_dims_by_tag, f_key);
                                     LongArray *sub_dims = sub_dims_entry ? (LongArray *)sub_dims_entry->val_ptr : nullptr;
                                     if (!sub_dims) {
@@ -763,6 +833,7 @@ static int parse_base_type(ParserState *p) {
                                         hashmap_put(&p->global_struct_field_offsets_by_tag, p_key_dup, nullptr, offset + sub_offset);
                                         hashmap_put(&p->global_struct_field_sizes_by_tag, p_key_dup, nullptr, sub_size);
                                         hashmap_put(&p->global_struct_field_total_sizes_by_tag, p_key_dup, nullptr, sub_total);
+                                        hashmap_put(&p->global_struct_field_unsigned_by_tag, p_key_dup, nullptr, sub_unsigned_val);
                                         if (sub_tag && sub_tag[0]) {
                                             hashmap_put(&p->global_struct_field_tags, p_key_dup, (void *)sub_tag, 0);
                                         }
@@ -853,6 +924,7 @@ static int parse_base_type(ParserState *p) {
                             hashmap_put(&p->global_struct_field_sizes_by_tag, key_dup, nullptr, field_size);
                             hashmap_put(&p->global_struct_field_bit_offsets_by_tag, key_dup, nullptr, bit_offset);
                             hashmap_put(&p->global_struct_field_bit_widths_by_tag, key_dup, nullptr, w);
+                            hashmap_put(&p->global_struct_field_unsigned_by_tag, key_dup, nullptr, (stars == 0) ? field_base_is_unsigned : 0);
                         }
                         hashmap_put(fields, field_name, nullptr, offset);
                         hashmap_put(&p->global_field_offsets, field_name, nullptr, offset);
@@ -905,6 +977,7 @@ static int parse_base_type(ParserState *p) {
                                 hashmap_put(&p->global_struct_field_elem_sizes_by_tag, key_dup, nullptr, field_elem_size);
                             }
                             hashmap_put(&p->global_struct_field_is_pointer_by_tag, key_dup, nullptr, stars > 0);
+                            hashmap_put(&p->global_struct_field_unsigned_by_tag, key_dup, nullptr, (stars == 0) ? field_base_is_unsigned : 0);
                             hashmap_put(&p->global_struct_field_total_sizes_by_tag, key_dup, nullptr, this_field_total);
                             hashmap_put(&p->global_struct_field_dims_by_tag, key_dup, field_dims, 0);
                         } else {
@@ -1029,6 +1102,12 @@ static int parse_base_type(ParserState *p) {
             if (typedef_size) {
                 p->last_parsed_typedef = t;
                 base_size = typedef_size->val_int;
+                HashMapEntry *typedef_unsigned = hashmap_get(&p->global_typedef_unsigned, t);
+                if (typedef_unsigned) p->last_type_unsigned = typedef_unsigned->val_int;
+                HashMapEntry *typedef_float = hashmap_get(&p->global_typedef_float, t);
+                if (typedef_float) p->last_type_float = typedef_float->val_int;
+                HashMapEntry *typedef_bool = hashmap_get(&p->global_typedef_bool, t);
+                if (typedef_bool) p->last_type_bool = typedef_bool->val_int;
                 HashMapEntry *typedef_tag = hashmap_get(&p->global_typedef_struct_tags, t);
                 if (typedef_tag) {
                     const char *resolved_tag = (const char *)typedef_tag->val_ptr;
@@ -1090,7 +1169,7 @@ static int is_function_decl(ParserState *p) {
         if (strcmp(t, "const") == 0 || strcmp(t, "volatile") == 0 || strcmp(t, "restrict") == 0 || strcmp(t, "__restrict") == 0 || strcmp(t, "__restrict__") == 0 ||
             strcmp(t, "inline") == 0 || strcmp(t, "__inline") == 0 || strcmp(t, "__inline__") == 0 || strcmp(t, "register") == 0 || strcmp(t, "_Thread_local") == 0 || strcmp(t, "thread_local") == 0 || strcmp(t, "_Noreturn") == 0 || strcmp(t, "noreturn") == 0 || is_calling_convention_qualifier(t)) {
             pos++;
-        } else if (strcmp(t, "struct") == 0 || strcmp(t, "enum") == 0) {
+        } else if (strcmp(t, "struct") == 0 || strcmp(t, "union") == 0 || strcmp(t, "enum") == 0) {
             pos++;
             if (pos < p->tokens.count) pos++;
         } else if (strcmp(t, "int") == 0 || strcmp(t, "char") == 0 || strcmp(t, "short") == 0 || strcmp(t, "long") == 0 || strcmp(t, "void") == 0 || strcmp(t, "unsigned") == 0 || strcmp(t, "signed") == 0 || strcmp(t, "_Bool") == 0 || strcmp(t, "bool") == 0 || strcmp(t, "float") == 0 || strcmp(t, "double") == 0 || hashmap_has(&p->global_typedefs, t)) {
@@ -1122,6 +1201,41 @@ static void apply_integer_conversion(ParserState *p, Node *node) {
         } else {
             node->type_size = 4;
         }
+    }
+}
+
+static int promoted_is_unsigned(const Node *node) {
+    if (!node) return 0;
+    if (strcmp(node->op, "==") == 0 || strcmp(node->op, "!=") == 0 ||
+        strcmp(node->op, "<") == 0 || strcmp(node->op, ">") == 0 ||
+        strcmp(node->op, "<=") == 0 || strcmp(node->op, ">=") == 0 ||
+        strcmp(node->op, "&&") == 0 || strcmp(node->op, "||") == 0 ||
+        strcmp(node->op, "unary_!") == 0) {
+        return 0;
+    }
+    return node && node->is_unsigned && node->type_size >= 4;
+}
+
+static void apply_integer_literal_conversion(ParserState *p, Node *node, const char *literal, int is_hex) {
+    apply_integer_conversion(p, node);
+    int has_unsigned_suffix = 0;
+    int has_long_suffix = 0;
+    int lit_i = 0;
+    while (literal[lit_i]) {
+        if (literal[lit_i] == 'u' || literal[lit_i] == 'U') has_unsigned_suffix = 1;
+        if (literal[lit_i] == 'l' || literal[lit_i] == 'L') has_long_suffix = 1;
+        lit_i++;
+    }
+    if (has_long_suffix) {
+        node->type_size = 8;
+    }
+    if (has_unsigned_suffix) {
+        node->is_unsigned = 1;
+        return;
+    }
+    if (is_hex && node->value > 2147483647L && node->value <= 4294967295L) {
+        node->type_size = 4;
+        node->is_unsigned = 1;
     }
 }
 
@@ -1420,7 +1534,7 @@ static Node *primary(ParserState *p) {
         } else {
             n->value = strtol(t, nullptr, 10);
         }
-        apply_integer_conversion(p, n);
+        apply_integer_literal_conversion(p, n, t, is_hex);
         return n;
     }
     const char *name = take(p, nullptr);
@@ -1460,6 +1574,11 @@ static Node *primary(ParserState *p) {
     if (float_entry) n->is_float = float_entry->val_int;
     HashMapEntry *sz_entry = hashmap_get((HashMap *)&p->value_sizes, resolved);
     n->type_size = sz_entry ? sz_entry->val_int : p->target_scale;
+    HashMapEntry *pointee_unsigned = hashmap_get((HashMap *)&p->pointer_pointee_unsigned, resolved);
+    if (pointee_unsigned) {
+        n->pointee_unsigned = pointee_unsigned->val_int;
+        n->pointee_unsigned_known = 1;
+    }
     return n;
 }
 
@@ -1478,6 +1597,28 @@ static Node *factor(ParserState *p) {
             Node *deref = create_node(p, "index", tok_line, tok_col);
             deref->lhs = n;
             deref->rhs = idx;
+            deref->is_unsigned = n->is_unsigned;
+	            if (n->pointee_size > 0) {
+	                deref->elem_size = n->pointee_size;
+	                deref->type_size = n->pointee_size;
+	                deref->is_unsigned = n->pointee_unsigned_known ? n->pointee_unsigned : n->is_unsigned;
+	            } else if (strcmp(n->op, "var") == 0) {
+	                char local_key[512];
+	                snprintf(local_key, sizeof(local_key), "%s$%s", p->current_func_name ? p->current_func_name : "", n->name);
+	                int elem = ir_get_local_array_base_size(local_key);
+	                if (elem == 0) elem = ir_get_global_array_base_size(n->name);
+	                int pointee = ir_get_local_var_elem_scale(local_key);
+	                if (pointee == 0) pointee = ir_get_global_var_elem_scale(n->name);
+	                if (elem == 0) elem = pointee;
+		                if (elem > 0) {
+		                    deref->elem_size = elem;
+		                    deref->type_size = elem;
+		                    deref->is_unsigned = n->pointee_unsigned_known ? n->pointee_unsigned : n->is_unsigned;
+		                    if (elem == p->target_scale && pointee > 0) {
+		                        deref->pointee_size = pointee;
+		                    }
+		                }
+		            }
             const char *tag = infer_struct_tag(p, n);
             if (tag && tag[0]) {
                 deref->type_tag = tag;
@@ -1502,6 +1643,12 @@ static Node *factor(ParserState *p) {
                 }
             }
             take(p, ")");
+            if (strcmp(n->op, "var") == 0) {
+                HashMapEntry *ret_size = hashmap_get(&p->function_return_sizes, n->name);
+                if (ret_size) call->type_size = ret_size->val_int;
+                HashMapEntry *ret_unsigned = hashmap_get(&p->function_return_unsigned, n->name);
+                if (ret_unsigned) call->is_unsigned = ret_unsigned->val_int;
+            }
             n = call;
         } else if (strcmp(peek(p), ".") == 0 || strcmp(peek(p), "->") == 0) {
             int is_arrow = (strcmp(peek(p), "->") == 0);
@@ -1541,6 +1688,10 @@ static Node *factor(ParserState *p) {
                     parent->is_float = 1;
                     parent->type_size = float_entry->val_int;
                 }
+                HashMapEntry *unsigned_entry = hashmap_get(&p->global_struct_field_unsigned_by_tag, field_key);
+                if (unsigned_entry) {
+                    parent->is_unsigned = unsigned_entry->val_int;
+                }
                 HashMapEntry *elem_entry = hashmap_get(&p->global_struct_field_elem_sizes_by_tag, field_key);
                 if (elem_entry) {
                     parent->pointee_size = elem_entry->val_int;
@@ -1579,7 +1730,8 @@ static Node *factor(ParserState *p) {
             
             parent->value = field_sz;
             parent->elem_size = field_sz;
-            parent->aggregate_size = field_total_sz;
+            parent->type_size = field_sz;
+            parent->aggregate_size = (field_tag[0] || field_dims.count > 0 || field_total_sz > field_sz) ? field_total_sz : 0;
             parent->array_dims = field_dims;
             parent->type_tag = field_tag;
 
@@ -1605,6 +1757,13 @@ static Node *factor(ParserState *p) {
             Node *parent = create_node(p, arena_strdup(p->arena, op_name), tok_line, tok_col);
             parent->name = n->name;
             parent->lhs = n;
+            parent->type_size = n->type_size;
+            parent->elem_size = n->elem_size;
+            parent->aggregate_size = n->aggregate_size;
+            parent->type_tag = n->type_tag;
+            parent->is_unsigned = n->is_unsigned;
+            parent->is_bool = n->is_bool;
+            parent->is_float = n->is_float;
             n = parent;
         }
     }
@@ -1628,7 +1787,28 @@ static Node *unary(ParserState *p) {
         take(p, "*");
         Node *n = create_node(p, "unary_*", tok_line, tok_col);
         n->lhs = unary(p);
-        n->type_size = p->target_scale;
+        n->is_unsigned = n->lhs ? n->lhs->is_unsigned : 0;
+        int elem = (n->lhs && n->lhs->pointee_size > 0) ? n->lhs->pointee_size : 0;
+        if (elem == 0 && n->lhs && strcmp(n->lhs->op, "var") == 0) {
+            char local_key[512];
+            snprintf(local_key, sizeof(local_key), "%s$%s", p->current_func_name ? p->current_func_name : "", n->lhs->name);
+            elem = ir_get_local_var_elem_scale(local_key);
+            if (elem == 0) elem = ir_get_global_var_elem_scale(n->lhs->name);
+        }
+        if (elem > 0 && n->lhs) {
+            n->is_unsigned = n->lhs->pointee_unsigned_known ? n->lhs->pointee_unsigned : n->lhs->is_unsigned;
+        }
+        n->elem_size = elem;
+        n->type_size = elem > 0 ? elem : p->target_scale;
+        const char *tag = infer_struct_tag(p, n->lhs);
+        if (tag && tag[0]) {
+            n->type_tag = tag;
+            HashMapEntry *se = hashmap_get(&p->global_struct_sizes, tag);
+            int struct_size = se ? se->val_int : n->type_size;
+            n->type_size = struct_size;
+            n->elem_size = struct_size;
+            n->aggregate_size = struct_size;
+        }
         return n;
     }
     if (strcmp(peek(p), "+") == 0) {
@@ -1644,6 +1824,13 @@ static Node *unary(ParserState *p) {
         if (strcmp(n->lhs->op, "var") == 0) {
             n->name = n->lhs->name;
         }
+        n->type_size = n->lhs->type_size;
+        n->elem_size = n->lhs->elem_size;
+        n->aggregate_size = n->lhs->aggregate_size;
+        n->type_tag = n->lhs->type_tag;
+        n->is_unsigned = n->lhs->is_unsigned;
+        n->is_bool = n->lhs->is_bool;
+        n->is_float = n->lhs->is_float;
         return n;
     }
     if (strcmp(peek(p), "~") == 0 || strcmp(peek(p), "!") == 0 || strcmp(peek(p), "-") == 0) {
@@ -1713,6 +1900,14 @@ static Node *unary(ParserState *p) {
         is_unsigned_cast = p->last_type_unsigned;
         is_bool_cast = p->last_type_bool;
         int is_float_cast = p->last_type_float;
+        if (p->last_parsed_typedef && p->last_parsed_typedef[0]) {
+            HashMapEntry *typedef_unsigned = hashmap_get(&p->global_typedef_unsigned, p->last_parsed_typedef);
+            if (typedef_unsigned) is_unsigned_cast = typedef_unsigned->val_int;
+            HashMapEntry *typedef_bool = hashmap_get(&p->global_typedef_bool, p->last_parsed_typedef);
+            if (typedef_bool) is_bool_cast = typedef_bool->val_int;
+            HashMapEntry *typedef_float = hashmap_get(&p->global_typedef_float, p->last_parsed_typedef);
+            if (typedef_float) is_float_cast = typedef_float->val_int;
+        }
         while (strcmp(peek(p), "*") == 0) {
             take_star(p);
             base_size = p->target_scale;
@@ -1863,15 +2058,17 @@ static Node *term(ParserState *p) {
         int tls = n->type_size < 4 ? 4 : (int)n->type_size;
         int trs = rhs->type_size < 4 ? 4 : (int)rhs->type_size;
         /* Usual arithmetic conversions */
+        int l_unsigned = promoted_is_unsigned(n);
+        int r_unsigned = promoted_is_unsigned(rhs);
         if (tls == trs) {
             parent->type_size = tls;
-            parent->is_unsigned = n->is_unsigned || rhs->is_unsigned;
+            parent->is_unsigned = l_unsigned || r_unsigned;
         } else if (tls > trs) {
             parent->type_size = tls;
-            parent->is_unsigned = n->is_unsigned;
+            parent->is_unsigned = l_unsigned;
         } else {
             parent->type_size = trs;
-            parent->is_unsigned = rhs->is_unsigned;
+            parent->is_unsigned = r_unsigned;
         }
         if (n->is_float || rhs->is_float) {
             parent->is_float = 1;
@@ -1902,15 +2099,17 @@ static Node *add(ParserState *p) {
         int als = n->type_size < 4 ? 4 : (int)n->type_size;
         int ars = rhs->type_size < 4 ? 4 : (int)rhs->type_size;
         /* Usual arithmetic conversions */
+        int l_unsigned = promoted_is_unsigned(n);
+        int r_unsigned = promoted_is_unsigned(rhs);
         if (als == ars) {
             parent->type_size = als;
-            parent->is_unsigned = n->is_unsigned || rhs->is_unsigned;
+            parent->is_unsigned = l_unsigned || r_unsigned;
         } else if (als > ars) {
             parent->type_size = als;
-            parent->is_unsigned = n->is_unsigned;
+            parent->is_unsigned = l_unsigned;
         } else {
             parent->type_size = ars;
-            parent->is_unsigned = rhs->is_unsigned;
+            parent->is_unsigned = r_unsigned;
         }
         if (n->is_float || rhs->is_float) {
             parent->is_float = 1;
@@ -1958,12 +2157,12 @@ static Node *relational(ParserState *p) {
         parent->lhs = n;
         parent->rhs = rhs;
         parent->type_size = 4; // comparison results in int
-        if (n->type_size == rhs->type_size) {
-            parent->is_unsigned = n->is_unsigned || rhs->is_unsigned;
-        } else if (n->is_unsigned && n->type_size > rhs->type_size) {
-            parent->is_unsigned = 1;
-        } else if (rhs->is_unsigned && rhs->type_size > n->type_size) {
-            parent->is_unsigned = 1;
+        if ((n->type_size < 4 ? 4 : n->type_size) == (rhs->type_size < 4 ? 4 : rhs->type_size)) {
+            parent->compare_unsigned = promoted_is_unsigned(n) || promoted_is_unsigned(rhs);
+        } else if (promoted_is_unsigned(n) && n->type_size > rhs->type_size) {
+            parent->compare_unsigned = 1;
+        } else if (promoted_is_unsigned(rhs) && rhs->type_size > n->type_size) {
+            parent->compare_unsigned = 1;
         }
         n = parent;
     }
@@ -2002,8 +2201,8 @@ static Node *bitwise_and(ParserState *p) {
         Node *parent = create_node(p, "&", tok_line, tok_col);
         parent->lhs = n;
         parent->rhs = rhs;
-        parent->type_size = n->type_size;
-        parent->is_unsigned = n->is_unsigned || rhs->is_unsigned;
+        parent->type_size = n->type_size < 4 ? 4 : n->type_size;
+        parent->is_unsigned = promoted_is_unsigned(n) || promoted_is_unsigned(rhs);
         n = parent;
     }
     return n;
@@ -2022,8 +2221,8 @@ static Node *bitwise_xor(ParserState *p) {
         Node *parent = create_node(p, "^", tok_line, tok_col);
         parent->lhs = n;
         parent->rhs = rhs;
-        parent->type_size = n->type_size;
-        parent->is_unsigned = n->is_unsigned || rhs->is_unsigned;
+        parent->type_size = n->type_size < 4 ? 4 : n->type_size;
+        parent->is_unsigned = promoted_is_unsigned(n) || promoted_is_unsigned(rhs);
         n = parent;
     }
     return n;
@@ -2042,8 +2241,8 @@ static Node *bitwise_or(ParserState *p) {
         Node *parent = create_node(p, "|", tok_line, tok_col);
         parent->lhs = n;
         parent->rhs = rhs;
-        parent->type_size = n->type_size;
-        parent->is_unsigned = n->is_unsigned || rhs->is_unsigned;
+        parent->type_size = n->type_size < 4 ? 4 : n->type_size;
+        parent->is_unsigned = promoted_is_unsigned(n) || promoted_is_unsigned(rhs);
         n = parent;
     }
     return n;
@@ -2141,7 +2340,17 @@ static Node *expr(ParserState *p) {
             }
             Node *node = create_node(p, "assign", tok_line, tok_col);
             node->name = cond->name;
-            node->lhs = rhs;
+	            node->lhs = rhs;
+	            node->type_size = cond->type_size;
+	            node->elem_size = cond->elem_size;
+	            node->pointee_size = cond->pointee_size;
+	            node->pointee_unsigned = cond->pointee_unsigned;
+	            node->pointee_unsigned_known = cond->pointee_unsigned_known;
+	            node->aggregate_size = cond->pointee_size > 0 ? 0 : cond->aggregate_size;
+	            node->type_tag = cond->type_tag;
+	            node->is_unsigned = cond->is_unsigned;
+            node->is_bool = cond->is_bool;
+            node->is_float = cond->is_float;
             HashMapEntry *b_entry = hashmap_get(&p->bool_vars, cond->name);
             if (b_entry && b_entry->val_int) {
                 node->lhs = bool_normalize(p, node->lhs);
@@ -2150,7 +2359,17 @@ static Node *expr(ParserState *p) {
         } else {
             Node *node = create_node(p, "store_index", tok_line, tok_col);
             node->lhs = cond;
-            node->rhs = rhs;
+	            node->rhs = rhs;
+	            node->type_size = cond->type_size;
+	            node->elem_size = cond->elem_size;
+	            node->pointee_size = cond->pointee_size;
+	            node->pointee_unsigned = cond->pointee_unsigned;
+	            node->pointee_unsigned_known = cond->pointee_unsigned_known;
+	            node->aggregate_size = cond->pointee_size > 0 ? 0 : cond->aggregate_size;
+	            node->type_tag = cond->type_tag;
+	            node->is_unsigned = cond->is_unsigned;
+            node->is_bool = cond->is_bool;
+            node->is_float = cond->is_float;
             return node;
         }
     }
@@ -2359,33 +2578,36 @@ static void parse_aggregate_init_internal(ParserState *p, long base_offset, cons
         if (!entry) parser_error(p, "unknown struct tag in initializer");
         HashMap *fields = (HashMap *)entry->val_ptr;
         
-        int f_count = fields->size;
-        HashMapEntry **entries = malloc(f_count * sizeof(HashMapEntry*));
-        int e_idx = 0;
+        int f_count = 0;
         for (int b = 0; b < fields->bucket_count; ++b) {
             HashMapEntry *curr = fields->buckets[b];
             while (curr) {
-                entries[e_idx++] = curr;
+                f_count++;
                 curr = curr->next;
             }
         }
-        // Bubble sort entries by offset (val_int) and then alphabetically by key
-        for (int j = 0; j < f_count; ++j) {
-            for (int k = j + 1; k < f_count; ++k) {
-                if (entries[j]->val_int > entries[k]->val_int ||
-                    (entries[j]->val_int == entries[k]->val_int && strcmp(entries[j]->key, entries[k]->key) > 0)) {
-                    HashMapEntry *tmp = entries[j];
-                    entries[j] = entries[k];
-                    entries[k] = tmp;
-                }
-            }
-        }
-
+        long last_field_offset = -1;
+        const char *last_field_name = "";
         for (int idx = 0; idx < f_count; ++idx) {
             if (strcmp(peek(p), "}") == 0 || strcmp(peek(p), ";") == 0) {
                 break;
             }
-            HashMapEntry *f_entry = entries[idx];
+            HashMapEntry *f_entry = nullptr;
+            for (int b = 0; b < fields->bucket_count; ++b) {
+                HashMapEntry *curr = fields->buckets[b];
+                while (curr) {
+                    int after_last = curr->val_int > last_field_offset ||
+                                     (curr->val_int == last_field_offset && strcmp(curr->key, last_field_name) > 0);
+                    int before_best = !f_entry ||
+                                      curr->val_int < f_entry->val_int ||
+                                      (curr->val_int == f_entry->val_int && strcmp(curr->key, f_entry->key) < 0);
+                    if (after_last && before_best) {
+                        f_entry = curr;
+                    }
+                    curr = curr->next;
+                }
+            }
+            if (!f_entry) break;
             const char *field_name = f_entry->key;
             long field_offset = f_entry->val_int;
             if (strcmp(peek(p), ".") == 0) {
@@ -2460,8 +2682,9 @@ static void parse_aggregate_init_internal(ParserState *p, long base_offset, cons
             } else {
                 break;
             }
+            last_field_offset = f_entry->val_int;
+            last_field_name = f_entry->key;
         }
-        free(entries);
     }
 }
 
@@ -2547,73 +2770,6 @@ static void parse_aggregate_init(ParserState *p, long base_offset, const char *s
         parse_aggregate_init_internal(p, base_offset, struct_tag, array_dims, dim_idx, base_type_size, inits, 0);
     }
 }
-
-static Node *assign_stmt(ParserState *p, int semicolon) {
-    int tok_line = 1, tok_col = 1;
-    if (p->pos < p->tokens.count) {
-        tok_line = p->tokens.data[p->pos].line;
-        tok_col = p->tokens.data[p->pos].col;
-    }
-    const char *name = take(p, nullptr);
-    const char *resolved_name = name;
-    HashMapEntry *sl_entry = hashmap_get(&p->current_static_locals, name);
-    if (sl_entry) {
-        resolved_name = (const char *)sl_entry->val_ptr;
-    } else {
-        resolved_name = resolve_name(p, name);
-    }
-    HashMapEntry *const_entry = hashmap_get(&p->const_vars, resolved_name);
-    if (const_entry && const_entry->val_int) {
-        diagnostics_error(tok_line, tok_col, "assignment of read-only (const-qualified) variable");
-    }
-    const char *op = take(p, nullptr);
-    Node *node = create_node(p, "assign", tok_line, tok_col);
-    node->name = resolved_name;
-    if (strcmp(op, "=") == 0) {
-        node->lhs = expr(p);
-        HashMapEntry *b_entry = hashmap_get(&p->bool_vars, resolved_name);
-        if (b_entry && b_entry->val_int) {
-            node->lhs = bool_normalize(p, node->lhs);
-        }
-    } else {
-        const char *bin_op_dup = nullptr;
-        size_t oplen = strlen(op);
-        if (oplen > 1 && op[oplen - 1] == '=') {
-            char *tmp = malloc(oplen);
-            memcpy(tmp, op, oplen - 1);
-            tmp[oplen - 1] = '\0';
-            bin_op_dup = arena_strdup(p->arena, tmp);
-            free(tmp);
-        } else {
-            char bin_op[2] = { op[0], '\0' };
-            bin_op_dup = arena_strdup(p->arena, bin_op);
-        }
-        Node *bin_node = create_node(p, bin_op_dup, tok_line, tok_col);
-        
-        Node *var_node = create_node(p, "var", tok_line, tok_col);
-        var_node->name = resolved_name;
-        HashMapEntry *u_entry = hashmap_get(&p->unsigned_vars, resolved_name);
-        var_node->is_unsigned = u_entry ? u_entry->val_int : 0;
-        HashMapEntry *sz_entry = hashmap_get(&p->value_sizes, resolved_name);
-        var_node->type_size = sz_entry ? sz_entry->val_int : p->target_scale;
-        HashMapEntry *b_entry = hashmap_get(&p->bool_vars, resolved_name);
-        var_node->is_bool = b_entry ? b_entry->val_int : 0;
-        
-        bin_node->lhs = var_node;
-        bin_node->rhs = expr(p);
-        apply_integer_conversion(p, bin_node);
-        node->lhs = bin_node;
-        
-        if (b_entry && b_entry->val_int) {
-            node->lhs = bool_normalize(p, node->lhs);
-        }
-    }
-    if (semicolon) {
-        take(p, ";");
-    }
-    return node;
-}
-
 
 static void parse_static_assert(ParserState *p) {
     int tok_line = 1, tok_col = 1;
@@ -2765,6 +2921,7 @@ static Node *stmt(ParserState *p) {
                 }
             }
             int fbase = parse_base_type(p);
+            int fbase_is_unsigned = p->last_type_unsigned;
             int fbase_is_float = p->last_type_float;
             if (!f_tag[0] && p->last_parsed_struct_tag && p->last_parsed_struct_tag[0]) {
                 f_tag = p->last_parsed_struct_tag;
@@ -2824,6 +2981,7 @@ static Node *stmt(ParserState *p) {
                         hashmap_put(&p->global_struct_field_bit_widths_by_tag, key_dup, nullptr, w);
                         ir_set_struct_field_bit_offset(key_dup, bit_offset2);
                         ir_set_struct_field_bit_width(key_dup, w);
+                        hashmap_put(&p->global_struct_field_unsigned_by_tag, key_dup, nullptr, (fstars == 0) ? fbase_is_unsigned : 0);
                     }
                     bit_offset2 += w;
                 } else {
@@ -2895,6 +3053,7 @@ static Node *stmt(ParserState *p) {
                             hashmap_put(&p->global_struct_field_elem_sizes_by_tag, key_dup, nullptr, field_elem_size);
                         }
                         hashmap_put(&p->global_struct_field_is_pointer_by_tag, key_dup, nullptr, fstars > 0);
+                        hashmap_put(&p->global_struct_field_unsigned_by_tag, key_dup, nullptr, (fstars == 0) ? fbase_is_unsigned : 0);
                         hashmap_put(&p->global_struct_field_total_sizes_by_tag, key_dup, nullptr, total);
                         LongArray *dims_copy = malloc(sizeof(LongArray));
                         long_array_init(dims_copy);
@@ -2930,7 +3089,9 @@ static Node *stmt(ParserState *p) {
         }
         if (tag[0]) {
             HashMap *fields_alloc = malloc(sizeof(HashMap));
-            *fields_alloc = fields;
+            fields_alloc->buckets = fields.buckets;
+            fields_alloc->bucket_count = fields.bucket_count;
+            fields_alloc->size = fields.size;
             hashmap_put(&p->global_structs, tag, fields_alloc, 0);
             hashmap_put(&p->global_struct_sizes, tag, nullptr, struct_byte_size);
             parser_set_struct_float_aggregate_class(p, tag, hfa_valid, hfa_count, hfa_elem_size);
@@ -3186,38 +3347,49 @@ static Node *stmt(ParserState *p) {
                             take(p, "}");
                             used_string_array_init = 1;
                         } else {
-                            parse_aggregate_init(p, 0, struct_tag, &orig_dims, 0, orig_base_size, &parsed_inits);
+                            const char *init_struct_tag = (stars > 0) ? "" : struct_tag;
+                            parse_aggregate_init(p, 0, init_struct_tag, &orig_dims, 0, orig_base_size, &parsed_inits);
                         }
                     } else if (dims.count > 0 && orig_base_size == 1 && peek(p)[0] == '"') {
-                        LongArray bytes;
-                        long_array_init(&bytes);
+                        long ch_i = 0;
+                        long limit = orig_dims.count > 0 ? orig_dims.data[0] : 2147483647L;
                         while (peek(p)[0] == '"') {
-                            append_string_literal_bytes(p, &bytes, take(p, nullptr));
+                            const char *lit = take(p, nullptr);
+                            const char *cur = lit + 1;
+                            while (*cur != '"' && ch_i < limit) {
+                                long ch_val;
+                                if (*cur == '\\' && cur[1] != '"') {
+                                    cur++;
+                                    if (*cur == 'n') ch_val = '\n';
+                                    else if (*cur == 't') ch_val = '\t';
+                                    else if (*cur == 'r') ch_val = '\r';
+                                    else if (*cur == '0') ch_val = '\0';
+                                    else ch_val = *cur;
+                                } else {
+                                    ch_val = *cur;
+                                }
+                                Node *ch = create_node(p, "num", tok_line, tok_col);
+                                ch->value = ch_val;
+                                ch->type_size = 1;
+                                InitElement item;
+                                item.offset = ch_i;
+                                item.val = ch;
+                                item.size = 1;
+                                init_element_array_push(&parsed_inits, &item);
+                                ch_i++;
+                                cur++;
+                            }
                         }
-                        long limit = orig_dims.count > 0 ? orig_dims.data[0] : bytes.count + 1;
-                        long emit_count = bytes.count;
-                        if (emit_count > limit) emit_count = limit;
-                        for (long ch_i = 0; ch_i < emit_count; ++ch_i) {
-                            Node *ch = create_node(p, "num", tok_line, tok_col);
-                            ch->value = bytes.data[ch_i];
-                            ch->type_size = 1;
-                            InitElement item;
-                            item.offset = ch_i;
-                            item.val = ch;
-                            item.size = 1;
-                            init_element_array_push(&parsed_inits, &item);
-                        }
-                        if (bytes.count < limit) {
+                        if (ch_i < limit) {
                             Node *zero = create_node(p, "num", tok_line, tok_col);
                             zero->value = 0;
                             zero->type_size = 1;
                             InitElement item;
-                            item.offset = bytes.count;
+                            item.offset = ch_i;
                             item.val = zero;
                             item.size = 1;
                             init_element_array_push(&parsed_inits, &item);
                         }
-                        long_array_free(&bytes);
                     } else {
                         Node *init = expr(p);
                         if (is_bool && stars == 0) {
@@ -3325,6 +3497,14 @@ static Node *stmt(ParserState *p) {
                 ir_set_local_var_is_pointer(local_key_dup, stars > 0 || is_func_ptr);
                 ir_set_local_var_elem_scale(local_key_dup, elem_scale);
                 
+                hashmap_put(&p->unsigned_vars, unique_name_dup, nullptr, is_unsigned && stars == 0 && !is_func_ptr);
+                if (dims.count > 0 && stars == 0) {
+                    ir_set_var_pointee_unsigned(unique_name_dup, is_unsigned);
+                }
+                if (stars > 0) {
+                    hashmap_put(&p->pointer_pointee_unsigned, unique_name_dup, nullptr, is_unsigned);
+                    ir_set_var_pointee_unsigned(unique_name_dup, is_unsigned);
+                }
                 hashmap_put(&p->value_sizes, unique_name_dup, nullptr, total_size * base_size);
                 hashmap_put(&p->bool_vars, unique_name_dup, nullptr, is_bool && stars == 0 && dims.count == 0);
                 
@@ -3333,7 +3513,8 @@ static Node *stmt(ParserState *p) {
                     if (strcmp(peek(p), "{") == 0) {
                         InitElementArray local_inits;
                         init_element_array_init(&local_inits);
-                        parse_aggregate_init(p, 0, struct_tag, &orig_dims, 0, orig_base_size, &local_inits);
+                        const char *init_struct_tag = (stars > 0) ? "" : struct_tag;
+                        parse_aggregate_init(p, 0, init_struct_tag, &orig_dims, 0, orig_base_size, &local_inits);
                         if (dims.count > 0 && dims.data[0] == 0 && orig_dims.count > 0 && orig_dims.data[0] > 0) {
                             long inferred_total = 1;
                             for (int d_i = 0; d_i < orig_dims.count; ++d_i) {
@@ -3360,19 +3541,21 @@ static Node *stmt(ParserState *p) {
                         init_element_array_free(&local_inits);
                     } else if (dims.count > 0 && orig_base_size == 1 && peek(p)[0] == '"') {
                         const char *lit = take(p, nullptr);
-                        size_t lit_len = strlen(lit);
-                        size_t byte_count = lit_len >= 2 ? lit_len - 2 : 0;
+                        long byte_count = 0;
+                        while (lit[byte_count + 1] != '"') {
+                            byte_count++;
+                        }
                         if (dims.data[0] == 0) {
-                            dims.data[0] = (long)byte_count + 1;
+                            dims.data[0] = byte_count + 1;
                             total_size = dims.data[0];
                             node->value = total_size;
                             ir_set_local_array_dims(local_key_dup, dims);
                             ir_set_local_array_base_size(local_key_dup, base_size);
                             hashmap_put(&p->value_sizes, unique_name_dup, nullptr, total_size * base_size);
                         }
-                        for (size_t ch_i = 0; ch_i <= byte_count; ++ch_i) {
+                        for (long ch_i = 0; ch_i <= byte_count; ++ch_i) {
                             Node *item_node = create_node(p, "init_item", tok_line, tok_col);
-                            item_node->value = (long)ch_i;
+                            item_node->value = ch_i;
                             item_node->name = "1";
                             Node *ch_node = create_node(p, "num", tok_line, tok_col);
                             ch_node->value = (ch_i < byte_count) ? lit[ch_i + 1] : 0;
@@ -3387,18 +3570,21 @@ static Node *stmt(ParserState *p) {
                         }
                         if (dims.count > 0 && orig_base_size == 1 && strcmp(init->op, "str") == 0) {
                             const char *lit = init->name;
-                            size_t byte_count = strlen(lit);
+                            long byte_count = 0;
+                            while (lit[byte_count] != '\0') {
+                                byte_count++;
+                            }
                             if (dims.data[0] == 0) {
-                                dims.data[0] = (long)byte_count + 1;
+                                dims.data[0] = byte_count + 1;
                                 total_size = dims.data[0];
                                 node->value = total_size;
                                 ir_set_local_array_dims(local_key_dup, dims);
                                 ir_set_local_array_base_size(local_key_dup, base_size);
                                 hashmap_put(&p->value_sizes, unique_name_dup, nullptr, total_size * base_size);
                             }
-                            for (size_t ch_i = 0; ch_i <= byte_count; ++ch_i) {
+                            for (long ch_i = 0; ch_i <= byte_count; ++ch_i) {
                                 Node *item_node = create_node(p, "init_item", tok_line, tok_col);
-                                item_node->value = (long)ch_i;
+                                item_node->value = ch_i;
                                 item_node->name = "1";
                                 Node *ch_node = create_node(p, "num", tok_line, tok_col);
                                 ch_node->value = (ch_i < byte_count) ? lit[ch_i] : 0;
@@ -3497,7 +3683,8 @@ static Node *stmt(ParserState *p) {
                                     }
                                     InitElementArray next_inits;
                                     init_element_array_init(&next_inits);
-                                    parse_aggregate_init(p, 0, struct_tag, &next_orig_dims, 0, next_orig_base_size, &next_inits);
+                                    const char *next_init_struct_tag = (next_stars > 0) ? "" : struct_tag;
+                                    parse_aggregate_init(p, 0, next_init_struct_tag, &next_orig_dims, 0, next_orig_base_size, &next_inits);
                                     for (int item_i = 0; item_i < next_inits.count; ++item_i) {
                                         Node *item_node = create_node(p, "init_item", tok_line, tok_col);
                                         item_node->value = next_inits.data[item_i].offset;
@@ -3532,6 +3719,10 @@ static Node *stmt(ParserState *p) {
                         ir_set_local_var_elem_scale(next_local_key_dup, next_elem_scale);
 
                         hashmap_put(&p->unsigned_vars, next_unique_name_dup, nullptr, is_unsigned && !next_is_pointer);
+                        if (next_is_pointer) {
+                            hashmap_put(&p->pointer_pointee_unsigned, next_unique_name_dup, nullptr, is_unsigned);
+                            ir_set_var_pointee_unsigned(next_unique_name_dup, is_unsigned);
+                        }
                         hashmap_put(&p->bool_vars, next_unique_name_dup, nullptr, is_bool && !next_is_pointer);
                         hashmap_put(&p->value_sizes, next_unique_name_dup, nullptr, next_is_pointer ? p->target_scale : orig_base_size);
                         hashmap_put(&p->const_vars, next_unique_name_dup, nullptr, is_const);
@@ -3539,6 +3730,8 @@ static Node *stmt(ParserState *p) {
                         hashmap_put(&p->float_vars, next_unique_name_dup, nullptr, base_float && !next_is_pointer);
                         next_node->is_float = base_float && !next_is_pointer;
                         next_node->type_size = next_is_pointer ? p->target_scale : (int)orig_base_size;
+                        next_node->is_unsigned = is_unsigned && !next_is_pointer;
+                        next_node->is_bool = is_bool && !next_is_pointer;
 
                         if (strcmp(peek(p), "=") == 0) {
                             take(p, "=");
@@ -3597,6 +3790,10 @@ static Node *stmt(ParserState *p) {
             ir_declare_global(unique_name_dup, 0, 1, 1, 0, (stars > 0) ? p->target_scale : base_size, p->target_scale);
             ir_set_global_var_is_pointer(unique_name_dup, is_pointer);
             ir_set_global_var_elem_scale(unique_name_dup, elem_scale);
+            if (is_pointer) {
+                hashmap_put(&p->pointer_pointee_unsigned, unique_name_dup, nullptr, is_unsigned);
+                ir_set_var_pointee_unsigned(unique_name_dup, is_unsigned);
+            }
             ir_set_global_initializers(unique_name_dup, inits);
             
             hashmap_put(&p->current_static_locals, name, (void *)unique_name_dup, 0);
@@ -3627,6 +3824,10 @@ static Node *stmt(ParserState *p) {
                 ir_declare_global(next_unique_name_dup, 0, 1, 1, 0, next_is_pointer ? p->target_scale : base_size, p->target_scale);
                 ir_set_global_var_is_pointer(next_unique_name_dup, next_is_pointer);
                 ir_set_global_var_elem_scale(next_unique_name_dup, next_stars == 1 ? base_size : (next_stars > 1 ? p->target_scale : 1));
+                if (next_is_pointer) {
+                    hashmap_put(&p->pointer_pointee_unsigned, next_unique_name_dup, nullptr, is_unsigned);
+                    ir_set_var_pointee_unsigned(next_unique_name_dup, is_unsigned);
+                }
                 ir_set_global_initializers(next_unique_name_dup, next_inits);
                 hashmap_put(&p->current_static_locals, next_name, (void *)next_unique_name_dup, 0);
                 hashmap_put(&p->bool_vars, next_unique_name_dup, nullptr, is_bool && !next_is_pointer);
@@ -3656,8 +3857,12 @@ static Node *stmt(ParserState *p) {
             
             ir_set_local_var_is_pointer(local_key_dup, is_pointer);
             ir_set_local_var_elem_scale(local_key_dup, elem_scale);
+            if (is_pointer) {
+                hashmap_put(&p->pointer_pointee_unsigned, unique_name_dup, nullptr, is_unsigned);
+                ir_set_var_pointee_unsigned(unique_name_dup, is_unsigned);
+            }
             
-            hashmap_put(&p->unsigned_vars, unique_name_dup, nullptr, is_unsigned && !is_pointer);
+            hashmap_put(&p->unsigned_vars, unique_name_dup, nullptr, is_unsigned);
             hashmap_put(&p->bool_vars, unique_name_dup, nullptr, is_bool && !is_pointer);
             hashmap_put(&p->value_sizes, unique_name_dup, nullptr, is_pointer ? p->target_scale : base_size);
             hashmap_put(&p->const_vars, unique_name_dup, nullptr, is_const);
@@ -3668,6 +3873,8 @@ static Node *stmt(ParserState *p) {
             }
             node->is_float = base_float && !is_pointer;
             node->type_size = is_pointer ? p->target_scale : base_size;
+            node->is_unsigned = is_unsigned && !is_pointer;
+            node->is_bool = is_bool && !is_pointer;
 
             if (strcmp(peek(p), "=") == 0) {
                 take(p, "=");
@@ -3770,8 +3977,12 @@ static Node *stmt(ParserState *p) {
                     
                     ir_set_local_var_is_pointer(next_local_key_dup, next_is_pointer);
                     ir_set_local_var_elem_scale(next_local_key_dup, next_elem_scale);
+                    if (next_is_pointer) {
+                        hashmap_put(&p->pointer_pointee_unsigned, next_unique_name_dup, nullptr, is_unsigned);
+                        ir_set_var_pointee_unsigned(next_unique_name_dup, is_unsigned);
+                    }
                     
-                    hashmap_put(&p->unsigned_vars, next_unique_name_dup, nullptr, is_unsigned && !next_is_pointer);
+                    hashmap_put(&p->unsigned_vars, next_unique_name_dup, nullptr, is_unsigned);
                     hashmap_put(&p->bool_vars, next_unique_name_dup, nullptr, is_bool && !next_is_pointer);
                     hashmap_put(&p->value_sizes, next_unique_name_dup, nullptr, next_is_pointer ? p->target_scale : base_size);
                     hashmap_put(&p->float_vars, next_unique_name_dup, nullptr, base_float && !next_is_pointer);
@@ -3780,6 +3991,8 @@ static Node *stmt(ParserState *p) {
                     }
                     next_node->is_float = base_float && !next_is_pointer;
                     next_node->type_size = next_is_pointer ? p->target_scale : base_size;
+                    next_node->is_unsigned = is_unsigned && !next_is_pointer;
+                    next_node->is_bool = is_bool && !next_is_pointer;
 
                     if (strcmp(peek(p), "=") == 0) {
                         take(p, "=");
@@ -3946,6 +4159,10 @@ static Node *stmt(ParserState *p) {
                 const char *local_key_dup = arena_strdup(p->arena, local_key);
                 ir_set_local_var_is_pointer(local_key_dup, is_pointer);
                 ir_set_local_var_elem_scale(local_key_dup, elem_scale);
+                if (is_pointer) {
+                    hashmap_put(&p->pointer_pointee_unsigned, local_name_dup, nullptr, is_unsigned);
+                    ir_set_var_pointee_unsigned(local_name_dup, is_unsigned);
+                }
 
                 hashmap_put(&p->unsigned_vars, local_name_dup, nullptr, is_unsigned);
                 hashmap_put(&p->bool_vars, local_name_dup, nullptr, is_bool);
@@ -3960,23 +4177,11 @@ static Node *stmt(ParserState *p) {
                 init_node->name = local_name_dup;
                 init_node->lhs = val;
                 init_node->type_size = base_size;
+                init_node->is_unsigned = is_unsigned;
+                init_node->is_bool = is_bool;
             } else {
-                init_node = assign_stmt(p, 0);
-                if (strcmp(peek(p), ",") == 0) {
-                    Node *init_block = create_node(p, "block", tok_line, tok_col);
-                    node_array_push(&init_block->body, init_node);
-                    while (strcmp(peek(p), ",") == 0) {
-                        take(p, ",");
-                        if (p->pos + 1 < p->tokens.count && is_assignment_operator(p->tokens.data[p->pos + 1].text)) {
-                            node_array_push(&init_block->body, assign_stmt(p, 0));
-                        } else {
-                            Node *expr_node = create_node(p, "expr", tok_line, tok_col);
-                            expr_node->lhs = expr(p);
-                            node_array_push(&init_block->body, expr_node);
-                        }
-                    }
-                    init_node = init_block;
-                }
+                init_node = create_node(p, "expr", tok_line, tok_col);
+                init_node->lhs = comma_expr(p);
             }
         }
         take(p, ";");
@@ -3999,22 +4204,8 @@ static Node *stmt(ParserState *p) {
                  strcmp(p->tokens.data[p->pos + 1].text, "&=") == 0 ||
                  strcmp(p->tokens.data[p->pos + 1].text, "^=") == 0 ||
                  strcmp(p->tokens.data[p->pos + 1].text, "|=") == 0)) {
-                step_node = assign_stmt(p, 0);
-                if (strcmp(peek(p), ",") == 0) {
-                    Node *step_block = create_node(p, "block", tok_line, tok_col);
-                    node_array_push(&step_block->body, step_node);
-                    while (strcmp(peek(p), ",") == 0) {
-                        take(p, ",");
-                        if (p->pos + 1 < p->tokens.count && is_assignment_operator(p->tokens.data[p->pos + 1].text)) {
-                            node_array_push(&step_block->body, assign_stmt(p, 0));
-                        } else {
-                            Node *expr_node = create_node(p, "expr", tok_line, tok_col);
-                            expr_node->lhs = expr(p);
-                            node_array_push(&step_block->body, expr_node);
-                        }
-                    }
-                    step_node = step_block;
-                }
+                step_node = create_node(p, "expr", tok_line, tok_col);
+                step_node->lhs = comma_expr(p);
             } else {
                 step_node = create_node(p, "expr", tok_line, tok_col);
                 step_node->lhs = comma_expr(p);
@@ -4125,6 +4316,8 @@ static Node *function(ParserState *p, int is_static) {
     fn_node->is_float = ret_is_float && ret_stars == 0;
     fn_node->is_unsigned = (ret_stars == 0) ? p->last_type_unsigned : 0;
     fn_node->is_static = is_static;
+    hashmap_put(&p->function_return_sizes, fn_node->name, nullptr, ret_size);
+    hashmap_put(&p->function_return_unsigned, fn_node->name, nullptr, fn_node->is_unsigned);
 
     parser_enter_scope(p);
 
@@ -4156,6 +4349,7 @@ static Node *function(ParserState *p, int is_static) {
             is_unsigned = p->last_type_unsigned;
             is_bool = p->last_type_bool;
             int base_is_float = p->last_type_float;
+            int pointee_is_unsigned = is_unsigned;
 
             int is_param_pointer = 0;
             while (strcmp(peek(p), "*") == 0) {
@@ -4231,6 +4425,10 @@ static Node *function(ParserState *p, int is_static) {
             int is_param_float = base_is_float && !is_param_pointer && !is_param_arr && !is_func_ptr;
             hashmap_put(&p->scopes[p->scope_count - 1], param_name, (void *)local_name_dup, 0);
             hashmap_put(&p->unsigned_vars, local_name_dup, nullptr, is_unsigned_var);
+            if (is_param_pointer || is_param_arr) {
+                hashmap_put(&p->pointer_pointee_unsigned, local_name_dup, nullptr, pointee_is_unsigned);
+                ir_set_var_pointee_unsigned(local_name_dup, pointee_is_unsigned);
+            }
             hashmap_put(&p->bool_vars, local_name_dup, nullptr, is_bool);
             hashmap_put(&p->float_vars, local_name_dup, nullptr, is_param_float);
             hashmap_put(&p->value_sizes, local_name_dup, nullptr, type_size);
@@ -4439,6 +4637,10 @@ static void global_decl(ParserState *p, int is_static, int is_extern) {
         skip_attribute_and_asm(p);
 
         hashmap_put(&p->unsigned_vars, name, nullptr, is_unsigned_var);
+        if (stars > 0) {
+            hashmap_put(&p->pointer_pointee_unsigned, name, nullptr, is_unsigned);
+            ir_set_var_pointee_unsigned(name, is_unsigned);
+        }
         hashmap_put(&p->bool_vars, name, nullptr, is_bool);
         hashmap_put(&p->value_sizes, name, nullptr, type_size);
         /* A const array's elements are read-only, but the array name itself is
@@ -4458,6 +4660,11 @@ static void global_decl(ParserState *p, int is_static, int is_extern) {
         }
         int is_storage_array = arr_dims.count > 0 || (struct_tag[0] && stars == 0);
         ir_declare_global(name, is_storage_array, global_size, is_static, is_extern, elem_size, p->target_scale);
+        ir_set_global_var_is_pointer(name, stars > 0 || is_func_ptr);
+        ir_set_global_var_elem_scale(name, is_func_ptr ? p->target_scale : (stars == 1 ? base_size : (stars > 1 ? p->target_scale : elem_size)));
+        if (arr_dims.count > 0 && stars == 0) {
+            ir_set_var_pointee_unsigned(name, is_unsigned);
+        }
         int alignment = alignof_type(p, base_size, struct_tag, stars);
         int align_exp = 0;
         if (alignment >= 8) align_exp = 3;
@@ -4465,12 +4672,9 @@ static void global_decl(ParserState *p, int is_static, int is_extern) {
         else if (alignment == 2) align_exp = 1;
         ir_set_global_align(name, align_exp);
 
-        if (struct_tag[0] && stars == 0) {
-            ir_mark_global_struct(name);
-        }
         if (arr_dims.count > 0) {
             ir_set_global_array_dims(name, arr_dims);
-            ir_set_global_array_base_size(name, elem_size);
+            ir_set_global_array_base_size(name, (struct_tag[0] && stars == 0) ? base_size : elem_size);
         }
 
         if (strcmp(peek(p), "=") == 0) {
@@ -4523,7 +4727,8 @@ static void global_decl(ParserState *p, int is_static, int is_extern) {
                     long original_dim0 = (arr_dims.count > 0) ? arr_dims.data[0] : -1;
                     InitElementArray inits;
                     init_element_array_init(&inits);
-                    parse_aggregate_init(p, 0, struct_tag, &arr_dims, 0, (stars > 0) ? p->target_scale : base_size, &inits);
+                    const char *init_struct_tag = (stars > 0) ? "" : struct_tag;
+                    parse_aggregate_init(p, 0, init_struct_tag, &arr_dims, 0, (stars > 0) ? p->target_scale : base_size, &inits);
                     
                     if (original_dim0 == 0) {
                         long total_elements = 1;
@@ -4541,6 +4746,7 @@ static void global_decl(ParserState *p, int is_static, int is_extern) {
                             ir_declare_global(name, 1, global_size, is_static, is_extern, elem_size, p->target_scale);
                         }
                         ir_set_global_array_dims(name, arr_dims);
+                        ir_set_global_array_base_size(name, (struct_tag[0] && stars == 0) ? base_size : elem_size);
                         hashmap_put(&p->value_sizes, name, nullptr, type_size);
                     }
                     
@@ -4560,12 +4766,7 @@ static void global_decl(ParserState *p, int is_static, int is_extern) {
                             if (strcmp(init_val->op, "cast") == 0 && init_val->lhs && strcmp(init_val->lhs->op, "str") == 0) {
                                 init_val = init_val->lhs;
                             }
-                            Node *symbol_val = init_val;
-                            if (strcmp(symbol_val->op, "cast") == 0 && symbol_val->lhs &&
-                                (strcmp(symbol_val->lhs->op, "var") == 0 ||
-                                 (strcmp(symbol_val->lhs->op, "unary_&") == 0 && symbol_val->lhs->lhs && strcmp(symbol_val->lhs->lhs->op, "var") == 0))) {
-                                symbol_val = symbol_val->lhs;
-                            }
+                            char addr_ref[512];
                             if (strcmp(init_val->op, "str") == 0) {
                                 char label[256];
                                 snprintf(label, sizeof(label), ".Lstr_glob_%s_%d", name, strings.count);
@@ -4578,11 +4779,9 @@ static void global_decl(ParserState *p, int is_static, int is_extern) {
                                     byte_is_str[inits.data[k].offset] = 1;
                                     byte_str_idx[inits.data[k].offset] = str_idx;
                                 }
-                            } else if (strcmp(symbol_val->op, "var") == 0 ||
-                                       (strcmp(symbol_val->op, "unary_&") == 0 && symbol_val->lhs && strcmp(symbol_val->lhs->op, "var") == 0)) {
-                                const char *sym_name = strcmp(symbol_val->op, "var") == 0 ? symbol_val->name : symbol_val->lhs->name;
+                            } else if (format_address_ref(p, init_val, addr_ref, sizeof(addr_ref))) {
                                 StringPair sp;
-                                sp.first = arena_strdup(p->arena, sym_name);
+                                sp.first = arena_strdup(p->arena, addr_ref);
                                 sp.second = nullptr;
                                 string_pair_array_push(&strings, &sp);
                                 int sym_idx = strings.count - 1;
@@ -4622,12 +4821,7 @@ static void global_decl(ParserState *p, int is_static, int is_extern) {
                                     if (strcmp(init_val->op, "cast") == 0 && init_val->lhs && strcmp(init_val->lhs->op, "str") == 0) {
                                         init_val = init_val->lhs;
                                     }
-                                    Node *symbol_val = init_val;
-                                    if (strcmp(symbol_val->op, "cast") == 0 && symbol_val->lhs &&
-                                        (strcmp(symbol_val->lhs->op, "var") == 0 ||
-                                         (strcmp(symbol_val->lhs->op, "unary_&") == 0 && symbol_val->lhs->lhs && strcmp(symbol_val->lhs->lhs->op, "var") == 0))) {
-                                        symbol_val = symbol_val->lhs;
-                                    }
+                                    char addr_ref[512];
                                     if (strcmp(init_val->op, "str") == 0) {
                                         char label[256];
                                         snprintf(label, sizeof(label), ".Lstr_glob_%s_%d", name, strings.count);
@@ -4637,11 +4831,9 @@ static void global_decl(ParserState *p, int is_static, int is_extern) {
                                         string_pair_array_push(&strings, &sp);
                                         str_idx = strings.count - 1;
                                         element_is_str = 1;
-                                    } else if (strcmp(symbol_val->op, "var") == 0 ||
-                                               (strcmp(symbol_val->op, "unary_&") == 0 && symbol_val->lhs && strcmp(symbol_val->lhs->op, "var") == 0)) {
-                                        const char *sym_name = strcmp(symbol_val->op, "var") == 0 ? symbol_val->name : symbol_val->lhs->name;
+                                    } else if (format_address_ref(p, init_val, addr_ref, sizeof(addr_ref))) {
                                         StringPair sp;
-                                        sp.first = arena_strdup(p->arena, sym_name);
+                                        sp.first = arena_strdup(p->arena, addr_ref);
                                         sp.second = nullptr;
                                         string_pair_array_push(&strings, &sp);
                                         str_idx = strings.count - 1;
@@ -4735,12 +4927,14 @@ static void global_decl(ParserState *p, int is_static, int is_extern) {
                     ir_set_global_initializers_with_strings(name, init_vals, is_string, strings);
                     int_array_free(&is_string);
                     string_pair_array_free(&strings);
-                } else if ((stars > 0 || is_func_ptr) &&
-                           (strcmp(val_node->op, "var") == 0 ||
-                            (strcmp(val_node->op, "unary_&") == 0 && val_node->lhs && strcmp(val_node->lhs->op, "var") == 0))) {
+                } else if (stars > 0 || is_func_ptr) {
+                    char addr_ref[512];
+                    if (!format_address_ref(p, val_node, addr_ref, sizeof(addr_ref))) {
+                        long_array_push(&init_vals, eval_const(p, val_node));
+                        ir_set_global_initializers(name, init_vals);
+                    } else {
                     StringPair sp;
-                    const char *sym_name = strcmp(val_node->op, "var") == 0 ? val_node->name : val_node->lhs->name;
-                    sp.first = arena_strdup(p->arena, sym_name);
+                    sp.first = arena_strdup(p->arena, addr_ref);
                     sp.second = nullptr;
                     StringPairArray strings;
                     string_pair_array_init(&strings);
@@ -4753,6 +4947,7 @@ static void global_decl(ParserState *p, int is_static, int is_extern) {
                     ir_set_global_initializers_with_strings(name, init_vals, is_string, strings);
                     int_array_free(&is_string);
                     string_pair_array_free(&strings);
+                    }
                 } else {
                     long_array_push(&init_vals, eval_const(p, val_node));
                     ir_set_global_initializers(name, init_vals);
@@ -4784,10 +4979,16 @@ static void parser_state_cleanup(ParserState *state) {
     hashmap_free(&state->volatile_vars);
     hashmap_free(&state->float_vars);
     hashmap_free(&state->value_sizes);
+    hashmap_free(&state->pointer_pointee_unsigned);
     hashmap_free(&state->var_struct_tags);
 
     hashmap_free(&state->global_typedefs);
     hashmap_free(&state->global_typedef_sizes);
+    hashmap_free(&state->global_typedef_unsigned);
+    hashmap_free(&state->global_typedef_float);
+    hashmap_free(&state->global_typedef_bool);
+    hashmap_free(&state->function_return_sizes);
+    hashmap_free(&state->function_return_unsigned);
     hashmap_free(&state->global_typedef_struct_tags);
     hashmap_free(&state->global_typedef_dims);
     hashmap_free(&state->global_enums);
@@ -4814,6 +5015,7 @@ static void parser_state_cleanup(ParserState *state) {
     hashmap_free(&state->global_struct_field_float_sizes_by_tag);
     hashmap_free(&state->global_struct_field_elem_sizes_by_tag);
     hashmap_free(&state->global_struct_field_is_pointer_by_tag);
+    hashmap_free(&state->global_struct_field_unsigned_by_tag);
     hashmap_free(&state->global_struct_field_total_sizes_by_tag);
     hashmap_free(&state->global_struct_field_bit_offsets_by_tag);
     hashmap_free(&state->global_struct_field_bit_widths_by_tag);
@@ -4851,6 +5053,7 @@ NodeArray parser_parse(const TokenArray *tokens, int target_scale, Arena *arena)
     hashmap_init(&state.volatile_vars, 64);
     hashmap_init(&state.float_vars, 64);
     hashmap_init(&state.value_sizes, 64);
+    hashmap_init(&state.pointer_pointee_unsigned, 64);
     hashmap_init(&state.var_struct_tags, 64);
     state.local_var_counter = 0;
     state.last_type_unsigned = 0;
@@ -4858,6 +5061,11 @@ NodeArray parser_parse(const TokenArray *tokens, int target_scale, Arena *arena)
 
     hashmap_init(&state.global_typedefs, 64);
     hashmap_init(&state.global_typedef_sizes, 64);
+    hashmap_init(&state.global_typedef_unsigned, 64);
+    hashmap_init(&state.global_typedef_float, 64);
+    hashmap_init(&state.global_typedef_bool, 64);
+    hashmap_init(&state.function_return_sizes, 128);
+    hashmap_init(&state.function_return_unsigned, 128);
     hashmap_init(&state.global_typedef_struct_tags, 64);
     hashmap_init(&state.global_typedef_dims, 64);
     hashmap_put(&state.global_typedefs, "__builtin_va_list", nullptr, 1);
@@ -4875,6 +5083,7 @@ NodeArray parser_parse(const TokenArray *tokens, int target_scale, Arena *arena)
     hashmap_init(&state.global_struct_field_float_sizes_by_tag, 64);
     hashmap_init(&state.global_struct_field_elem_sizes_by_tag, 64);
     hashmap_init(&state.global_struct_field_is_pointer_by_tag, 64);
+    hashmap_init(&state.global_struct_field_unsigned_by_tag, 64);
     hashmap_init(&state.global_struct_field_total_sizes_by_tag, 64);
     hashmap_init(&state.global_struct_field_dims_by_tag, 64);
     hashmap_init(&state.global_struct_field_bit_offsets_by_tag, 64);
@@ -5021,6 +5230,9 @@ NodeArray parser_parse(const TokenArray *tokens, int target_scale, Arena *arena)
                 }
                 hashmap_put(&state.global_typedefs, alias, nullptr, 1);
                 hashmap_put(&state.global_typedef_sizes, alias, nullptr, alias_size);
+                hashmap_put(&state.global_typedef_unsigned, alias, nullptr, typedef_stars == 0 ? state.last_type_unsigned : 0);
+                hashmap_put(&state.global_typedef_float, alias, nullptr, typedef_stars == 0 ? state.last_type_float : 0);
+                hashmap_put(&state.global_typedef_bool, alias, nullptr, typedef_stars == 0 ? state.last_type_bool : 0);
                 if (alias_struct_tag && alias_struct_tag[0]) {
                     hashmap_put(&state.global_typedef_struct_tags, alias, (void *)alias_struct_tag, 0);
                 }

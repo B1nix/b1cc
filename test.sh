@@ -1358,3 +1358,274 @@ if grep -q '@GOT' "$tmp/m26_pic_i386_nopic.s"; then
     exit 1
 fi
 echo "ok m26_pic_i386_nopic_no_got"
+
+# === M27: Csmith Coverage & Differential Testing ===
+
+./build/b1cc tests/m27_union_function_decl.c -o "$tmp/m27_union_function_decl"
+set +e
+"$tmp/m27_union_function_decl"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m27_union_function_decl"
+
+./build/b1cc tests/m27_for_subscript_lvalue.c -o "$tmp/m27_for_subscript_lvalue"
+set +e
+"$tmp/m27_for_subscript_lvalue"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m27_for_subscript_lvalue"
+
+./build/b1cc tests/m27_global_address_initializer.c -o "$tmp/m27_global_address_initializer"
+set +e
+"$tmp/m27_global_address_initializer"
+rc=$?
+set -e
+test "$rc" = 42
+./build/b1cc tests/m27_global_address_initializer.c -S -o "$tmp/m27_global_address_initializer.s"
+grep -q '_g+8' "$tmp/m27_global_address_initializer.s"
+grep -q '_s+4' "$tmp/m27_global_address_initializer.s"
+echo "ok m27_global_address_initializer"
+
+./build/b1cc tests/m27_global_pointer_aggregate_initializer.c -o "$tmp/m27_global_pointer_aggregate_initializer"
+set +e
+"$tmp/m27_global_pointer_aggregate_initializer"
+rc=$?
+set -e
+test "$rc" = 42
+./build/b1cc tests/m27_global_pointer_aggregate_initializer.c -S -o "$tmp/m27_global_pointer_aggregate_initializer.s"
+grep -q '_g' "$tmp/m27_global_pointer_aggregate_initializer.s"
+echo "ok m27_global_pointer_aggregate_initializer"
+
+./build/b1cc tests/m27_aggregate_assignment_argument.c -o "$tmp/m27_aggregate_assignment_argument"
+set +e
+"$tmp/m27_aggregate_assignment_argument"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m27_aggregate_assignment_argument"
+
+./build/b1cc tests/m27_global_struct_array_stride.c -o "$tmp/m27_global_struct_array_stride"
+set +e
+"$tmp/m27_global_struct_array_stride"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m27_global_struct_array_stride"
+
+./build/b1cc tests/m27_unsigned_array_comparison.c -o "$tmp/m27_unsigned_array_comparison"
+set +e
+"$tmp/m27_unsigned_array_comparison"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m27_unsigned_array_comparison"
+
+./build/b1cc tests/m27_unsigned_call_comparison.c -o "$tmp/m27_unsigned_call_comparison"
+set +e
+"$tmp/m27_unsigned_call_comparison"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m27_unsigned_call_comparison"
+
+./build/b1cc tests/m27_local_narrow_initializer_trunc.c -o "$tmp/m27_local_narrow_initializer_trunc"
+set +e
+"$tmp/m27_local_narrow_initializer_trunc"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m27_local_narrow_initializer_trunc"
+
+./build/b1cc tests/m27_unsigned_local_array_load.c -o "$tmp/m27_unsigned_local_array_load"
+set +e
+"$tmp/m27_unsigned_local_array_load"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m27_unsigned_local_array_load"
+
+./build/b1cc tests/m27_unsigned_narrow_return_param.c -o "$tmp/m27_unsigned_narrow_return_param"
+set +e
+"$tmp/m27_unsigned_narrow_return_param"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m27_unsigned_narrow_return_param"
+
+./build/b1cc tests/m27_small_aggregate_assignment.c -o "$tmp/m27_small_aggregate_assignment"
+set +e
+"$tmp/m27_small_aggregate_assignment"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m27_small_aggregate_assignment"
+
+./build/b1cc tests/m27_signed_store_index_assignment_value.c -o "$tmp/m27_signed_store_index_assignment_value"
+set +e
+"$tmp/m27_signed_store_index_assignment_value"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m27_signed_store_index_assignment_value"
+
+./build/b1cc tests/m27_pointer_pointee_store_scale.c -o "$tmp/m27_pointer_pointee_store_scale"
+set +e
+"$tmp/m27_pointer_pointee_store_scale"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m27_pointer_pointee_store_scale"
+
+./build/b1cc tests/m27_global_pointer_pointee_store_scale.c -o "$tmp/m27_global_pointer_pointee_store_scale"
+set +e
+"$tmp/m27_global_pointer_pointee_store_scale"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m27_global_pointer_pointee_store_scale"
+
+./build/b1cc tests/m27_nested_aggregate_assignment.c -o "$tmp/m27_nested_aggregate_assignment"
+set +e
+"$tmp/m27_nested_aggregate_assignment"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m27_nested_aggregate_assignment"
+
+./build/b1cc tests/m27_nested_pointer_aggregate_assignment.c -o "$tmp/m27_nested_pointer_aggregate_assignment"
+set +e
+"$tmp/m27_nested_pointer_aggregate_assignment"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m27_nested_pointer_aggregate_assignment"
+
+./build/b1cc tests/m27_small_aggregate_call_assignment.c -o "$tmp/m27_small_aggregate_call_assignment"
+set +e
+"$tmp/m27_small_aggregate_call_assignment"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m27_small_aggregate_call_assignment"
+
+./build/b1cc tests/m27_hex_literal_unsigned_compare.c -o "$tmp/m27_hex_literal_unsigned_compare"
+set +e
+"$tmp/m27_hex_literal_unsigned_compare"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m27_hex_literal_unsigned_compare"
+
+./build/b1cc tests/m27_signed_narrow_call_unsigned_compare.c -o "$tmp/m27_signed_narrow_call_unsigned_compare"
+set +e
+"$tmp/m27_signed_narrow_call_unsigned_compare"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m27_signed_narrow_call_unsigned_compare"
+
+./build/b1cc tests/m27_small_aggregate_pointer_store.c -o "$tmp/m27_small_aggregate_pointer_store"
+set +e
+"$tmp/m27_small_aggregate_pointer_store"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m27_small_aggregate_pointer_store"
+
+./build/b1cc tests/m27_global_narrow_assignment_expr_value.c -o "$tmp/m27_global_narrow_assignment_expr_value"
+set +e
+"$tmp/m27_global_narrow_assignment_expr_value"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m27_global_narrow_assignment_expr_value"
+
+./build/b1cc tests/m27_store_index_assignment_expr_value.c -o "$tmp/m27_store_index_assignment_expr_value"
+set +e
+"$tmp/m27_store_index_assignment_expr_value"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m27_store_index_assignment_expr_value"
+
+./build/b1cc tests/m27_narrow_unsigned_promotion_compare.c -o "$tmp/m27_narrow_unsigned_promotion_compare"
+set +e
+"$tmp/m27_narrow_unsigned_promotion_compare"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m27_narrow_unsigned_promotion_compare"
+
+./build/b1cc tests/m27_nested_tiny_struct_assignment_expr.c -o "$tmp/m27_nested_tiny_struct_assignment_expr"
+set +e
+"$tmp/m27_nested_tiny_struct_assignment_expr"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m27_nested_tiny_struct_assignment_expr"
+
+./build/b1cc tests/m27_comparison_result_is_signed_int.c -o "$tmp/m27_comparison_result_is_signed_int"
+set +e
+"$tmp/m27_comparison_result_is_signed_int"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m27_comparison_result_is_signed_int"
+
+./build/b1cc tests/m27_assignment_expr_type_for_unsigned_compare.c -o "$tmp/m27_assignment_expr_type_for_unsigned_compare"
+set +e
+"$tmp/m27_assignment_expr_type_for_unsigned_compare"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m27_assignment_expr_type_for_unsigned_compare"
+
+./build/b1cc tests/m27_prefix_inc_deref_unsigned_compare.c -o "$tmp/m27_prefix_inc_deref_unsigned_compare"
+set +e
+"$tmp/m27_prefix_inc_deref_unsigned_compare"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m27_prefix_inc_deref_unsigned_compare"
+
+./build/b1cc tests/m27_signed_pointer_deref_compare.c -o "$tmp/m27_signed_pointer_deref_compare"
+set +e
+"$tmp/m27_signed_pointer_deref_compare"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m27_signed_pointer_deref_compare"
+
+./build/b1cc tests/m27_unsigned_pointer_deref_compare.c -o "$tmp/m27_unsigned_pointer_deref_compare"
+set +e
+"$tmp/m27_unsigned_pointer_deref_compare"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m27_unsigned_pointer_deref_compare"
+
+./build/b1cc tests/m27_signed_param_pointer_deref_compare.c -o "$tmp/m27_signed_param_pointer_deref_compare"
+set +e
+"$tmp/m27_signed_param_pointer_deref_compare"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m27_signed_param_pointer_deref_compare"
+
+./build/b1cc tests/m27_narrow_signed_return_unsigned_compare.c -o "$tmp/m27_narrow_signed_return_unsigned_compare"
+set +e
+"$tmp/m27_narrow_signed_return_unsigned_compare"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m27_narrow_signed_return_unsigned_compare"
+
+./build/b1cc tests/m27_nested_struct_pointer_assignment_expr.c -o "$tmp/m27_nested_struct_pointer_assignment_expr"
+set +e
+"$tmp/m27_nested_struct_pointer_assignment_expr"
+rc=$?
+set -e
+test "$rc" = 42
+echo "ok m27_nested_struct_pointer_assignment_expr"

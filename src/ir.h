@@ -102,6 +102,7 @@ void ir_set_local_array_dims(const char *name, LongArray dims);
 void ir_set_local_array_base_size(const char *name, int val);
 int ir_get_global_array_base_size(const char *name);
 int ir_get_local_array_base_size(const char *name);
+int ir_get_global_storage_size(const char *name);
 void ir_set_local_var_is_pointer(const char *name, int val);
 void ir_set_local_var_elem_scale(const char *name, int val);
 int ir_get_local_var_elem_scale(const char *name);
@@ -111,6 +112,7 @@ void ir_set_global_var_elem_scale(const char *name, int val);
 
 
 void ir_set_var_unsigned(const char *name, int val);
+void ir_set_var_pointee_unsigned(const char *name, int val);
 void ir_set_var_bool(const char *name, int val);
 void ir_set_var_float(const char *name, int val);
 int ir_get_var_float(const char *name);

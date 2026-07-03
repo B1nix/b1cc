@@ -22,6 +22,7 @@ typedef struct {
     HashMap volatile_vars;
     HashMap float_vars;
     HashMap value_sizes;
+    HashMap pointer_pointee_unsigned;
     HashMap var_struct_tags;
     int local_var_counter;
     int last_type_unsigned;
@@ -32,6 +33,11 @@ typedef struct {
 
     HashMap global_typedefs;
     HashMap global_typedef_sizes;
+    HashMap global_typedef_unsigned;
+    HashMap global_typedef_float;
+    HashMap global_typedef_bool;
+    HashMap function_return_sizes;
+    HashMap function_return_unsigned;
     HashMap global_typedef_struct_tags;
     HashMap global_typedef_dims;
     HashMap global_enums;
@@ -47,6 +53,7 @@ typedef struct {
     HashMap global_struct_field_float_sizes_by_tag;
     HashMap global_struct_field_elem_sizes_by_tag;
     HashMap global_struct_field_is_pointer_by_tag;
+    HashMap global_struct_field_unsigned_by_tag;
     HashMap global_struct_field_total_sizes_by_tag;
     HashMap global_struct_field_dims_by_tag;
     HashMap global_struct_field_bit_offsets_by_tag;

@@ -292,4 +292,61 @@
 - [x] Regression tests: PIC assembly verification (GOTPCREL pattern), PIC ELF object output, and PIC host-execution tests.
 - [ ] Integration: b1cc-compiled code replaces statically linked `b1nix-cc` path in B1NIX userspace — deferred; requires B1NIX tree. i386 PIC support also deferred as lower priority.
 
+## M27: Csmith Coverage & Differential Testing
+
+- [x] Fix `is_function_decl()` to recognize `union` return types for union-returning function declarations. Covered by `tests/m27_union_function_decl.c`; this is declaration parsing coverage, not a claim of complete union return ABI support.
+- [x] Support non-constant (link-time-constant) address-of expressions (`&g_symbol`, `&g_array[idx]`, `&g_struct.field`) in global pointer initializers. Covered by `tests/m27_global_address_initializer.c`.
+- [x] Support array subscript lvalues in for-loop initializer expressions (`for (arr[i] = 0; ...)`). Covered by `tests/m27_for_subscript_lvalue.c`.
+- [x] Support global aggregate pointer initializers with symbol addresses in non-scalar aggregate paths. Covered by `tests/m27_global_pointer_aggregate_initializer.c` and csmith seed 78.
+- [x] Support global aggregate pointer initializers with casted null pointers. Covered by `tests/m27_global_pointer_aggregate_initializer.c`; csmith seed 705 now passes, and seed 377 advances past this compile blocker.
+- [x] Materialize aggregate assignment expressions used as aggregate call arguments, including `((*p) = value)`, so `lower_addr()` no longer sees `op='store_index'` for that argument shape. Covered by `tests/m27_aggregate_assignment_argument.c`; csmith seed 377 now compiles and runs to checksum comparison.
+- [x] Preserve global struct array element stride separately from byte storage size. Covered by `tests/m27_global_struct_array_stride.c`; fixes csmith seeds 5, 13, 30, 38, and 46 in the first-100 range.
+- [x] Preserve unsignedness for array subscripts and known function-call return values. Covered by `tests/m27_unsigned_array_comparison.c` and `tests/m27_unsigned_call_comparison.c`; fixes csmith seed 16 in the first-100 range.
+- [x] Truncate/sign-extend narrow local scalar initializers and assignment-expression results to storage type. Covered by `tests/m27_local_narrow_initializer_trunc.c` and `tests/m27_signed_store_index_assignment_value.c`; fixes csmith seeds 21 and 55 in the first-100 range.
+- [x] Preserve unsigned narrow loads and return-to-parameter ABI lowering. Covered by `tests/m27_unsigned_local_array_load.c` and `tests/m27_unsigned_narrow_return_param.c`; fixes csmith seeds 7 and 20 in the first-100 range.
+- [x] Treat small struct/union assignment as aggregate copy even when the aggregate is <= pointer width. Covered by `tests/m27_small_aggregate_assignment.c`; fixes csmith seed 51 in the first-100 range.
+- [x] Separate global pointer storage width from pointee scale, and use pointee scale for `*p` stores. Covered by `tests/m27_pointer_pointee_store_scale.c` and `tests/m27_global_pointer_pointee_store_scale.c`; fixes csmith seed 3 in the first-100 range.
+- [x] Finish broad-range checksum mismatches for the current M27 csmith profile. Covered by focused regressions for assignment-expression value semantics, narrow signed/unsigned propagation, comparison result typing, pointer pointee signedness, and nested struct-pointer assignment expressions. Previously failing seeds 116, 163, 289, 333, 339, 490, 537, 632, 641, 659, 680, 757, 832, 851, 858, 888, 919, 921, 950, 1052, 1062, 1191, 1199, 1234, 1315, 1369, 1409, 1649, 1670, 1678, 1695, 1755, 1797, 1847, 1898, and 1929 now pass in targeted checks and the final broad runs.
+- [x] Re-run and triage broad-range csmith after the first-100 cleanup. Current broad runs were `python3 csmith_batch.py 1000 0` (seeds 1..1000) and `python3 csmith_batch.py 1000 1000` (seeds 1001..2000) after the M27 fixes and self-host regression cleanup.
+- [x] Lower pointer-address comparisons used as integer subexpressions consistently for the previously identified examples. The old examples 410, 1248, and 1578 now pass in the current broad runs. This does not prove every pointer comparison shape is complete; keep future failures tied to concrete seeds.
+- [ ] Fix remaining b1cc-built binary execution timeouts. NOC is counted as a failing/no-result outcome for M27. Current b1cc-side timeout seeds are 477, 661, 1514, and 1626. Reference-only timeout seeds are tracked separately below because the reference binary also fails to produce a checksum within the harness timeout.
+
+### M27 Regression Coverage
+- Previous baseline: **578 PASS** / 96 FAIL / 326 NOC out of 1000 csmith seeds (arm64-darwin).
+- Older same-range check before the final first-100 cleanup (`python3 csmith_batch.py 1000 0`, seeds 1..1000): **801 PASS** / 153 FAIL / 46 NOC.
+- Older additional range before the final first-100 cleanup (`python3 csmith_batch.py 1000 1000`, seeds 1001..2000): **800 PASS** / 156 FAIL / 44 NOC.
+- Current first-100 sanity is included in the current first broad range: seeds 1..100 are **99 PASS** / 0 FAIL / 1 NOC; the remaining NOC is a reference timeout at seed 54.
+- Current first broad range (`python3 csmith_batch.py 1000 0`, seeds 1..1000): **986 PASS** / 0 FAIL / 14 NOC. NOC breakdown: b1cc execution timeouts at 477 and 661; reference timeouts at 54, 120, 127, 249, 292, 331, 334, 585, 649, 781, 794, and 863.
+- Current second broad range (`python3 csmith_batch.py 1000 1000`, seeds 1001..2000): **980 PASS** / 0 FAIL / 20 NOC. NOC breakdown: b1cc execution timeouts at 1514 and 1626; reference timeouts at 1016, 1022, 1027, 1041, 1189, 1410, 1555, 1587, 1592, 1593, 1613, 1629, 1638, 1676, 1774, 1844, 1931, and 1963.
+- Current combined broad status (seeds 1..2000): **1966 PASS** / 0 FAIL / 34 NOC. M27 checksum mismatches are closed for the current profile; M27 remains open only for timeout/no-result outcomes unless those are deliberately moved out of scope.
+
+## M28: Expand Csmith Feature Profile
+
+Goal: use the current M27 csmith profile as the baseline, then remove restrictions one feature family at a time by adding real compiler support and regression coverage. Do not mark a restriction as lifted until the corresponding generated programs compile, run, and pass differential checks.
+
+Current M27 baseline profile:
+
+```sh
+--no-longlong --no-float --no-consts --no-volatiles
+--no-jumps --no-bitfields --no-packed-struct --no-builtins
+--no-divs --no-comma-operators
+--max-funcs 2 --max-block-depth 2 --max-block-size 2
+--max-expr-complexity 4 --max-array-dim 1
+--max-array-len-per-dim 3
+--max-pointer-depth 1 --max-struct-fields 2
+--max-union-fields 1
+```
+
+- [ ] Lift `--no-longlong`: complete `long long` parsing, integer conversion, constant folding, ABI lowering, backend arithmetic/comparison, and object/debug coverage on supported targets.
+- [ ] Lift `--no-float`: complete scalar float/double expression semantics beyond the existing ABI smoke coverage, including conversions, comparisons, arithmetic, returns, and calls.
+- [ ] Lift `--no-consts`: preserve const-qualified objects through parser/IR diagnostics while allowing generated const globals/locals that do not require runtime mutation.
+- [ ] Lift `--no-volatiles`: preserve volatile load/store side effects and ordering in IR/backends.
+- [ ] Lift `--no-jumps`: support csmith-generated `goto`, labels, `break`, and `continue` forms with correct control-flow lowering.
+- [ ] Lift `--no-bitfields`: complete bitfield layout, signedness, loads, stores, assignments, and aggregate initialization for generated structs/unions.
+- [ ] Lift `--no-packed-struct`: implement packed layout/alignment and unaligned load/store lowering where targets require it.
+- [ ] Lift `--no-builtins`: parse/lower the csmith builtin subset or map it to supported runtime/helper calls.
+- [ ] Lift `--no-divs`: complete signed/unsigned division and modulo semantics, including narrowing and target backend edge cases.
+- [ ] Lift `--no-comma-operators`: complete comma-expression value and side-effect ordering in every expression context.
+- [ ] Raise shape limits gradually: functions beyond 2, deeper blocks, larger block sizes, expression complexity above 4, multidimensional arrays, arrays longer than 3, pointer depth above 1, and wider struct/union field counts.
+
 Skipped: full C/C++ upfront. Add features only when a test or B1NIX source needs them.
