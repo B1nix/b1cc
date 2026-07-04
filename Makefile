@@ -1,5 +1,5 @@
 CC ?= cc
-CFLAGS ?= -std=c23 -Wall -Wextra -O2
+CFLAGS ?= -std=c23 -Wall -Wextra -O3 -flto -march=native
 
 SRCS = $(filter-out src/b1cc_token_lexer.c, $(wildcard src/*.c))
 OBJS = $(SRCS:src/%.c=build/%.o)

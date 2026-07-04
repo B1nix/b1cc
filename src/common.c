@@ -203,6 +203,26 @@ void hashmap_free(HashMap *map) {
     map->size = 0;
 }
 
+static void hashmap_resize(HashMap *map, int new_bucket_count) {
+    HashMapEntry **new_buckets = calloc(new_bucket_count, sizeof(HashMapEntry*));
+    if (!new_buckets) return;
+
+    for (int i = 0; i < map->bucket_count; ++i) {
+        HashMapEntry *curr = map->buckets[i];
+        while (curr) {
+            HashMapEntry *next = curr->next;
+            unsigned int h = hash_key(curr->key) % new_bucket_count;
+            curr->next = new_buckets[h];
+            new_buckets[h] = curr;
+            curr = next;
+        }
+    }
+
+    free(map->buckets);
+    map->buckets = new_buckets;
+    map->bucket_count = new_bucket_count;
+}
+
 void hashmap_put(HashMap *map, const char *key, void *val_ptr, long val_int) {
     unsigned int h = hash_key(key) % map->bucket_count;
     HashMapEntry *curr = map->buckets[h];
@@ -222,6 +242,10 @@ void hashmap_put(HashMap *map, const char *key, void *val_ptr, long val_int) {
     entry->next = map->buckets[h];
     map->buckets[h] = entry;
     map->size = map->size + 1;
+
+    if (map->size > map->bucket_count * 0.75) {
+        hashmap_resize(map, map->bucket_count * 2);
+    }
 }
 
 HashMapEntry *hashmap_get(HashMap *map, const char *key) {
