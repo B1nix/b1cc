@@ -30,6 +30,8 @@ typedef struct {
     int last_type_const;
     int last_type_volatile;
     int last_type_float;
+    int last_type_alignment;
+    int last_type_thread_local;
 
     HashMap global_typedefs;
     HashMap global_typedef_sizes;

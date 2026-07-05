@@ -12,6 +12,7 @@
 #include "backend.h"
 #include "elf_writer.h"
 #include "macho_writer.h"
+#include "builtin_headers.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -99,6 +100,75 @@ static void dump_command(const char *title, const char *cmd) {
     pclose(pipe);
 }
 
+/* Compile freestanding runtime sources into a temp directory.
+ * Returns an array of .o file paths, or NULL on failure.
+ * The caller must free the returned array and clean up the temp files. */
+static StringArray compile_freestanding_runtime(const char *target, const char *mcmodel, Arena *arena) {
+    StringArray runtime_objects;
+    string_array_init(&runtime_objects);
+
+    const char *runtime_files[] = {
+        "runtime/divdi3.c",
+        "runtime/runtime.c",
+    };
+    int num_files = sizeof(runtime_files) / sizeof(runtime_files[0]);
+
+    char tmpdir[] = "/tmp/b1cc-rt-XXXXXX";
+    char *dir = mkdtemp(tmpdir);
+    if (!dir) return runtime_objects;
+
+    for (int i = 0; i < num_files; ++i) {
+        FILE *f = fopen(runtime_files[i], "r");
+        if (!f) continue;
+        fclose(f);
+
+        char tmp_obj[1024];
+        snprintf(tmp_obj, sizeof(tmp_obj), "%s/%s.o", dir, runtime_files[i]);
+        /* mkdir -p for subdirs */
+        char mkdir_cmd[1024];
+        snprintf(mkdir_cmd, sizeof(mkdir_cmd), "mkdir -p %s/runtime", dir);
+        system(mkdir_cmd);
+
+        bool is_kernel = (strstr(target, "elf") != NULL);
+        bool use_native = (strstr(target, "b1nix") != NULL || is_kernel);
+
+        int rc = -1;
+        if (use_native) {
+            /* Use b1cc -c to produce native ELF */
+            StringBuilder acmd;
+            sb_init(&acmd);
+            sb_append(&acmd, "./build/b1cc ");
+            sb_append(&acmd, runtime_files[i]);
+            sb_append(&acmd, " -c --target=");
+            sb_append(&acmd, target);
+            sb_append(&acmd, " -mcmodel=");
+            sb_append(&acmd, mcmodel);
+            sb_append(&acmd, " -o ");
+            sb_append(&acmd, shell_quote(tmp_obj, arena));
+            const char *acmd_str = sb_to_string(&acmd, arena);
+            sb_free(&acmd);
+            rc = system(acmd_str);
+        } else {
+            /* Use host cc to compile runtime (avoids Mach-O reloc issues) */
+            StringBuilder acmd;
+            sb_init(&acmd);
+            sb_append(&acmd, "cc -c -std=c23 ");
+            sb_append(&acmd, shell_quote(runtime_files[i], arena));
+            sb_append(&acmd, " -o ");
+            sb_append(&acmd, shell_quote(tmp_obj, arena));
+            const char *acmd_str = sb_to_string(&acmd, arena);
+            sb_free(&acmd);
+            rc = system(acmd_str);
+        }
+
+        if (rc == 0) {
+            string_array_push(&runtime_objects, arena_strdup(arena, tmp_obj));
+        }
+    }
+
+    return runtime_objects;
+}
+
 static void dump_object(const char *path, int dump_symbols, int dump_sections, int dump_relocs, Arena *arena) {
     const char *q = shell_quote(path, arena);
     char cmd[1024];
@@ -136,6 +206,8 @@ int main(int argc, char **argv) {
     bool dump_sections = false;
     bool dump_relocs = false;
     bool pic_mode = false;
+    bool freestanding = false;
+    bool nostdlib = false;
 
     StringArray inputs;
     string_array_init(&inputs);
@@ -174,6 +246,10 @@ int main(int argc, char **argv) {
             pic_mode = true;
         } else if (strcmp(arg, "-fno-pic") == 0 || strcmp(arg, "-fno-pie") == 0 || strcmp(arg, "-fno-PIE") == 0) {
             pic_mode = false;
+        } else if (strcmp(arg, "-ffreestanding") == 0) {
+            freestanding = true;
+        } else if (strcmp(arg, "-nostdlib") == 0) {
+            nostdlib = true;
         } else if (strcmp(arg, "-o") == 0) {
             if (++i == argc)
                 diagnostics_fatal("-o needs a path");
@@ -218,6 +294,13 @@ int main(int argc, char **argv) {
     string_array_push(&preprocessor_driver_include_dirs, ".");
     string_array_push(&preprocessor_driver_include_dirs, "userspace/include");
     string_array_push(&preprocessor_driver_include_dirs, "include");
+
+    /* Write bundled freestanding headers to a temp dir and add to include path */
+    const char *builtin_inc_dir = builtin_headers_write_temp_dir();
+    if (builtin_inc_dir) {
+        string_array_push(&preprocessor_driver_include_dirs, builtin_inc_dir);
+    }
+
     string_array_push(&preprocessor_driver_include_dirs, "../b1nix/userspace/include");
     string_array_push(&preprocessor_driver_include_dirs, "/usr/include");
     string_array_push(&preprocessor_driver_include_dirs, "/usr/local/include");
@@ -310,6 +393,12 @@ int main(int argc, char **argv) {
         string_array_free(&inputs);
         string_array_free(&link_flags);
         string_array_free(&preprocessor_driver_include_dirs);
+        if (builtin_inc_dir) {
+            char rm_cmd[1024];
+            snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf '%s'", builtin_inc_dir);
+            system(rm_cmd);
+            free((void *)builtin_inc_dir);
+        }
         // clean preprocessor macros params
         for (int b = 0; b < preprocessor_driver_macros.bucket_count; ++b) {
             HashMapEntry *curr = preprocessor_driver_macros.buckets[b];
@@ -348,6 +437,12 @@ int main(int argc, char **argv) {
         string_array_free(&inputs);
         string_array_free(&link_flags);
         string_array_free(&preprocessor_driver_include_dirs);
+        if (builtin_inc_dir) {
+            char rm_cmd[1024];
+            snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf '%s'", builtin_inc_dir);
+            system(rm_cmd);
+            free((void *)builtin_inc_dir);
+        }
         for (int b = 0; b < preprocessor_driver_macros.bucket_count; ++b) {
             HashMapEntry *curr = preprocessor_driver_macros.buckets[b];
             while (curr) {
@@ -491,6 +586,12 @@ int main(int argc, char **argv) {
         string_array_free(&inputs);
         string_array_free(&link_flags);
         string_array_free(&preprocessor_driver_include_dirs);
+        if (builtin_inc_dir) {
+            char rm_cmd[1024];
+            snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf '%s'", builtin_inc_dir);
+            system(rm_cmd);
+            free((void *)builtin_inc_dir);
+        }
         for (int b = 0; b < preprocessor_driver_macros.bucket_count; ++b) {
             HashMapEntry *curr = preprocessor_driver_macros.buckets[b];
             while (curr) {
@@ -528,6 +629,12 @@ int main(int argc, char **argv) {
             string_array_free(&inputs);
             string_array_free(&link_flags);
             string_array_free(&preprocessor_driver_include_dirs);
+            if (builtin_inc_dir) {
+                char rm_cmd[1024];
+                snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf '%s'", builtin_inc_dir);
+                system(rm_cmd);
+                free((void *)builtin_inc_dir);
+            }
             for (int b = 0; b < preprocessor_driver_macros.bucket_count; ++b) {
                 HashMapEntry *curr = preprocessor_driver_macros.buckets[b];
                 while (curr) {
@@ -564,6 +671,12 @@ int main(int argc, char **argv) {
             string_array_free(&inputs);
             string_array_free(&link_flags);
             string_array_free(&preprocessor_driver_include_dirs);
+            if (builtin_inc_dir) {
+                char rm_cmd[1024];
+                snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf '%s'", builtin_inc_dir);
+                system(rm_cmd);
+                free((void *)builtin_inc_dir);
+            }
             for (int b = 0; b < preprocessor_driver_macros.bucket_count; ++b) {
                 HashMapEntry *curr = preprocessor_driver_macros.buckets[b];
                 while (curr) {
@@ -593,6 +706,18 @@ int main(int argc, char **argv) {
         sb_append(&cmd, shell_quote(cc, &arena));
         sb_append(&cmd, " ");
         sb_append(&cmd, shell_quote(tmp_asm, &arena));
+
+        /* Link freestanding runtime if requested */
+        StringArray runtime_objs;
+        string_array_init(&runtime_objs);
+        if (freestanding && !nostdlib) {
+            runtime_objs = compile_freestanding_runtime(target, mcmodel, &arena);
+            for (int k = 0; k < runtime_objs.count; ++k) {
+                sb_append(&cmd, " ");
+                sb_append(&cmd, shell_quote(runtime_objs.data[k], &arena));
+            }
+        }
+
         for (int k = 0; k < link_flags.count; ++k) {
             sb_append(&cmd, " ");
             sb_append(&cmd, shell_quote(link_flags.data[k], &arena));
@@ -605,6 +730,11 @@ int main(int argc, char **argv) {
 
         int rc = system(cmd_str);
         unlink(tmp_asm);
+        /* Clean up runtime objects */
+        for (int k = 0; k < runtime_objs.count; ++k) {
+            unlink(runtime_objs.data[k]);
+        }
+        string_array_free(&runtime_objs);
         string_array_free(&inputs);
         string_array_free(&link_flags);
         string_array_free(&preprocessor_driver_include_dirs);
@@ -719,6 +849,18 @@ int main(int argc, char **argv) {
             sb_append(&link_cmd, " ");
             sb_append(&link_cmd, shell_quote(link_cmd_args.data[k], &arena));
         }
+
+        /* Link freestanding runtime if requested */
+        StringArray runtime_objs;
+        string_array_init(&runtime_objs);
+        if (freestanding && !nostdlib) {
+            runtime_objs = compile_freestanding_runtime(target, mcmodel, &arena);
+            for (int k = 0; k < runtime_objs.count; ++k) {
+                sb_append(&link_cmd, " ");
+                sb_append(&link_cmd, shell_quote(runtime_objs.data[k], &arena));
+            }
+        }
+
         for (int k = 0; k < link_flags.count; ++k) {
             sb_append(&link_cmd, " ");
             sb_append(&link_cmd, shell_quote(link_flags.data[k], &arena));
@@ -730,6 +872,11 @@ int main(int argc, char **argv) {
         sb_free(&link_cmd);
 
         int rc = system(link_cmd_str);
+        /* Clean up runtime objects */
+        for (int k = 0; k < runtime_objs.count; ++k) {
+            unlink(runtime_objs.data[k]);
+        }
+        string_array_free(&runtime_objs);
         for (int k = 0; k < temp_objects.count; ++k) {
             unlink(temp_objects.data[k]);
         }
@@ -741,6 +888,13 @@ int main(int argc, char **argv) {
     string_array_free(&inputs);
     string_array_free(&link_flags);
     string_array_free(&preprocessor_driver_include_dirs);
+    /* Clean up bundled freestanding headers temp dir */
+    if (builtin_inc_dir) {
+        char rm_cmd[1024];
+        snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf '%s'", builtin_inc_dir);
+        system(rm_cmd);
+        free((void *)builtin_inc_dir);
+    }
     for (int b = 0; b < preprocessor_driver_macros.bucket_count; ++b) {
         HashMapEntry *curr = preprocessor_driver_macros.buckets[b];
         while (curr) {

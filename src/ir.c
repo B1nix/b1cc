@@ -9,6 +9,7 @@ IrGlobalVarArray ir_global_decls;
 HashMap ir_global_vars;
 HashMap ir_global_arrays;
 HashMap ir_global_struct_vars;
+HashMap ir_global_vars_thread_local;
 HashMap ir_global_array_dims;
 HashMap ir_local_array_dims;
 HashMap ir_global_array_base_sizes;
@@ -169,6 +170,7 @@ void ir_function_array_push(IrFunctionArray *arr, const IrFunction *val) {
     arr->data[arr->count].is_static = val->is_static;
     arr->data[arr->count].return_aggregate_size = val->return_aggregate_size;
     arr->data[arr->count].return_aggregate_float_class = val->return_aggregate_float_class;
+    arr->data[arr->count].max_align = val->max_align;
     arr->count = arr->count + 1;
 }
 void ir_function_array_free(IrFunctionArray *arr) {
@@ -424,6 +426,8 @@ void ir_reset_state(void) {
 
     hashmap_free(&ir_struct_float_aggregate_classes);
     hashmap_init(&ir_struct_float_aggregate_classes, 64);
+    hashmap_free(&ir_global_vars_thread_local);
+    hashmap_init(&ir_global_vars_thread_local, 64);
 }
 
 void ir_add_global_asm(const char *asm_text) {
@@ -455,6 +459,7 @@ void ir_declare_global(const char *name, int is_array, long size, int is_static,
     v.is_extern = is_extern;
     v.elem_size = elem_size;
     v.align = 0;
+    v.is_thread_local = 0;
     ir_global_var_array_push(&ir_global_decls, &v);
 
     hashmap_put(&ir_global_vars, name, nullptr, 1);
@@ -565,6 +570,21 @@ void ir_set_local_var_is_pointer(const char *name, int val) {
 
 void ir_set_local_var_elem_scale(const char *name, int val) {
     hashmap_put(&ir_local_var_elem_scales, name, nullptr, val);
+}
+
+void ir_set_global_thread_local(const char *name, int val) {
+    hashmap_put(&ir_global_vars_thread_local, name, nullptr, val);
+    for (int i = 0; i < ir_global_decls.count; ++i) {
+        if (strcmp(ir_global_decls.data[i].name, name) == 0) {
+            ir_global_decls.data[i].is_thread_local = val;
+            break;
+        }
+    }
+}
+
+int ir_is_global_var_thread_local(const char *name) {
+    HashMapEntry *entry = hashmap_get(&ir_global_vars_thread_local, name);
+    return entry ? entry->val_int : 0;
 }
 
 int ir_get_local_var_elem_scale(const char *name) {
@@ -2125,7 +2145,32 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
             diagnostics_error(stmt->line, stmt->col, msg);
         }
         int slot = fn->locals.size;
+        if (stmt->alignment > 16) {
+            int align_slots = stmt->alignment / 16;
+            int current_idx = slot + 1;
+            int aligned_idx = (current_idx + align_slots - 1) & ~(align_slots - 1);
+            int padding = aligned_idx - current_idx;
+            for (int p_i = 0; p_i < padding; ++p_i) {
+                char pad_name[512];
+                snprintf(pad_name, sizeof(pad_name), "$padslot%d_%d", slot, p_i);
+                hashmap_put(&fn->locals, arena_strdup(arena, pad_name), nullptr, fn->locals.size);
+            }
+            slot = fn->locals.size;
+        }
+        if (stmt->alignment > fn->max_align) {
+            fn->max_align = stmt->alignment;
+        }
         hashmap_put(&fn->locals, stmt->name, nullptr, slot);
+        if (stmt->vla_dim_expr) {
+            lower_expr(stmt->vla_dim_expr, fn, backend, arena);
+            int elem_sz = stmt->elem_size;
+            if (elem_sz > 1) {
+                ir_push(fn, "const", "", elem_sz);
+                ir_push(fn, "*", "", 0);
+            }
+            ir_push(fn, "vla_alloc", "", 0);
+            ir_push(fn, "store", "", slot);
+        }
         if (stmt->type_size > 16) {
             int num_slots = (stmt->type_size + 15) / 16;
             for (int extra = 1; extra < num_slots; ++extra) {
@@ -2449,6 +2494,21 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
             diagnostics_error(stmt->line, stmt->col, msg);
         }
         int base_slot = fn->locals.size;
+        if (stmt->alignment > 16) {
+            int align_slots = stmt->alignment / 16;
+            int current_idx = base_slot + 1;
+            int aligned_idx = (current_idx + align_slots - 1) & ~(align_slots - 1);
+            int padding = aligned_idx - current_idx;
+            for (int p_i = 0; p_i < padding; ++p_i) {
+                char pad_name[512];
+                snprintf(pad_name, sizeof(pad_name), "$padslot%d_%d", base_slot, p_i);
+                hashmap_put(&fn->locals, arena_strdup(arena, pad_name), nullptr, fn->locals.size);
+            }
+            base_slot = fn->locals.size;
+        }
+        if (stmt->alignment > fn->max_align) {
+            fn->max_align = stmt->alignment;
+        }
         hashmap_put(&fn->locals, stmt->name, nullptr, base_slot);
         
         char local_key[512];
@@ -2599,6 +2659,7 @@ static void lower_func(const Node *ast, TargetBackend *backend, Arena *arena, Ir
     fn->is_static = ast->is_static;
     fn->return_aggregate_size = ast->aggregate_size;
     fn->return_aggregate_float_class = ast->aggregate_float_class;
+    fn->max_align = 16;
 
     for (int k = 0; k < fn->params.count; ++k) {
         const char *param = fn->params.data[k];

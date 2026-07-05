@@ -177,6 +177,24 @@ echo "ok m7_macro"
 grep -qx "1 2" "$tmp/m7_varargs_printf.out"
 echo "ok m7_varargs_printf"
 
+# M30: Freestanding headers test
+./build/b1cc tests/m30_freestanding_headers.c -o "$tmp/m30_freestanding_headers"
+set +e
+"$tmp/m30_freestanding_headers"
+rc=$?
+set -e
+test "$rc" = "0"
+echo "ok m30_freestanding_headers"
+
+# M30: Freestanding runtime test (using -ffreestanding to link runtime)
+./build/b1cc tests/m30_freestanding_runtime.c -ffreestanding -o "$tmp/m30_freestanding_runtime"
+set +e
+"$tmp/m30_freestanding_runtime"
+rc=$?
+set -e
+test "$rc" = "0"
+echo "ok m30_freestanding_runtime"
+
 if [ -f ../b1nix/userspace/bin/b1cc_hello.c ]; then
   ./build/b1cc ../b1nix/userspace/bin/b1cc_hello.c -o "$tmp/b1nix_b1cc_hello"
   "$tmp/b1nix_b1cc_hello" > "$tmp/b1nix_b1cc_hello.out"
@@ -1097,9 +1115,10 @@ echo "building b1cc_self using b1cc..."
 ./build/b1cc src/macho_writer.c -c -o "$tmp/macho_writer_self.o"
 ./build/b1cc src/parser.c -c -o "$tmp/parser_self.o"
 ./build/b1cc src/preprocessor.c -c -o "$tmp/preprocessor_self.o"
+./build/b1cc src/builtin_headers.c -c -o "$tmp/builtin_headers_self.o"
 
 # Link self-hosted binary
-cc "$tmp"/ast_self.o "$tmp"/b1cc_self.o "$tmp"/backend_self.o "$tmp"/backend_arm64_self.o "$tmp"/backend_x86_64_self.o "$tmp"/backend_i386_self.o "$tmp"/common_self.o "$tmp"/diagnostics_self.o "$tmp"/elf_writer_self.o "$tmp"/ir_self.o "$tmp"/lexer_self.o "$tmp"/macho_writer_self.o "$tmp"/parser_self.o "$tmp"/preprocessor_self.o -o "$tmp/b1cc_self"
+cc "$tmp"/ast_self.o "$tmp"/b1cc_self.o "$tmp"/backend_self.o "$tmp"/backend_arm64_self.o "$tmp"/backend_x86_64_self.o "$tmp"/backend_i386_self.o "$tmp"/common_self.o "$tmp"/diagnostics_self.o "$tmp"/elf_writer_self.o "$tmp"/ir_self.o "$tmp"/lexer_self.o "$tmp"/macho_writer_self.o "$tmp"/parser_self.o "$tmp"/preprocessor_self.o "$tmp"/builtin_headers_self.o -o "$tmp/b1cc_self"
 test -s "$tmp/b1cc_self"
 echo "ok self_hosted_binary_build"
 
@@ -1789,3 +1808,60 @@ rc=$?
 set -e
 test "$rc" = 42
 echo "ok m28_local_union_array_initializer"
+
+# M29: C99 and C11 Standards Compliance Gaps
+./build/b1cc tests/m29_hex_float.c -o "$tmp/m29_hex_float"
+set +e
+"$tmp/m29_hex_float"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok m29_hex_float"
+
+./build/b1cc tests/m29_alignas.c -o "$tmp/m29_alignas"
+set +e
+"$tmp/m29_alignas"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok m29_alignas"
+
+./build/b1cc tests/m29_thread_local.c -o "$tmp/m29_thread_local"
+set +e
+"$tmp/m29_thread_local"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok m29_thread_local"
+
+./build/b1cc tests/m29_vla.c -o "$tmp/m29_vla"
+set +e
+"$tmp/m29_vla"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok m29_vla"
+
+./build/b1cc tests/m29_complex_atomic.c -o "$tmp/m29_complex_atomic"
+set +e
+"$tmp/m29_complex_atomic"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok m29_complex_atomic"
+
+./build/b1cc tests/m29_flexible_array.c -o "$tmp/m29_flexible_array"
+set +e
+"$tmp/m29_flexible_array"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok m29_flexible_array"
+
+./build/b1cc tests/m29_atomic_ops.c -o "$tmp/m29_atomic_ops"
+set +e
+"$tmp/m29_atomic_ops"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok m29_atomic_ops"

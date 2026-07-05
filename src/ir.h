@@ -30,6 +30,7 @@ typedef struct {
     int is_extern;
     int elem_size;
     int align;
+    int is_thread_local;
 } IrGlobalVar;
 
 typedef struct {
@@ -73,6 +74,7 @@ typedef struct {
     int is_static;
     int return_aggregate_size;
     int return_aggregate_float_class;
+    int max_align;
 } IrFunction;
 
 typedef struct {
@@ -109,6 +111,8 @@ int ir_get_local_var_elem_scale(const char *name);
 int ir_get_global_var_elem_scale(const char *name);
 void ir_set_global_var_is_pointer(const char *name, int val);
 void ir_set_global_var_elem_scale(const char *name, int val);
+void ir_set_global_thread_local(const char *name, int val);
+int ir_is_global_var_thread_local(const char *name);
 
 
 void ir_set_var_unsigned(const char *name, int val);

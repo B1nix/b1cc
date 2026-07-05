@@ -56,13 +56,31 @@ static const char *x86_64_emit_globals(TargetBackend *self, const IrGlobalVarArr
 
     StringBuilder out;
     sb_init(&out);
-    sb_append(&out, ".data\n");
 
     for (int i = 0; i < globals->count; ++i) {
         const IrGlobalVar *g = &globals->data[i];
         if (g->is_extern && g->initializers.count == 0) {
             continue;
         }
+        
+        int is_zero = 1;
+        for (int k = 0; k < g->initializers.count; ++k) {
+            if (g->initializers.data[k] != 0) {
+                is_zero = 0;
+                break;
+            }
+        }
+        
+        if (g->is_thread_local) {
+            if (is_zero) {
+                sb_append(&out, ".section .tbss,\"awT\",@nobits\n");
+            } else {
+                sb_append(&out, ".section .tdata,\"awT\",@progbits\n");
+            }
+        } else {
+            sb_append(&out, ".data\n");
+        }
+
         if (!g->is_static) {
             sb_appendf(&out, ".globl %s\n", g->name);
         }
@@ -76,7 +94,9 @@ static const char *x86_64_emit_globals(TargetBackend *self, const IrGlobalVarArr
         sb_appendf(&out, ".p2align %d\n", align);
         sb_appendf(&out, "%s:\n", g->name);
 
-        if (g->is_array || g->initializers.count > 1) {
+        if (g->is_thread_local && (g->initializers.count == 0 || is_zero)) {
+            sb_appendf(&out, "    .zero %ld\n", total_bytes);
+        } else if (g->is_array || g->initializers.count > 1) {
             int k = 0;
             while (k < g->initializers.count) {
                 if (g->initializer_is_string.count > k && g->initializer_is_string.data[k]) {
@@ -186,12 +206,29 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
     if (is_vararg) {
         local_slots += 3;
     }
-    int frame = fn->has_call || (local_slots > 0);
+    int has_custom_align = (fn->max_align > 16);
+    int save_rsp_slot = -1;
+    if (has_custom_align) {
+        save_rsp_slot = local_slots;
+        local_slots++;
+    }
+    int frame = fn->has_call || (local_slots > 0) || has_custom_align;
     if (frame) {
         sb_append(&out, "    pushq %rbp\n");
-        sb_append(&out, "    movq %rsp, %rbp\n");
+        if (has_custom_align) {
+            sb_append(&out, "    movq %rsp, %r11\n");
+            sb_appendf(&out, "    andq $-%d, %%rsp\n", fn->max_align);
+            sb_append(&out, "    movq %rsp, %rbp\n");
+        } else {
+            sb_append(&out, "    movq %rsp, %rbp\n");
+        }
         if (local_slots > 0) {
-            sb_appendf(&out, "    subq $%d, %%rsp\n", local_slots * 16);
+            int align_sz = has_custom_align ? fn->max_align : 16;
+            int stack_bytes = (local_slots * 16 + align_sz - 1) & ~(align_sz - 1);
+            sb_appendf(&out, "    subq $%d, %%rsp\n", stack_bytes);
+            if (has_custom_align) {
+                sb_appendf(&out, "    movq %%r11, -%d(%%rbp)\n", (save_rsp_slot + 1) * 16);
+            }
         }
         if (is_vararg) {
             int base_off = -(local_slots_before * 16);
@@ -368,6 +405,13 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
             sb_append(&out, "    pushq %rax\n");
         } else if (strcmp(inst->op, "pop") == 0) {
             sb_append(&out, "    addq $8, %rsp\n");
+        } else if (strcmp(inst->op, "vla_alloc") == 0) {
+            sb_append(&out, "    popq %rax\n");
+            sb_append(&out, "    addq $15, %rax\n");
+            sb_append(&out, "    andq $-16, %rax\n");
+            sb_append(&out, "    subq %rax, %rsp\n");
+            sb_append(&out, "    movq %rsp, %rax\n");
+            sb_append(&out, "    pushq %rax\n");
         } else if (strcmp(inst->op, "load_addr") == 0) {
             sb_append(&out, "    popq %rax\n");
             if (inst->value == 1) {
@@ -381,7 +425,9 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
             }
             sb_append(&out, "    pushq %rax\n");
         } else if (strcmp(inst->op, "+") == 0 || strcmp(inst->op, "-") == 0 || strcmp(inst->op, "*") == 0 ||
-                   strcmp(inst->op, "/") == 0 || strcmp(inst->op, "%") == 0 || strcmp(inst->op, "==") == 0 || strcmp(inst->op, "!=") == 0 ||
+                   strcmp(inst->op, "/") == 0 || strcmp(inst->op, "%") == 0 ||
+                   strcmp(inst->op, "u/") == 0 || strcmp(inst->op, "u%") == 0 ||
+                   strcmp(inst->op, "==") == 0 || strcmp(inst->op, "!=") == 0 ||
                    strcmp(inst->op, "<") == 0 || strcmp(inst->op, ">") == 0 || strcmp(inst->op, "<=") == 0 ||
                    strcmp(inst->op, "u<") == 0 || strcmp(inst->op, "u>") == 0 || strcmp(inst->op, "u<=") == 0 ||
                    strcmp(inst->op, "u>=") == 0 || strcmp(inst->op, "u>>") == 0 ||
@@ -413,6 +459,13 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
             } else if (strcmp(inst->op, "%") == 0) {
                 sb_append(&out, "    cqto\n");
                 sb_append(&out, "    idivq %rcx\n");
+                sb_append(&out, "    movq %rdx, %rax\n");
+            } else if (strcmp(inst->op, "u/") == 0) {
+                sb_append(&out, "    xorq %rdx, %rdx\n");
+                sb_append(&out, "    divq %rcx\n");
+            } else if (strcmp(inst->op, "u%") == 0) {
+                sb_append(&out, "    xorq %rdx, %rdx\n");
+                sb_append(&out, "    divq %rcx\n");
                 sb_append(&out, "    movq %rdx, %rax\n");
             } else if (strcmp(inst->op, "&") == 0)
                 sb_append(&out, "    andq %rcx, %rax\n");
@@ -819,7 +872,26 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
             if (gsize == 0) gsize = 8;
             int g_is_unsigned = ir_get_var_unsigned(inst->arg);
 
-            if (ir_pic_mode) {
+            if (ir_is_global_var_thread_local(inst->arg)) {
+                sb_append(&out, "    movq %fs:0, %rcx\n");
+                if (gsize == 1) {
+                    if (g_is_unsigned)
+                        sb_appendf(&out, "    movzbl %s@tpoff(%%rcx), %%eax\n", inst->arg);
+                    else
+                        sb_appendf(&out, "    movsbl %s@tpoff(%%rcx), %%eax\n", inst->arg);
+                } else if (gsize == 2) {
+                    if (g_is_unsigned)
+                        sb_appendf(&out, "    movzwq %s@tpoff(%%rcx), %%rax\n", inst->arg);
+                    else
+                        sb_appendf(&out, "    movswq %s@tpoff(%%rcx), %%rax\n", inst->arg);
+                } else if (gsize == 4) {
+                    if (g_is_unsigned)
+                        sb_appendf(&out, "    movl %s@tpoff(%%rcx), %%eax\n", inst->arg);
+                    else
+                        sb_appendf(&out, "    movslq %s@tpoff(%%rcx), %%rax\n", inst->arg);
+                } else
+                    sb_appendf(&out, "    movq %s@tpoff(%%rcx), %%rax\n", inst->arg);
+            } else if (ir_pic_mode) {
                 sb_appendf(&out, "    movq %s@GOTPCREL(%%rip), %%rcx\n", inst->arg);
                 if (gsize == 1) {
                     if (g_is_unsigned)
@@ -883,7 +955,17 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
             int gsize = ir_get_global_storage_size(inst->arg);
             if (gsize == 0) gsize = 8;
 
-            if (ir_pic_mode) {
+            if (ir_is_global_var_thread_local(inst->arg)) {
+                sb_append(&out, "    movq %fs:0, %rcx\n");
+                if (gsize == 1)
+                    sb_appendf(&out, "    movb %%al, %s@tpoff(%%rcx)\n", inst->arg);
+                else if (gsize == 2)
+                    sb_appendf(&out, "    movw %%ax, %s@tpoff(%%rcx)\n", inst->arg);
+                else if (gsize == 4)
+                    sb_appendf(&out, "    movl %%eax, %s@tpoff(%%rcx)\n", inst->arg);
+                else
+                    sb_appendf(&out, "    movq %%rax, %s@tpoff(%%rcx)\n", inst->arg);
+            } else if (ir_pic_mode) {
                 sb_appendf(&out, "    movq %s@GOTPCREL(%%rip), %%rcx\n", inst->arg);
                 if (gsize == 1)
                     sb_append(&out, "    movb %al, (%rcx)\n");
@@ -915,7 +997,10 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                     sb_appendf(&out, "    movq %%rax, %s(%%rip)\n", inst->arg);
             }
         } else if (strcmp(inst->op, "gaddr") == 0) {
-            if (ir_pic_mode) {
+            if (ir_is_global_var_thread_local(inst->arg)) {
+                sb_append(&out, "    movq %fs:0, %rax\n");
+                sb_appendf(&out, "    leaq %s@tpoff(%%rax), %%rax\n", inst->arg);
+            } else if (ir_pic_mode) {
                 sb_appendf(&out, "    movq %s@GOTPCREL(%%rip), %%rax\n", inst->arg);
             } else if (ir_code_model == 1) {
                 /* Kernel model: absolute address (data may be >2GB from code) */
@@ -987,13 +1072,19 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                     sb_append(&out, "    movq 8(%r10), %rdx\n");
                 }
             }
-            if (frame) {
+            if (has_custom_align) {
+                sb_appendf(&out, "    movq -%d(%%rbp), %%rsp\n", (save_rsp_slot + 1) * 16);
+                sb_append(&out, "    popq %rbp\n");
+            } else if (frame) {
                 sb_append(&out, "    leave\n");
             }
             sb_append(&out, "    ret\n");
         } else if (strcmp(inst->op, "ret") == 0) {
             sb_append(&out, "    popq %rax\n");
-            if (frame) {
+            if (has_custom_align) {
+                sb_appendf(&out, "    movq -%d(%%rbp), %%rsp\n", (save_rsp_slot + 1) * 16);
+                sb_append(&out, "    popq %rbp\n");
+            } else if (frame) {
                 sb_append(&out, "    leave\n");
             }
             sb_append(&out, "    ret\n");
@@ -1088,7 +1179,14 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
         } else if (strcmp(inst->op, "fgload") == 0) {
             int gsize = ir_get_global_storage_size(inst->arg);
             if (gsize == 0) gsize = 8;
-            if (ir_pic_mode) {
+            if (ir_is_global_var_thread_local(inst->arg)) {
+                sb_append(&out, "    movq %fs:0, %rcx\n");
+                if (gsize == 4) {
+                    sb_appendf(&out, "    cvtss2sd %s@tpoff(%%rcx), %%xmm0\n", inst->arg);
+                } else {
+                    sb_appendf(&out, "    movsd %s@tpoff(%%rcx), %%xmm0\n", inst->arg);
+                }
+            } else if (ir_pic_mode) {
                 sb_appendf(&out, "    movq %s@GOTPCREL(%%rip), %%rcx\n", inst->arg);
                 if (gsize == 4) {
                     sb_append(&out, "    cvtss2sd (%rcx), %xmm0\n");
@@ -1117,7 +1215,15 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
             if (gsize == 0) gsize = 8;
             sb_append(&out, "    movsd (%rsp), %xmm0\n");
             sb_append(&out, "    addq $8, %rsp\n");
-            if (ir_pic_mode) {
+            if (ir_is_global_var_thread_local(inst->arg)) {
+                sb_append(&out, "    movq %fs:0, %rcx\n");
+                if (gsize == 4) {
+                    sb_append(&out, "    cvtsd2ss %xmm0, %xmm0\n");
+                    sb_appendf(&out, "    movss %%xmm0, %s@tpoff(%%rcx)\n", inst->arg);
+                } else {
+                    sb_appendf(&out, "    movsd %%xmm0, %s@tpoff(%%rcx)\n", inst->arg);
+                }
+            } else if (ir_pic_mode) {
                 sb_appendf(&out, "    movq %s@GOTPCREL(%%rip), %%rcx\n", inst->arg);
                 if (gsize == 4) {
                     sb_append(&out, "    cvtsd2ss %xmm0, %xmm0\n");

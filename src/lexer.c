@@ -120,6 +120,23 @@ TokenArray lex(const char *src, HashMap *macros, HashMap *active_macros, Arena *
                 while (i < src_len && is_xdigit(src[i])) {
                     CONSUME(1);
                 }
+                if (i < src_len && src[i] == '.') {
+                    is_float = 1;
+                    CONSUME(1);
+                    while (i < src_len && is_xdigit(src[i])) {
+                        CONSUME(1);
+                    }
+                }
+                if (i < src_len && (src[i] == 'p' || src[i] == 'P')) {
+                    is_float = 1;
+                    CONSUME(1);
+                    if (i < src_len && (src[i] == '+' || src[i] == '-')) {
+                        CONSUME(1);
+                    }
+                    while (i < src_len && is_digit(src[i])) {
+                        CONSUME(1);
+                    }
+                }
             } else {
                 while (i < src_len && is_digit(src[i])) {
                     CONSUME(1);

@@ -365,3 +365,20 @@ M28 validation log:
 - Focused M28 fixes added regression coverage for comma lvalues/aggregate values, local/global pointer arrays, narrow local reload signedness, comma-wrapped aggregate calls, unsigned long long initializers, large hex LL unsigned comparisons, bitfield initializer packing/sign extension/union sizing, unsigned equality conversion, unsigned 64-bit modulo, bitwise usual conversions, unsigned integer casts feeding modulo, and local union array initializer stride.
 
 Skipped: full C/C++ upfront. Add features only when a test or B1NIX source needs them.
+
+## M29: C99 and C11 Standards Compliance Gaps
+
+- [x] Implement dynamic runtime stack allocation for Variable-Length Arrays (VLAs) instead of the static fallback. ARM64 and x86_64 support `vla_alloc` IR; i386 support pending.
+- [x] Support parsing hexadecimal floating-point constants (e.g. `0x1.5p3`) in the lexer.
+- [x] Support alignment specifiers (`_Alignas` / `alignas`) in declarations. Global alignment is fully supported; local alignment support is limited to the stack frame alignment (sp).
+- [x] Support Thread-Local Storage (`_Thread_local` / `thread_local`) with compiler-generated thread-local segments and relocations. x86_64 B1NIX uses `%fs:0` / `@tpoff` model; ARM64 Darwin uses TLV descriptors with `__DATA,__thread_data` / `__DATA,__thread_vars` sections. i386 B1NIX pending.
+- [x] Support atomic operations (`_Atomic` / `<stdatomic.h>`) by generating platform-specific atomic/locked instructions. `_Atomic` qualifier is parsed and tolerated; `sizeof(_Atomic T) == sizeof(T)` holds. No platform-specific locked instructions (single-threaded semantics only).
+- [x] Support complex and imaginary types (`_Complex`, `_Imaginary`) in parser. Parser recognizes `_Complex`/`_Imaginary` and doubles the base type size. No backend complex arithmetic.
+- [x] Conforming layout and size rules for flexible array members in structures.
+
+## M30: Standard Library & Freestanding Self-Sufficiency
+
+- [x] Bundle freestanding standard C headers (`<stddef.h>`, `<stdint.h>`, `<stdbool.h>`, `<stdarg.h>`) directly with `b1cc`. Headers are embedded in the compiler binary via `src/builtin_headers.c` and written to a temp directory at startup. The bundled headers shadow system headers and provide standard types (`size_t`, `ptrdiff_t`, `int32_t`, `uint64_t`, `bool`, etc.) under `#ifdef __b1cc__`.
+- [x] Implement internal or static library compiler-runtime helpers (like `__divdi3` / `__moddi3`) for division/modulo operations. `runtime/divdi3.c` provides signed/unsigned 64-bit software division and modulo for 32-bit targets (i386), covering `__divdi3`, `__moddi3`, `__udivdi3`, and `__umoddi3`.
+- [x] Provide a minimal self-sufficient runtime/libc layer (implementing `memcpy`, `memset`, `memmove`, `strlen`, etc.) to eliminate dependency on host/external `libc`. `runtime/runtime.c` provides `memcpy`, `memmove`, `memset`, `memcmp`, `strlen`, `strcmp`, `strncmp`, `strcpy`, `strcat`, `strchr`, `strrchr`, `strstr`, `snprintf`, `sprintf`, `atol`, `atoi`, `abort`, and `exit`.
+- [x] Support compiling and static-linking standalone / bare-metal binaries without host linker requirements. The driver accepts `-ffreestanding` to auto-compile and link the runtime helpers, and `-nostdlib` to skip runtime linking. For ELF targets (B1NIX/kernel), runtime is compiled via b1cc's native ELF writer; for Darwin, the host `cc` compiles the runtime objects.

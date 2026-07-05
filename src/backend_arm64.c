@@ -149,13 +149,28 @@ static const char *arm64_emit_globals(TargetBackend *self, const IrGlobalVarArra
 
     StringBuilder out;
     sb_init(&out);
-    sb_append(&out, ".data\n");
 
     for (int i = 0; i < globals->count; ++i) {
         const IrGlobalVar *g = &globals->data[i];
         if (g->is_extern && g->initializers.count == 0) {
             continue;
         }
+
+        int is_zero = 1;
+        for (int k = 0; k < g->initializers.count; ++k) {
+            if (g->initializers.data[k] != 0) { is_zero = 0; break; }
+        }
+
+        if (g->is_thread_local) {
+            if (g->initializers.count == 0 || is_zero) {
+                sb_append(&out, ".section __DATA,__thread_bss,thread_local_regular\n");
+            } else {
+                sb_append(&out, ".section __DATA,__thread_data,thread_local_regular\n");
+            }
+        } else {
+            sb_append(&out, ".data\n");
+        }
+
         if (!g->is_static) {
             sb_appendf(&out, ".globl _%s\n", g->name);
         }
@@ -164,7 +179,11 @@ static const char *arm64_emit_globals(TargetBackend *self, const IrGlobalVarArra
             align = (g->elem_size == 8) ? 3 : (g->elem_size == 4) ? 2 : (g->elem_size == 2) ? 1 : 0;
         }
         sb_appendf(&out, ".p2align %d\n", align);
-        sb_appendf(&out, "_%s:\n", g->name);
+        if (g->is_thread_local) {
+            sb_appendf(&out, "_%s$tlv$init:\n", g->name);
+        } else {
+            sb_appendf(&out, "_%s:\n", g->name);
+        }
 
         if (g->is_array || g->initializers.count > 1) {
             int k = 0;
@@ -209,8 +228,12 @@ static const char *arm64_emit_globals(TargetBackend *self, const IrGlobalVarArra
                     sb_appendf(&out, "    .short %d\n", (int)(val & 0xffff));
                 else if (g->elem_size == 4)
                     sb_appendf(&out, "    .long %ld\n", val);
-                else
+                else if (g->elem_size == 8)
                     sb_appendf(&out, "    .quad %ld\n", val);
+                else if (g->elem_size > 8) {
+                    sb_appendf(&out, "    .quad %ld\n", val);
+                    sb_appendf(&out, "    .zero %d\n", g->elem_size - 8);
+                }
             }
         }
     }
@@ -236,7 +259,29 @@ static const char *arm64_emit_globals(TargetBackend *self, const IrGlobalVarArra
         }
     }
     sb_append(&out, "\n");
-    
+
+    int has_any_tls = 0;
+    for (int i = 0; i < globals->count; ++i) {
+        if (globals->data[i].is_thread_local && !globals->data[i].is_extern) {
+            has_any_tls = 1;
+            break;
+        }
+    }
+    if (has_any_tls) {
+        sb_append(&out, ".section __DATA,__thread_vars,thread_local_variables\n");
+        for (int i = 0; i < globals->count; ++i) {
+            const IrGlobalVar *g = &globals->data[i];
+            if (!g->is_thread_local || g->is_extern) continue;
+            if (!g->is_static) {
+                sb_appendf(&out, ".globl _%s\n", g->name);
+            }
+            sb_appendf(&out, "_%s:\n", g->name);
+            sb_append(&out, "    .quad __tlv_bootstrap\n");
+            sb_append(&out, "    .quad 0\n");
+            sb_appendf(&out, "    .quad _%s$tlv$init\n", g->name);
+        }
+    }
+
     const char *res = sb_to_string(&out, arena);
     sb_free(&out);
     return res;
@@ -269,12 +314,34 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
     }
     local_slots += call_ret_slots;
 
-    int frame = fn->has_call || (local_slots > 0);
+    int has_custom_align = (fn->max_align > 16);
+    int save_rsp_slot = -1;
+    if (has_custom_align) {
+        save_rsp_slot = local_slots;
+        local_slots++;
+    }
+    int frame = fn->has_call || (local_slots > 0) || has_custom_align;
     if (frame) {
         sb_append(&out, "    stp x29, x30, [sp, #-16]!\n");
-        sb_append(&out, "    mov x29, sp\n");
+        if (has_custom_align) {
+            sb_append(&out, "    mov x11, sp\n");
+            int align_log = 0;
+            int tmp = fn->max_align;
+            while (tmp > 1) { tmp >>= 1; align_log++; }
+            sb_appendf(&out, "    lsr x11, x11, #%d\n", align_log);
+            sb_appendf(&out, "    lsl x11, x11, #%d\n", align_log);
+            sb_append(&out, "    mov sp, x11\n");
+            sb_append(&out, "    mov x29, sp\n");
+        } else {
+            sb_append(&out, "    mov x29, sp\n");
+        }
         if (local_slots > 0) {
-            emit_sub_imm(&out, "sp", "sp", local_slots * 16);
+            int align_sz = has_custom_align ? fn->max_align : 16;
+            int stack_bytes = (local_slots * 16 + align_sz - 1) & ~(align_sz - 1);
+            emit_sub_imm(&out, "sp", "sp", stack_bytes);
+            if (has_custom_align) {
+                sb_appendf(&out, "    str x11, [x29, #-%d]\n", (save_rsp_slot + 1) * 16);
+            }
         }
         if (indirect_ret) {
             int off = -((fn->locals.size + 1) * 16);
@@ -477,6 +544,13 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
             sb_append(&out, "    str x0, [sp, #-16]!\n");
         } else if (strcmp(inst->op, "pop") == 0) {
             sb_append(&out, "    add sp, sp, #16\n");
+        } else if (strcmp(inst->op, "vla_alloc") == 0) {
+            sb_append(&out, "    ldr x0, [sp], #16\n");
+            sb_append(&out, "    add x0, x0, #15\n");
+            sb_append(&out, "    and x0, x0, #~15\n");
+            sb_append(&out, "    sub sp, sp, x0\n");
+            sb_append(&out, "    mov x0, sp\n");
+            sb_append(&out, "    str x0, [sp, #-16]!\n");
         } else if (strcmp(inst->op, "load_addr") == 0) {
             sb_append(&out, "    ldr x0, [sp], #16\n");
             if (inst->value == 1) {
@@ -962,7 +1036,30 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
             if (gsize == 0) gsize = 8;
 
             int g_is_unsigned = ir_get_var_unsigned(inst->arg);
-            if (is_defined_global(inst->arg)) {
+            if (ir_is_global_var_thread_local(inst->arg)) {
+                sb_appendf(&out, "    adrp x0, _%s@TLVPPAGE\n", inst->arg);
+                sb_appendf(&out, "    ldr x0, [x0, _%s@TLVPPAGEOFF]\n", inst->arg);
+                sb_append(&out, "    ldr x8, [x0]\n");
+                sb_append(&out, "    blr x8\n");
+                if (gsize == 1) {
+                    if (g_is_unsigned)
+                        sb_append(&out, "    ldrb w0, [x0]\n");
+                    else
+                        sb_append(&out, "    ldrsb x0, [x0]\n");
+                } else if (gsize == 2) {
+                    if (g_is_unsigned)
+                        sb_append(&out, "    ldrh w0, [x0]\n");
+                    else
+                        sb_append(&out, "    ldrsh x0, [x0]\n");
+                } else if (gsize == 4) {
+                    if (g_is_unsigned)
+                        sb_append(&out, "    ldr w0, [x0]\n");
+                    else
+                        sb_append(&out, "    ldrsw x0, [x0]\n");
+                } else {
+                    sb_append(&out, "    ldr x0, [x0]\n");
+                }
+            } else if (is_defined_global(inst->arg)) {
                 sb_appendf(&out, "    adrp x0, _%s@PAGE\n", inst->arg);
                 if (gsize == 1) {
                     if (g_is_unsigned)
@@ -1010,7 +1107,22 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
             int gsize = ir_get_global_storage_size(inst->arg);
             if (gsize == 0) gsize = 8;
 
-            if (is_defined_global(inst->arg)) {
+            if (ir_is_global_var_thread_local(inst->arg)) {
+                sb_append(&out, "    mov x2, x0\n");
+                sb_appendf(&out, "    adrp x0, _%s@TLVPPAGE\n", inst->arg);
+                sb_appendf(&out, "    ldr x0, [x0, _%s@TLVPPAGEOFF]\n", inst->arg);
+                sb_append(&out, "    ldr x8, [x0]\n");
+                sb_append(&out, "    blr x8\n");
+                if (gsize == 1) {
+                    sb_append(&out, "    strb w2, [x0]\n");
+                } else if (gsize == 2) {
+                    sb_append(&out, "    strh w2, [x0]\n");
+                } else if (gsize == 4) {
+                    sb_append(&out, "    str w2, [x0]\n");
+                } else {
+                    sb_append(&out, "    str x2, [x0]\n");
+                }
+            } else if (is_defined_global(inst->arg)) {
                 sb_appendf(&out, "    adrp x1, _%s@PAGE\n", inst->arg);
                 if (gsize == 1) {
                     sb_appendf(&out, "    strb w0, [x1, _%s@PAGEOFF]\n", inst->arg);
@@ -1035,7 +1147,12 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                 }
             }
         } else if (strcmp(inst->op, "gaddr") == 0) {
-            if (is_defined_global(inst->arg)) {
+            if (ir_is_global_var_thread_local(inst->arg)) {
+                sb_appendf(&out, "    adrp x0, _%s@TLVPPAGE\n", inst->arg);
+                sb_appendf(&out, "    ldr x0, [x0, _%s@TLVPPAGEOFF]\n", inst->arg);
+                sb_append(&out, "    ldr x8, [x0]\n");
+                sb_append(&out, "    blr x8\n");
+            } else if (is_defined_global(inst->arg)) {
                 sb_appendf(&out, "    adrp x0, _%s@PAGE\n", inst->arg);
                 sb_appendf(&out, "    add x0, x0, _%s@PAGEOFF\n", inst->arg);
             } else {
@@ -1113,14 +1230,22 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                     sb_append(&out, "    ldr x1, [x9, #8]\n");
                 }
             }
-            if (frame) {
+            if (has_custom_align) {
+                sb_appendf(&out, "    ldr x11, [x29, #-%d]\n", (save_rsp_slot + 1) * 16);
+                sb_append(&out, "    mov sp, x11\n");
+                sb_append(&out, "    ldp x29, x30, [sp], #16\n");
+            } else if (frame) {
                 sb_append(&out, "    mov sp, x29\n");
                 sb_append(&out, "    ldp x29, x30, [sp], #16\n");
             }
             sb_append(&out, "    ret\n");
         } else if (strcmp(inst->op, "ret") == 0) {
             sb_append(&out, "    ldr x0, [sp], #16\n");
-            if (frame) {
+            if (has_custom_align) {
+                sb_appendf(&out, "    ldr x11, [x29, #-%d]\n", (save_rsp_slot + 1) * 16);
+                sb_append(&out, "    mov sp, x11\n");
+                sb_append(&out, "    ldp x29, x30, [sp], #16\n");
+            } else if (frame) {
                 sb_append(&out, "    mov sp, x29\n");
                 sb_append(&out, "    ldp x29, x30, [sp], #16\n");
             }
@@ -1221,36 +1346,66 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
         } else if (strcmp(inst->op, "fgload") == 0) {
             int gsize = ir_get_global_storage_size(inst->arg);
             if (gsize == 0) gsize = 8;
-            if (is_defined_global(inst->arg)) {
+            if (ir_is_global_var_thread_local(inst->arg)) {
+                sb_appendf(&out, "    adrp x0, _%s@TLVPPAGE\n", inst->arg);
+                sb_appendf(&out, "    ldr x0, [x0, _%s@TLVPPAGEOFF]\n", inst->arg);
+                sb_append(&out, "    ldr x8, [x0]\n");
+                sb_append(&out, "    blr x8\n");
+                if (gsize == 4) {
+                    sb_append(&out, "    ldr s0, [x0]\n");
+                    sb_append(&out, "    fcvt d0, s0\n");
+                } else {
+                    sb_append(&out, "    ldr d0, [x0]\n");
+                }
+            } else if (is_defined_global(inst->arg)) {
                 sb_appendf(&out, "    adrp x1, _%s@PAGE\n", inst->arg);
                 sb_appendf(&out, "    add x1, x1, _%s@PAGEOFF\n", inst->arg);
+                if (gsize == 4) {
+                    sb_append(&out, "    ldr s0, [x1]\n");
+                    sb_append(&out, "    fcvt d0, s0\n");
+                } else {
+                    sb_append(&out, "    ldr d0, [x1]\n");
+                }
             } else {
                 sb_appendf(&out, "    adrp x1, _%s@GOTPAGE\n", inst->arg);
                 sb_appendf(&out, "    ldr x1, [x1, _%s@GOTPAGEOFF]\n", inst->arg);
-            }
-            if (gsize == 4) {
-                sb_append(&out, "    ldr s0, [x1]\n");
-                sb_append(&out, "    fcvt d0, s0\n");
-            } else {
-                sb_append(&out, "    ldr d0, [x1]\n");
+                if (gsize == 4) {
+                    sb_append(&out, "    ldr s0, [x1]\n");
+                    sb_append(&out, "    fcvt d0, s0\n");
+                } else {
+                    sb_append(&out, "    ldr d0, [x1]\n");
+                }
             }
             sb_append(&out, "    str d0, [sp, #-16]!\n");
         } else if (strcmp(inst->op, "fgstore") == 0) {
             int gsize = ir_get_global_storage_size(inst->arg);
             if (gsize == 0) gsize = 8;
             sb_append(&out, "    ldr d0, [sp], #16\n");
-            if (is_defined_global(inst->arg)) {
-                sb_appendf(&out, "    adrp x1, _%s@PAGE\n", inst->arg);
-                sb_appendf(&out, "    add x1, x1, _%s@PAGEOFF\n", inst->arg);
+            if (ir_is_global_var_thread_local(inst->arg)) {
+                sb_appendf(&out, "    adrp x0, _%s@TLVPPAGE\n", inst->arg);
+                sb_appendf(&out, "    ldr x0, [x0, _%s@TLVPPAGEOFF]\n", inst->arg);
+                sb_append(&out, "    ldr x8, [x0]\n");
+                sb_append(&out, "    blr x8\n");
+                if (gsize == 4) {
+                    sb_append(&out, "    fcvt s0, d0\n");
+                    sb_append(&out, "    str s0, [x0]\n");
+                } else {
+                    sb_append(&out, "    str d0, [x0]\n");
+                }
             } else {
-                sb_appendf(&out, "    adrp x1, _%s@GOTPAGE\n", inst->arg);
-                sb_appendf(&out, "    ldr x1, [x1, _%s@GOTPAGEOFF]\n", inst->arg);
-            }
-            if (gsize == 4) {
-                sb_append(&out, "    fcvt s0, d0\n");
-                sb_append(&out, "    str s0, [x1]\n");
-            } else {
-                sb_append(&out, "    str d0, [x1]\n");
+                if (is_defined_global(inst->arg)) {
+                    sb_appendf(&out, "    adrp x1, _%s@PAGE\n", inst->arg);
+                    sb_appendf(&out, "    add x1, x1, _%s@PAGEOFF\n", inst->arg);
+                } else {
+                    sb_appendf(&out, "    adrp x1, _%s@GOTPAGE\n", inst->arg);
+                    sb_appendf(&out, "    ldr x1, [x1, _%s@GOTPAGEOFF]\n", inst->arg);
+                }
+                if (gsize == 4) {
+                    sb_append(&out, "    fcvt s0, d0\n");
+                    sb_append(&out, "    str s0, [x1]\n");
+                } else {
+                    sb_append(&out, "    str d0, [x1]\n");
+                }
             }
         } else if (strcmp(inst->op, "fload_addr4") == 0 || strcmp(inst->op, "fload_addr8") == 0) {
             sb_append(&out, "    ldr x0, [sp], #16\n");

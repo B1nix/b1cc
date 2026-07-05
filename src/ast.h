@@ -59,6 +59,8 @@ struct Node {
     double fvalue;    /* literal value when op == "fnum" */
     int bit_offset;
     int bit_width;
+    int alignment;
+    Node *vla_dim_expr;
     int line;
     int col;
 };
