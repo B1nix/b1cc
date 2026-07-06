@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 StringArray preprocessor_driver_include_dirs;
 HashMap preprocessor_driver_macros;
@@ -51,12 +52,7 @@ static void push_cond(CondStateArray *arr, bool condition_met, bool active) {
 }
 
 static int exists(const char *path) {
-    FILE *f = fopen(path, "r");
-    if (f) {
-        fclose(f);
-        return 1;
-    }
-    return 0;
+    return access(path, R_OK) == 0;
 }
 
 static int is_digit(char c) {

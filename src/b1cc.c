@@ -47,12 +47,7 @@ static void write_file(const char *path, const char *data) {
 }
 
 static int exists(const char *path) {
-    FILE *f = fopen(path, "r");
-    if (f) {
-        fclose(f);
-        return 1;
-    }
-    return 0;
+    return access(path, R_OK) == 0;
 }
 
 static int has_suffix(const char *path, const char *suffix) {

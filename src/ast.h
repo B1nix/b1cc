@@ -3,6 +3,34 @@
 
 #include "common.h"
 
+typedef enum OpKind {
+    OP_NUM, OP_FNUM, OP_STR, OP_CHAR,
+    OP_VAR,
+    OP_UNARY_MINUS, OP_UNARY_TILDE, OP_UNARY_NOT, OP_UNARY_ADDR, OP_UNARY_DEREF,
+    OP_PREFIX_INC, OP_PREFIX_DEC, OP_POSTFIX_INC, OP_POSTFIX_DEC,
+    OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD,
+    OP_EQ, OP_NE, OP_LT, OP_GT, OP_LE, OP_GE,
+    OP_BAND, OP_BOR, OP_BXOR, OP_SHL, OP_SHR,
+    OP_LAND, OP_LOR, OP_COMMA,
+    OP_TERNARY,
+    OP_ASSIGN, OP_STORE_INDEX,
+    OP_CAST, OP_BOOL_CAST,
+    OP_CALL, OP_RETURN, OP_FUNC,
+    OP_IF, OP_WHILE, OP_DO_WHILE, OP_FOR,
+    OP_BREAK, OP_CONTINUE, OP_SWITCH, OP_CASE, OP_DEFAULT,
+    OP_GOTO, OP_LABEL_STMT,
+    OP_DECL, OP_ARRAY_DECL, OP_EXPR, OP_BLOCK, OP_EMPTY,
+    OP_INDEX, OP_MEMBER, OP_MEMBER_PTR,
+    OP_ASM,
+    OP_COMPOUND_LITERAL, OP_INIT_ITEM,
+    OP_SIZEOF,
+    OP_VA_START, OP_VA_ARG, OP_VA_COPY,
+    OP_COUNT
+} OpKind;
+
+const char *op_to_str(OpKind op);
+OpKind str_to_op(const char *s);
+
 typedef struct Token {
     const char *text;
     int line;
@@ -33,6 +61,7 @@ void node_array_free(NodeArray *arr);
 
 struct Node {
     const char *op;
+    int op_enum;
     const char *name;
     long value;
     int is_static;

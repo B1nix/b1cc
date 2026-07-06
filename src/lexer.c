@@ -52,7 +52,7 @@ static void push_token(TokenArray *arr, const char *text, int line, int col) {
     token_array_push(arr, &t);
 }
 
-TokenArray lex(const char *src, HashMap *macros, HashMap *active_macros, Arena *arena) {
+TokenArray lex(const char *src, HashMap *macros, StringArray *active_macros, Arena *arena) {
     TokenArray out;
     token_array_init(&out);
     int current_line = 1;
@@ -235,21 +235,22 @@ TokenArray lex(const char *src, HashMap *macros, HashMap *active_macros, Arena *
                 continue;
             }
             HashMapEntry *macro_entry = macros ? hashmap_get(macros, ident) : nullptr;
-            int is_active = active_macros ? hashmap_has(active_macros, ident) : 0;
+            int is_active = 0;
+            if (active_macros) {
+                for (int j = 0; j < active_macros->count; ++j) {
+                    if (strcmp(active_macros->data[j], ident) == 0) { is_active = 1; break; }
+                }
+            }
 
             if (macro_entry && !is_active) {
-                HashMap next_active;
-                hashmap_init(&next_active, 16);
+                StringArray next_active;
+                string_array_init(&next_active);
                 if (active_macros) {
-                    for (int b = 0; b < active_macros->bucket_count; ++b) {
-                        HashMapEntry *curr = active_macros->buckets[b];
-                        while (curr) {
-                            hashmap_put(&next_active, curr->key, curr->val_ptr, curr->val_int);
-                            curr = curr->next;
-                        }
+                    for (int j = 0; j < active_macros->count; ++j) {
+                        string_array_push(&next_active, active_macros->data[j]);
                     }
                 }
-                hashmap_put(&next_active, ident, nullptr, 1);
+                string_array_push(&next_active, ident);
 
                 Macro *m = (Macro *)macro_entry->val_ptr;
                 if (!m->is_function_like) {
@@ -469,7 +470,7 @@ TokenArray lex(const char *src, HashMap *macros, HashMap *active_macros, Arena *
                                         token_array_push(&expanded, &placemarker);
                                     } else {
                                         HashMap *arg_macros = macro_body_token_is_paste_operand(&body_tokens, k) ? nullptr : macros;
-                                        HashMap *arg_active = macro_body_token_is_paste_operand(&body_tokens, k) ? nullptr : active_macros;
+                                        StringArray *arg_active = macro_body_token_is_paste_operand(&body_tokens, k) ? nullptr : active_macros;
                                         TokenArray arg_tokens = lex(va_str, arg_macros, arg_active, arena);
                                         for (int tok_idx = 0; tok_idx < arg_tokens.count; ++tok_idx) {
                                             if (strcmp(arg_tokens.data[tok_idx].text, "EOF") != 0) {
@@ -494,7 +495,7 @@ TokenArray lex(const char *src, HashMap *macros, HashMap *active_macros, Arena *
                                     token_array_push(&expanded, &placemarker);
                                 } else {
                                     HashMap *arg_macros = macro_body_token_is_paste_operand(&body_tokens, k) ? nullptr : macros;
-                                    HashMap *arg_active = macro_body_token_is_paste_operand(&body_tokens, k) ? nullptr : active_macros;
+                                    StringArray *arg_active = macro_body_token_is_paste_operand(&body_tokens, k) ? nullptr : active_macros;
                                     TokenArray arg_tokens = lex(arg_val, arg_macros, arg_active, arena);
                                     for (int tok_idx = 0; tok_idx < arg_tokens.count; ++tok_idx) {
                                         if (strcmp(arg_tokens.data[tok_idx].text, "EOF") != 0) {
@@ -567,7 +568,7 @@ TokenArray lex(const char *src, HashMap *macros, HashMap *active_macros, Arena *
                     }
                 }
 
-                hashmap_free(&next_active);
+                string_array_free(&next_active);
             } else {
                 push_token(&out, ident, tok_line, tok_col);
             }

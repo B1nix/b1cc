@@ -735,8 +735,8 @@ static int unsigned_relational_compare_width(const Node *node) {
 }
 
 static const char *get_base_var_name(const Node *node) {
-    if (strcmp(node->op, "var") == 0) return node->name;
-    if (strcmp(node->op, "index") == 0) return get_base_var_name(node->lhs);
+    if (node->op_enum == OP_VAR) return node->name;
+    if (node->op_enum == OP_INDEX) return get_base_var_name(node->lhs);
     return "";
 }
 
@@ -749,7 +749,7 @@ static LongArray get_node_dims(const Node *node, const IrFunction *fn) {
         }
         return out;
     }
-    if (strcmp(node->op, "index") == 0) {
+    if (node->op_enum == OP_INDEX) {
         if (node->lhs && node->lhs->array_dims.count > 0) {
             if (node->lhs->array_dims.count <= 1) {
                 LongArray out;
@@ -765,7 +765,7 @@ static LongArray get_node_dims(const Node *node, const IrFunction *fn) {
         }
         const Node *base = node;
         int index_count = 0;
-        while (strcmp(base->op, "index") == 0) {
+        while (base->op_enum == OP_INDEX) {
             index_count++;
             base = base->lhs;
         }
@@ -813,7 +813,7 @@ static LongArray get_node_dims(const Node *node, const IrFunction *fn) {
     }
     int index_count = 0;
     const Node *curr = node;
-    while (strcmp(curr->op, "index") == 0) {
+    while (curr->op_enum == OP_INDEX) {
         index_count++;
         curr = curr->lhs;
     }
@@ -845,10 +845,10 @@ static long ir_double_to_bits(double d) {
 static int ir_expr_is_float(const Node *n) {
     if (!n) return 0;
     if (n->is_float) return 1;
-    if (strcmp(n->op, "fnum") == 0) return 1;
-    if (strcmp(n->op, "call") == 0) {
+    if (n->op_enum == OP_FNUM) return 1;
+    if (n->op_enum == OP_CALL) {
         const char *cn = n->name;
-        if (n->lhs && strcmp(n->lhs->op, "var") == 0) cn = n->lhs->name;
+        if (n->lhs && n->lhs->op_enum == OP_VAR) cn = n->lhs->name;
         if (cn && cn[0]) {
             HashMapEntry *e = hashmap_get(&ir_function_return_floats, cn);
             if (e) return e->val_int;
@@ -865,7 +865,7 @@ static int ir_expr_is_i64(const Node *n, int target_scale) {
 
 static int ir_expr_has_address(const Node *n) {
     if (!n) return 0;
-    return strcmp(n->op, "var") == 0 || strcmp(n->op, "index") == 0 || strcmp(n->op, "unary_*") == 0;
+    return n->op_enum == OP_VAR || n->op_enum == OP_INDEX || n->op_enum == OP_UNARY_DEREF;
 }
 
 static void ir_push(IrFunction *fn, const char *op, const char *arg, long value) {
@@ -885,10 +885,10 @@ static void lower_cast_to_storage(IrFunction *fn, int size, int is_unsigned, int
 }
 
 static int comma_wrapped_aggregate_call_ends_in_call(const Node *node) {
-    while (node && strcmp(node->op, ",") == 0) {
+    while (node && node->op_enum == OP_COMMA) {
         node = node->rhs;
     }
-    return node && strcmp(node->op, "call") == 0;
+    return node && node->op_enum == OP_CALL;
 }
 
 static int lower_comma_wrapped_aggregate_call(const Node *node, IrFunction *fn, TargetBackend *backend, Arena *arena) {
@@ -896,12 +896,12 @@ static int lower_comma_wrapped_aggregate_call(const Node *node, IrFunction *fn, 
     if (!comma_wrapped_aggregate_call_ends_in_call(node)) return 0;
     int target_scale = backend->get_target_scale(backend);
 
-    if (strcmp(node->op, ",") == 0) {
+    if (node->op_enum == OP_COMMA) {
         lower_expr(node->lhs, fn, backend, arena);
         ir_push(fn, ir_expr_is_i64(node->lhs, target_scale) ? "pop64" : "pop", "", 0);
         return lower_comma_wrapped_aggregate_call(node->rhs, fn, backend, arena);
     }
-    if (strcmp(node->op, "call") == 0) {
+    if (node->op_enum == OP_CALL) {
         lower_expr(node, fn, backend, arena);
         return 1;
     }
@@ -912,7 +912,7 @@ static int lower_aggregate_assignment_arg(const Node *node, int agg_size, IrFunc
     if (!node) return 0;
     int target_scale = backend->get_target_scale(backend);
 
-    if (strcmp(node->op, ",") == 0) {
+    if (node->op_enum == OP_COMMA) {
         lower_expr(node->lhs, fn, backend, arena);
         ir_push(fn, ir_expr_is_i64(node->lhs, target_scale) ? "pop64" : "pop", "", 0);
         if (!lower_aggregate_assignment_arg(node->rhs, agg_size, fn, backend, arena)) {
@@ -921,8 +921,8 @@ static int lower_aggregate_assignment_arg(const Node *node, int agg_size, IrFunc
         return 1;
     }
 
-    if (strcmp(node->op, "store_index") == 0) {
-        if (strcmp(node->rhs->op, "call") == 0) {
+    if (node->op_enum == OP_STORE_INDEX) {
+        if (node->rhs->op_enum == OP_CALL) {
             lower_expr(node->rhs, fn, backend, arena);
             if (agg_size > target_scale) {
                 lower_addr(node->lhs, fn, backend, arena);
@@ -943,12 +943,13 @@ static int lower_aggregate_assignment_arg(const Node *node, int agg_size, IrFunc
         return 1;
     }
 
-    if (strcmp(node->op, "assign") == 0) {
+    if (node->op_enum == OP_ASSIGN) {
         Node dest = *node;
         dest.op = "var";
+        dest.op_enum = OP_VAR;
         dest.lhs = nullptr;
         dest.rhs = nullptr;
-        if (strcmp(node->lhs->op, "call") == 0) {
+        if (node->lhs->op_enum == OP_CALL) {
             lower_expr(node->lhs, fn, backend, arena);
             if (agg_size > target_scale) {
                 lower_addr(&dest, fn, backend, arena);
@@ -974,7 +975,7 @@ static int lower_aggregate_assignment_arg(const Node *node, int agg_size, IrFunc
 
 static int get_expr_pointer_scale(const Node *node, const IrFunction *fn) {
     if (!node) return 0;
-    if (strcmp(node->op, "var") == 0) {
+    if (node->op_enum == OP_VAR) {
         char local_key[512];
         snprintf(local_key, sizeof(local_key), "%s$%s", fn->name, node->name);
         HashMapEntry *is_ptr = hashmap_get(&ir_local_var_is_pointer, local_key);
@@ -1006,7 +1007,7 @@ static int get_expr_pointer_scale(const Node *node, const IrFunction *fn) {
             return mult * base_size;
         }
     }
-    if (strcmp(node->op, "index") == 0) {
+    if (node->op_enum == OP_INDEX) {
         if (node->pointee_size > 0) {
             return node->pointee_size;
         }
@@ -1043,25 +1044,25 @@ static int get_expr_pointer_scale(const Node *node, const IrFunction *fn) {
         long_array_free(&dims);
         return 0;
     }
-    if (strcmp(node->op, "cast") == 0) {
+    if (node->op_enum == OP_CAST) {
         if (strncmp(node->name, "ptr:", 4) == 0) {
             return atoi(node->name + 4);
         }
     }
-    if (strcmp(node->op, "+") == 0 || strcmp(node->op, "-") == 0) {
+    if (node->op_enum == OP_ADD || node->op_enum == OP_SUB) {
         int left = get_expr_pointer_scale(node->lhs, fn);
         if (left > 0) return left;
-        if (strcmp(node->op, "+") == 0) {
+        if (node->op_enum == OP_ADD) {
             int right = get_expr_pointer_scale(node->rhs, fn);
             if (right > 0) return right;
         }
     }
-    if (strcmp(node->op, "?") == 0) {
+    if (node->op_enum == OP_TERNARY) {
         int left = get_expr_pointer_scale(node->body.data[0], fn);
         if (left > 0) return left;
         return get_expr_pointer_scale(node->body.data[1], fn);
     }
-    if (strcmp(node->op, ",") == 0) {
+    if (node->op_enum == OP_COMMA) {
         return get_expr_pointer_scale(node->rhs, fn);
     }
     return 0;
@@ -1069,17 +1070,17 @@ static int get_expr_pointer_scale(const Node *node, const IrFunction *fn) {
 
 static int get_lvalue_store_size(const Node *node, const IrFunction *fn) {
     int scale = get_expr_pointer_scale(node, fn);
-    if (strcmp(node->op, "index") == 0 && strcmp(node->name, "byte_offset") == 0) {
+    if (node->op_enum == OP_INDEX && strcmp(node->name, "byte_offset") == 0) {
         if (node->elem_size > 0) {
             scale = node->elem_size;
         }
-    } else if (strcmp(node->op, "index") == 0) {
+    } else if (node->op_enum == OP_INDEX) {
         if (node->elem_size > 0) {
             scale = node->elem_size;
         } else if (node->type_size > 0) {
             scale = node->type_size;
         }
-    } else if (strcmp(node->op, "unary_*") == 0) {
+    } else if (node->op_enum == OP_UNARY_DEREF) {
         if (node->lhs) {
             scale = get_expr_pointer_scale(node->lhs, fn);
         }
@@ -1090,7 +1091,7 @@ static int get_lvalue_store_size(const Node *node, const IrFunction *fn) {
         }
     }
     if (scale == 0) {
-        if ((strcmp(node->op, "index") == 0 || strcmp(node->op, "unary_*") == 0) && node->lhs) {
+        if ((node->op_enum == OP_INDEX || node->op_enum == OP_UNARY_DEREF) && node->lhs) {
             scale = get_expr_pointer_scale(node->lhs, fn);
         }
     }
@@ -1113,7 +1114,7 @@ static int expr_is_aggregate_value(const Node *node, const IrFunction *fn) {
     if (!node) return 0;
     if (node->aggregate_size > 0) return 1;
     if (node->type_tag && node->type_tag[0] && node->pointee_size == 0) return 1;
-    if (strcmp(node->op, "var") == 0) {
+    if (node->op_enum == OP_VAR) {
         if (hashmap_has(&ir_global_struct_vars, node->name)) return 1;
         const char *tag = ir_get_var_struct_tag(node->name);
         if (tag && tag[0]) return 1;
@@ -1125,10 +1126,10 @@ static int expr_is_aggregate_value(const Node *node, const IrFunction *fn) {
         }
         return 0;
     }
-    if (strcmp(node->op, "assign") == 0) {
+    if (node->op_enum == OP_ASSIGN) {
         return is_aggregate_var_name(fn, node->name);
     }
-    if (strcmp(node->op, ",") == 0) {
+    if (node->op_enum == OP_COMMA) {
         return expr_is_aggregate_value(node->rhs, fn);
     }
     return 0;
@@ -1148,18 +1149,18 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         ir_current_col = node->col;
     }
     int target_scale = backend->get_target_scale(backend);
-    if (strcmp(node->op, "num") == 0) {
+    if (node->op_enum == OP_NUM) {
         ir_push(fn, ir_expr_is_i64(node, target_scale) ? "const64" : "const", "", node->value);
         return;
     }
-    if (strcmp(node->op, "fnum") == 0) {
+    if (node->op_enum == OP_FNUM) {
         /* float literal: 4-byte literals are still materialised as the double
            bit pattern (compute-in-double model); the 4-byte storage type is
            applied on store / in aggregates. */
         ir_push(fn, "fconst", "", ir_double_to_bits(node->fvalue));
         return;
     }
-    if (strcmp(node->op, "compound_literal") == 0) {
+    if (node->op_enum == OP_COMPOUND_LITERAL) {
         lower_addr(node, fn, backend, arena);
         if (node->value <= target_scale) {
             ir_push(fn, "const", "", 0);
@@ -1167,7 +1168,7 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         }
         return;
     }
-    if (strcmp(node->op, "cast") == 0) {
+    if (node->op_enum == OP_CAST) {
         lower_expr(node->lhs, fn, backend, arena);
         int src_float = ir_expr_is_float(node->lhs);
         int dst_float = node->is_float;
@@ -1188,17 +1189,17 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         }
         return;
     }
-    if (strcmp(node->op, "bool_cast") == 0) {
+    if (node->op_enum == OP_BOOL_CAST) {
         lower_expr(node->lhs, fn, backend, arena);
         ir_push(fn, "const", "", 0);
         ir_push(fn, "!=", "", 0);
         return;
     }
-    if (strcmp(node->op, "prefix_++") == 0 || strcmp(node->op, "prefix_--") == 0) {
-        if (node->lhs && strcmp(node->lhs->op, "var") != 0) {
+    if (node->op_enum == OP_PREFIX_INC || node->op_enum == OP_PREFIX_DEC) {
+        if (node->lhs && node->lhs->op_enum != OP_VAR) {
             lower_expr(node->lhs, fn, backend, arena);
             ir_push(fn, "const", "", 1);
-            ir_push(fn, (strcmp(node->op, "prefix_++") == 0) ? "+" : "-", "", 0);
+            ir_push(fn, (node->op_enum == OP_PREFIX_INC) ? "+" : "-", "", 0);
             int scale = get_lvalue_store_size(node->lhs, fn);
             if (scale == 0) {
                 scale = node->lhs->type_size > 0 ? node->lhs->type_size : target_scale;
@@ -1218,7 +1219,7 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
             int size = ir_get_var_type_size(node->name);
             ir_push(fn, "load", "", slot);
             ir_push(fn, "const", "", step);
-            ir_push(fn, (strcmp(node->op, "prefix_++") == 0) ? "+" : "-", "", 0);
+            ir_push(fn, (node->op_enum == OP_PREFIX_INC) ? "+" : "-", "", 0);
             lower_cast_to_storage(fn, size, ir_get_var_unsigned(node->name), target_scale);
             ir_push(fn, "store", "", slot);
             ir_push(fn, "load", "", slot);
@@ -1228,7 +1229,7 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
             int size = ir_get_var_type_size(node->name);
             ir_push(fn, "gload", node->name, 0);
             ir_push(fn, "const", "", step);
-            ir_push(fn, (strcmp(node->op, "prefix_++") == 0) ? "+" : "-", "", 0);
+            ir_push(fn, (node->op_enum == OP_PREFIX_INC) ? "+" : "-", "", 0);
             lower_cast_to_storage(fn, size, ir_get_var_unsigned(node->name), target_scale);
             ir_push(fn, "gstore", node->name, 0);
             ir_push(fn, "gload", node->name, 0);
@@ -1239,12 +1240,12 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         }
         return;
     }
-    if (strcmp(node->op, "postfix_++") == 0 || strcmp(node->op, "postfix_--") == 0) {
-        if (node->lhs && strcmp(node->lhs->op, "var") != 0) {
+    if (node->op_enum == OP_POSTFIX_INC || node->op_enum == OP_POSTFIX_DEC) {
+        if (node->lhs && node->lhs->op_enum != OP_VAR) {
             lower_expr(node->lhs, fn, backend, arena);
             ir_push(fn, "dup", "", 0);
             ir_push(fn, "const", "", 1);
-            ir_push(fn, (strcmp(node->op, "postfix_++") == 0) ? "+" : "-", "", 0);
+            ir_push(fn, (node->op_enum == OP_POSTFIX_INC) ? "+" : "-", "", 0);
             int scale = get_lvalue_store_size(node->lhs, fn);
             if (scale == 0) {
                 if (node->lhs->type_size > 0) {
@@ -1268,7 +1269,7 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
             ir_push(fn, "load", "", slot);
             ir_push(fn, "load", "", slot);
             ir_push(fn, "const", "", step);
-            ir_push(fn, (strcmp(node->op, "postfix_++") == 0) ? "+" : "-", "", 0);
+            ir_push(fn, (node->op_enum == OP_POSTFIX_INC) ? "+" : "-", "", 0);
             lower_cast_to_storage(fn, size, ir_get_var_unsigned(node->name), target_scale);
             ir_push(fn, "store", "", slot);
         } else if (hashmap_has(&ir_global_vars, node->name)) {
@@ -1278,7 +1279,7 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
             ir_push(fn, "gload", node->name, 0);
             ir_push(fn, "gload", node->name, 0);
             ir_push(fn, "const", "", step);
-            ir_push(fn, (strcmp(node->op, "postfix_++") == 0) ? "+" : "-", "", 0);
+            ir_push(fn, (node->op_enum == OP_POSTFIX_INC) ? "+" : "-", "", 0);
             lower_cast_to_storage(fn, size, ir_get_var_unsigned(node->name), target_scale);
             ir_push(fn, "gstore", node->name, 0);
         } else {
@@ -1288,17 +1289,17 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         }
         return;
     }
-    if (strcmp(node->op, "unary_~") == 0) {
+    if (node->op_enum == OP_UNARY_TILDE) {
         lower_expr(node->lhs, fn, backend, arena);
         ir_push(fn, ir_expr_is_i64(node->lhs, target_scale) ? "~64" : "~", "", 0);
         return;
     }
-    if (strcmp(node->op, "unary_!") == 0) {
+    if (node->op_enum == OP_UNARY_NOT) {
         lower_expr(node->lhs, fn, backend, arena);
         ir_push(fn, "!", "", 0);
         return;
     }
-    if (strcmp(node->op, "unary_-") == 0) {
+    if (node->op_enum == OP_UNARY_MINUS) {
         lower_expr(node->lhs, fn, backend, arena);
         if (ir_expr_is_float(node->lhs)) {
             ir_push(fn, "fneg", "", 0);
@@ -1307,13 +1308,13 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         }
         return;
     }
-    if (strcmp(node->op, ",") == 0) {
+    if (node->op_enum == OP_COMMA) {
         lower_expr(node->lhs, fn, backend, arena);
         ir_push(fn, ir_expr_is_i64(node->lhs, target_scale) ? "pop64" : "pop", "", 0);
         lower_expr(node->rhs, fn, backend, arena);
         return;
     }
-    if (strcmp(node->op, "va_start") == 0) {
+    if (node->op_enum == OP_VA_START) {
         HashMapEntry *loc_entry = hashmap_get(&fn->locals, node->lhs->name);
         if (!loc_entry) {
             diagnostics_error(node->line, node->col, "va_list variable not declared");
@@ -1322,7 +1323,7 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         ir_push(fn, "const", "", 0);
         return;
     }
-    if (strcmp(node->op, "va_copy") == 0) {
+    if (node->op_enum == OP_VA_COPY) {
         HashMapEntry *dest_entry = hashmap_get(&fn->locals, node->lhs->name);
         HashMapEntry *src_entry = hashmap_get(&fn->locals, node->rhs->name);
         if (!dest_entry || !src_entry) {
@@ -1333,7 +1334,7 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         ir_push(fn, "const", "", 0);
         return;
     }
-    if (strcmp(node->op, "va_arg") == 0) {
+    if (node->op_enum == OP_VA_ARG) {
         HashMapEntry *loc_entry = hashmap_get(&fn->locals, node->lhs->name);
         if (!loc_entry) {
             diagnostics_error(node->line, node->col, "va_list variable not declared");
@@ -1350,11 +1351,11 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         ir_push(fn, "index", "", sz);
         return;
     }
-    if (strcmp(node->op, "store_index") == 0) {
+    if (node->op_enum == OP_STORE_INDEX) {
         int scale = get_lvalue_store_size(node->lhs, fn);
         if (scale == 0) scale = target_scale;
 
-        int rhs_is_call = (strcmp(node->rhs->op, "call") == 0);
+        int rhs_is_call = (node->rhs->op_enum == OP_CALL);
         int rhs_is_aggregate = expr_is_aggregate_value(node->rhs, fn);
         if (scale > 8 || (rhs_is_aggregate && !rhs_is_call)) {
             if (lower_comma_wrapped_aggregate_call(node->rhs, fn, backend, arena)) {
@@ -1370,7 +1371,7 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
                 lower_addr(node->lhs, fn, backend, arena);
             }
         } else {
-            int is_bf = (strcmp(node->lhs->op, "index") == 0 &&
+            int is_bf = (node->lhs->op_enum == OP_INDEX &&
                          strcmp(node->lhs->name, "byte_offset") == 0 &&
                          node->lhs->bit_width > 0);
             if (is_bf) {
@@ -1400,7 +1401,7 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         }
         return;
     }
-    if (strcmp(node->op, "assign") == 0) {
+    if (node->op_enum == OP_ASSIGN) {
         HashMapEntry *loc_entry = hashmap_get(&fn->locals, node->name);
         if (loc_entry) {
             int size = ir_get_var_type_size(node->name);
@@ -1495,7 +1496,7 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         }
         return;
     }
-    if (strcmp(node->op, "var") == 0) {
+    if (node->op_enum == OP_VAR) {
         int is_flt = node->is_float;
         const char *flop = (node->type_size == 4) ? "fload4" : "fload8";
         HashMapEntry *loc_entry = hashmap_get(&fn->locals, node->name);
@@ -1520,7 +1521,7 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         }
         return;
     }
-    if (strcmp(node->op, "str") == 0) {
+    if (node->op_enum == OP_STR) {
         char label[128];
         snprintf(label, sizeof(label), ".Lstr_%s_%d", fn->name, fn->strings.count);
         const char *label_dup = arena_strdup(arena, label);
@@ -1533,11 +1534,11 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         ir_push(fn, "str", label_dup, 0);
         return;
     }
-    if (strcmp(node->op, "call") == 0) {
+    if (node->op_enum == OP_CALL) {
         const char *call_name = node->name;
         int indirect = (!call_name[0]) || hashmap_has(&fn->locals, call_name);
         IntArray *param_floats = nullptr;
-        if (node->lhs && strcmp(node->lhs->op, "var") == 0 &&
+        if (node->lhs && node->lhs->op_enum == OP_VAR &&
             !hashmap_has(&fn->locals, node->lhs->name) &&
             !hashmap_has(&ir_global_vars, node->lhs->name) &&
             !hashmap_has(&ir_global_arrays, node->lhs->name) &&
@@ -1546,10 +1547,10 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
             indirect = 0;
         } else if (node->lhs) {
             const Node *callee = node->lhs;
-            if (strcmp(callee->op, "unary_*") == 0 && callee->lhs) {
+            if (callee->op_enum == OP_UNARY_DEREF && callee->lhs) {
                 callee = callee->lhs;
             }
-            if (strcmp(callee->op, "var") == 0) {
+            if (callee->op_enum == OP_VAR) {
                 call_name = callee->name;
                 HashMapEntry *pfe = hashmap_get(&ir_function_pointer_param_floats, call_name);
                 if (pfe) param_floats = (IntArray *)pfe->val_ptr;
@@ -1619,7 +1620,7 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         }
         return;
     }
-    if (strcmp(node->op, "&&") == 0) {
+    if (node->op_enum == OP_LAND) {
         char false_label[128];
         snprintf(false_label, sizeof(false_label), ".L%s_and_false%d", fn->name, fn->label_id++);
         const char *fl_dup = arena_strdup(arena, false_label);
@@ -1639,7 +1640,7 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         ir_push(fn, "label", el_dup, 0);
         return;
     }
-    if (strcmp(node->op, "||") == 0) {
+    if (node->op_enum == OP_LOR) {
         char false_label_or[128];
         snprintf(false_label_or, sizeof(false_label_or), ".L%s_or_false_or%d", fn->name, fn->label_id++);
         const char *fl_or_dup = arena_strdup(arena, false_label_or);
@@ -1666,7 +1667,7 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         ir_push(fn, "label", el_dup, 0);
         return;
     }
-    if (strcmp(node->op, "?") == 0) {
+    if (node->op_enum == OP_TERNARY) {
         char false_label[128];
         snprintf(false_label, sizeof(false_label), ".L%s_ternary_false%d", fn->name, fn->label_id++);
         const char *fl_dup = arena_strdup(arena, false_label);
@@ -1684,11 +1685,11 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         ir_push(fn, "label", el_dup, 0);
         return;
     }
-    if (strcmp(node->op, "unary_*") == 0) {
+    if (node->op_enum == OP_UNARY_DEREF) {
         lower_expr(node->lhs, fn, backend, arena);
         ir_push(fn, "const", "", 0);
         int scale = get_expr_pointer_scale(node->lhs, fn);
-        if (scale == 0 && strcmp(node->lhs->op, "index") == 0) {
+        if (scale == 0 && node->lhs->op_enum == OP_INDEX) {
             const char *base_name = get_base_var_name(node->lhs);
             char local_key[512];
             snprintf(local_key, sizeof(local_key), "%s$%s", fn->name, base_name);
@@ -1718,11 +1719,11 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         }
         return;
     }
-    if (strcmp(node->op, "unary_&") == 0) {
+    if (node->op_enum == OP_UNARY_ADDR) {
         lower_addr(node->lhs, fn, backend, arena);
         return;
     }
-    if (strcmp(node->op, "index") == 0) {
+    if (node->op_enum == OP_INDEX) {
         if (strcmp(node->name, "byte_offset") == 0) {
             lower_addr(node->lhs, fn, backend, arena);
             lower_expr(node->rhs, fn, backend, arena);
@@ -1808,19 +1809,19 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         long_array_free(&current_dims);
         return;
     }
-    if (node->is_float && (strcmp(node->op, "+") == 0 || strcmp(node->op, "-") == 0 ||
-                           strcmp(node->op, "*") == 0 || strcmp(node->op, "/") == 0)) {
+    if (node->is_float && (node->op_enum == OP_ADD || node->op_enum == OP_SUB ||
+                           node->op_enum == OP_MUL || node->op_enum == OP_DIV)) {
         lower_expr(node->lhs, fn, backend, arena);
         if (!ir_expr_is_float(node->lhs)) ir_push(fn, "i2f", "", 0);
         lower_expr(node->rhs, fn, backend, arena);
         if (!ir_expr_is_float(node->rhs)) ir_push(fn, "i2f", "", 0);
-        const char *fop = strcmp(node->op, "+") == 0 ? "fadd" :
-                          strcmp(node->op, "-") == 0 ? "fsub" :
-                          strcmp(node->op, "*") == 0 ? "fmul" : "fdiv";
+        const char *fop = node->op_enum == OP_ADD ? "fadd" :
+                          node->op_enum == OP_SUB ? "fsub" :
+                          node->op_enum == OP_MUL ? "fmul" : "fdiv";
         ir_push(fn, fop, "", 0);
         return;
     }
-    if (strcmp(node->op, "+") == 0 || strcmp(node->op, "-") == 0) {
+    if (node->op_enum == OP_ADD || node->op_enum == OP_SUB) {
         int left_scale = get_expr_pointer_scale(node->lhs, fn);
         int right_scale = get_expr_pointer_scale(node->rhs, fn);
         if (ir_expr_is_i64(node, target_scale) && left_scale == 0 && right_scale == 0) {
@@ -1832,7 +1833,7 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
             if (!ir_expr_is_i64(node->rhs, target_scale)) {
                 ir_push(fn, node->rhs->is_unsigned ? "zext64" : "sext64", "", 0);
             }
-            ir_push(fn, strcmp(node->op, "+") == 0 ? "+64" : "-64", "", 0);
+            ir_push(fn, node->op_enum == OP_ADD ? "+64" : "-64", "", 0);
         } else if (left_scale > 0 && right_scale == 0) {
             lower_expr(node->lhs, fn, backend, arena);
             lower_expr(node->rhs, fn, backend, arena);
@@ -1841,7 +1842,7 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
                 ir_push(fn, "*", "", 0);
             }
             ir_push(fn, node->op, "", 0);
-        } else if (strcmp(node->op, "+") == 0 && right_scale > 0 && left_scale == 0) {
+        } else if (node->op_enum == OP_ADD && right_scale > 0 && left_scale == 0) {
             lower_expr(node->lhs, fn, backend, arena);
             if (right_scale > 1) {
                 ir_push(fn, "const", "", right_scale);
@@ -1849,7 +1850,7 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
             }
             lower_expr(node->rhs, fn, backend, arena);
             ir_push(fn, "+", "", 0);
-        } else if (strcmp(node->op, "-") == 0 && left_scale > 0 && right_scale > 0) {
+        } else if (node->op_enum == OP_SUB && left_scale > 0 && right_scale > 0) {
             lower_expr(node->lhs, fn, backend, arena);
             lower_expr(node->rhs, fn, backend, arena);
             ir_push(fn, "-", "", 0);
@@ -1867,9 +1868,9 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
     
     /* Floating comparisons: operands are float even though the result is int. */
     if ((ir_expr_is_float(node->lhs) || ir_expr_is_float(node->rhs)) &&
-        (strcmp(node->op, "<") == 0 || strcmp(node->op, ">") == 0 ||
-         strcmp(node->op, "<=") == 0 || strcmp(node->op, ">=") == 0 ||
-         strcmp(node->op, "==") == 0 || strcmp(node->op, "!=") == 0)) {
+        (node->op_enum == OP_LT || node->op_enum == OP_GT ||
+         node->op_enum == OP_LE || node->op_enum == OP_GE ||
+         node->op_enum == OP_EQ || node->op_enum == OP_NE)) {
         lower_expr(node->lhs, fn, backend, arena);
         if (!ir_expr_is_float(node->lhs)) ir_push(fn, "i2f", "", 0);
         lower_expr(node->rhs, fn, backend, arena);
@@ -1885,7 +1886,7 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         ir_push(fn, "ucast", "", 4);
     }
     if (ir_expr_is_i64(node, target_scale) && !ir_expr_is_i64(node->lhs, target_scale) &&
-        strcmp(node->op, "<<") != 0 && strcmp(node->op, ">>") != 0) {
+        node->op_enum != OP_SHL && node->op_enum != OP_SHR) {
         ir_push(fn, node->lhs->is_unsigned ? "zext64" : "sext64", "", 0);
     }
     lower_expr(node->rhs, fn, backend, arena);
@@ -1894,12 +1895,12 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
     }
     int wide_compare = target_scale == 4 && !ir_expr_is_float(node->lhs) && !ir_expr_is_float(node->rhs) &&
         (node->lhs->type_size == 8 || node->rhs->type_size == 8) &&
-        (strcmp(node->op, "==") == 0 || strcmp(node->op, "!=") == 0 ||
-         strcmp(node->op, "<") == 0 || strcmp(node->op, ">") == 0 ||
-         strcmp(node->op, "<=") == 0 || strcmp(node->op, ">=") == 0);
+        (node->op_enum == OP_EQ || node->op_enum == OP_NE ||
+         node->op_enum == OP_LT || node->op_enum == OP_GT ||
+         node->op_enum == OP_LE || node->op_enum == OP_GE);
     if ((ir_expr_is_i64(node, target_scale) || wide_compare) &&
         !ir_expr_is_i64(node->rhs, target_scale) &&
-        strcmp(node->op, "<<") != 0 && strcmp(node->op, ">>") != 0) {
+        node->op_enum != OP_SHL && node->op_enum != OP_SHR) {
         ir_push(fn, node->rhs->is_unsigned ? "zext64" : "sext64", "", 0);
     }
     const char *op = node->op;
@@ -1925,8 +1926,8 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
 
 static void collect_cases_recursive(const Node *node, LongStringPairArray *cases, const char **default_label, IrFunction *fn, Arena *arena) {
     if (!node) return;
-    if (strcmp(node->op, "switch") == 0) return;
-    if (strcmp(node->op, "case") == 0) {
+    if (node->op_enum == OP_SWITCH) return;
+    if (node->op_enum == OP_CASE) {
         char label[128];
         snprintf(label, sizeof(label), ".Lcase_%s_%d", fn->name, fn->label_id++);
         const char *label_dup = arena_strdup(arena, label);
@@ -1936,7 +1937,7 @@ static void collect_cases_recursive(const Node *node, LongStringPairArray *cases
         lsp.first = node->value;
         lsp.second = label_dup;
         long_string_pair_array_push(cases, &lsp);
-    } else if (strcmp(node->op, "default") == 0) {
+    } else if (node->op_enum == OP_DEFAULT) {
         char label[128];
         snprintf(label, sizeof(label), ".Ldefault_%s_%d", fn->name, fn->label_id++);
         const char *label_dup = arena_strdup(arena, label);
@@ -1974,13 +1975,13 @@ static void lower_addr(const Node *node, IrFunction *fn, TargetBackend *backend,
         ir_current_col = node->col;
     }
     int target_scale = backend->get_target_scale(backend);
-    if (strcmp(node->op, ",") == 0) {
+    if (node->op_enum == OP_COMMA) {
         lower_expr(node->lhs, fn, backend, arena);
         ir_push(fn, ir_expr_is_i64(node->lhs, target_scale) ? "pop64" : "pop", "", 0);
         lower_addr(node->rhs, fn, backend, arena);
         return;
     }
-    if (strcmp(node->op, "compound_literal") == 0) {
+    if (node->op_enum == OP_COMPOUND_LITERAL) {
         int size = (int)node->value;
         int slots = (size + 15) / 16;
         if (slots < 1) slots = 1;
@@ -2005,7 +2006,7 @@ static void lower_addr(const Node *node, IrFunction *fn, TargetBackend *backend,
 
         for (int k = 0; k < node->body.count; ++k) {
             const Node *item = node->body.data[k];
-            if (strcmp(item->op, "init_item") != 0) continue;
+            if (item->op_enum != OP_INIT_ITEM) continue;
             int item_size = atoi(item->name);
             lower_expr(item->lhs, fn, backend, arena);
             ir_push(fn, "const", "", 0);
@@ -2018,15 +2019,15 @@ static void lower_addr(const Node *node, IrFunction *fn, TargetBackend *backend,
         ir_push(fn, "addr", "", addr_slot);
         return;
     }
-    if (strcmp(node->op, "unary_&") == 0) {
+    if (node->op_enum == OP_UNARY_ADDR) {
         lower_expr(node, fn, backend, arena);
         return;
     }
-    if (strcmp(node->op, "unary_*") == 0) {
+    if (node->op_enum == OP_UNARY_DEREF) {
         lower_expr(node->lhs, fn, backend, arena);
         return;
     }
-    if (strcmp(node->op, "index") == 0) {
+    if (node->op_enum == OP_INDEX) {
         if (strcmp(node->name, "byte_offset") == 0) {
             lower_addr(node->lhs, fn, backend, arena);
             lower_expr(node->rhs, fn, backend, arena);
@@ -2073,7 +2074,7 @@ static void lower_addr(const Node *node, IrFunction *fn, TargetBackend *backend,
             ir_push(fn, "*", "", 0);
             ir_push(fn, "+", "", 0);
         }
-    } else if (strcmp(node->op, "var") == 0) {
+    } else if (node->op_enum == OP_VAR) {
         HashMapEntry *entry = hashmap_get(&fn->locals, node->name);
         if (entry) {
             char local_key[512];
@@ -2108,11 +2109,11 @@ static void lower_addr(const Node *node, IrFunction *fn, TargetBackend *backend,
             ir_push(fn, "gaddr", node->name, 0);
         }
     } else {
-        if (strcmp(node->op, "?") == 0) {
+        if (node->op_enum == OP_TERNARY) {
             ir_push(fn, "const", "", 0);
             return;
         }
-        if (strcmp(node->op, "num") == 0 && node->value == 0) {
+        if (node->op_enum == OP_NUM && node->value == 0) {
             ir_push(fn, "const", "", 0);
             return;
         }
@@ -2127,18 +2128,18 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
         ir_current_col = stmt->col;
     }
     int target_scale = backend->get_target_scale(backend);
-    if (strcmp(stmt->op, "block") == 0) {
+    if (stmt->op_enum == OP_BLOCK) {
         lower_block(stmt, fn, backend, arena);
-    } else if (strcmp(stmt->op, "label_stmt") == 0) {
+    } else if (stmt->op_enum == OP_LABEL_STMT) {
         char label[256];
         snprintf(label, sizeof(label), ".L%s_user_%s", fn->name, stmt->name);
         ir_push(fn, "label", arena_strdup(arena, label), 0);
         lower_stmt(stmt->lhs, fn, backend, arena);
-    } else if (strcmp(stmt->op, "goto") == 0) {
+    } else if (stmt->op_enum == OP_GOTO) {
         char label[256];
         snprintf(label, sizeof(label), ".L%s_user_%s", fn->name, stmt->name);
         ir_push(fn, "jmp", arena_strdup(arena, label), 0);
-    } else if (strcmp(stmt->op, "decl") == 0) {
+    } else if (stmt->op_enum == OP_DECL) {
         if (hashmap_has(&fn->locals, stmt->name)) {
             char msg[256];
             snprintf(msg, sizeof(msg), "duplicate local %s", stmt->name);
@@ -2180,7 +2181,7 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
             }
         }
         if (stmt->lhs) {
-            int rhs_is_call = (strcmp(stmt->lhs->op, "call") == 0);
+            int rhs_is_call = (stmt->lhs->op_enum == OP_CALL);
             if (stmt->type_size > 8 && !rhs_is_call) {
                 lower_addr(stmt->lhs, fn, backend, arena);
                 ir_push(fn, "addr", "", slot);
@@ -2207,13 +2208,13 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
                 ir_push(fn, "store", "", slot);
             }
         }
-    } else if (strcmp(stmt->op, "assign") == 0) {
+    } else if (stmt->op_enum == OP_ASSIGN) {
         HashMapEntry *loc_entry = hashmap_get(&fn->locals, stmt->name);
         if (loc_entry) {
             int size = ir_get_var_type_size(stmt->name);
             int is_flt = ir_get_var_float(stmt->name);
             int is_agg = is_aggregate_var_name(fn, stmt->name);
-            int rhs_is_call = (strcmp(stmt->lhs->op, "call") == 0);
+            int rhs_is_call = (stmt->lhs->op_enum == OP_CALL);
             if (is_agg && !rhs_is_call) {
                 if (!lower_aggregate_assignment_arg(stmt->lhs, size, fn, backend, arena)) {
                     lower_addr(stmt->lhs, fn, backend, arena);
@@ -2255,7 +2256,7 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
             int size = ir_get_var_type_size(stmt->name);
             int is_flt = ir_get_var_float(stmt->name);
             int is_agg = is_aggregate_var_name(fn, stmt->name);
-            int rhs_is_call = (strcmp(stmt->lhs->op, "call") == 0);
+            int rhs_is_call = (stmt->lhs->op_enum == OP_CALL);
             if (is_agg && !rhs_is_call) {
                 if (!lower_aggregate_assignment_arg(stmt->lhs, size, fn, backend, arena)) {
                     lower_addr(stmt->lhs, fn, backend, arena);
@@ -2285,9 +2286,9 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
             snprintf(msg, sizeof(msg), "unknown variable %s", stmt->name);
             diagnostics_error(stmt->line, stmt->col, msg);
         }
-    } else if (strcmp(stmt->op, "return") == 0) {
+    } else if (stmt->op_enum == OP_RETURN) {
         if (current_func_ret_aggregate_size > 0) {
-            if (stmt->lhs && strcmp(stmt->lhs->op, "call") == 0) {
+            if (stmt->lhs && stmt->lhs->op_enum == OP_CALL) {
                 lower_expr(stmt->lhs, fn, backend, arena);
                 int slots = (current_func_ret_aggregate_size + 15) / 16;
                 if (slots < 1) slots = 1;
@@ -2335,10 +2336,10 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
         } else {
             ir_push(fn, "ret", "", 0);
         }
-    } else if (strcmp(stmt->op, "expr") == 0) {
+    } else if (stmt->op_enum == OP_EXPR) {
         lower_expr(stmt->lhs, fn, backend, arena);
         ir_push(fn, ir_expr_is_i64(stmt->lhs, target_scale) ? "pop64" : "pop", "", 0);
-    } else if (strcmp(stmt->op, "if") == 0) {
+    } else if (stmt->op_enum == OP_IF) {
         char else_label[128];
         snprintf(else_label, sizeof(else_label), ".L%s_else%d", fn->name, fn->label_id++);
         const char *el_dup = arena_strdup(arena, else_label);
@@ -2356,7 +2357,7 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
             lower_stmt(stmt->body.data[1], fn, backend, arena);
         }
         ir_push(fn, "label", endl_dup, 0);
-    } else if (strcmp(stmt->op, "while") == 0) {
+    } else if (stmt->op_enum == OP_WHILE) {
         char start_label[128];
         snprintf(start_label, sizeof(start_label), ".L%s_while%d", fn->name, fn->label_id++);
         const char *sl_dup = arena_strdup(arena, start_label);
@@ -2375,7 +2376,7 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
 
         ir_push(fn, "jmp", sl_dup, 0);
         ir_push(fn, "label", el_dup, 0);
-    } else if (strcmp(stmt->op, "do_while") == 0) {
+    } else if (stmt->op_enum == OP_DO_WHILE) {
         char start_label[128];
         snprintf(start_label, sizeof(start_label), ".L%s_do%d", fn->name, fn->label_id++);
         const char *sl_dup = arena_strdup(arena, start_label);
@@ -2398,7 +2399,7 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
         ir_push(fn, ir_expr_is_i64(stmt->lhs, target_scale) ? "jz64" : "jz", el_dup, 0);
         ir_push(fn, "jmp", sl_dup, 0);
         ir_push(fn, "label", el_dup, 0);
-    } else if (strcmp(stmt->op, "for") == 0) {
+    } else if (stmt->op_enum == OP_FOR) {
         char start_label[128];
         snprintf(start_label, sizeof(start_label), ".L%s_for%d", fn->name, fn->label_id++);
         const char *sl_dup = arena_strdup(arena, start_label);
@@ -2430,12 +2431,12 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
         }
         ir_push(fn, "jmp", sl_dup, 0);
         ir_push(fn, "label", el_dup, 0);
-    } else if (strcmp(stmt->op, "break") == 0) {
+    } else if (stmt->op_enum == OP_BREAK) {
         if (loop_contexts.count == 0) {
             diagnostics_error(stmt->line, stmt->col, "break statement not within loop or switch");
         }
         ir_push(fn, "jmp", loop_contexts.data[loop_contexts.count - 1].break_label, 0);
-    } else if (strcmp(stmt->op, "continue") == 0) {
+    } else if (stmt->op_enum == OP_CONTINUE) {
         const char *cont_label = nullptr;
         for (int idx = loop_contexts.count - 1; idx >= 0; --idx) {
             if (loop_contexts.data[idx].continue_label && loop_contexts.data[idx].continue_label[0]) {
@@ -2447,7 +2448,7 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
             diagnostics_error(stmt->line, stmt->col, "continue statement not within loop");
         }
         ir_push(fn, "jmp", cont_label, 0);
-    } else if (strcmp(stmt->op, "switch") == 0) {
+    } else if (stmt->op_enum == OP_SWITCH) {
         char end_label[128];
         snprintf(end_label, sizeof(end_label), ".L%s_endswitch%d", fn->name, fn->label_id++);
         const char *el_dup = arena_strdup(arena, end_label);
@@ -2485,9 +2486,9 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
         loop_contexts.count--;
 
         ir_push(fn, "label", el_dup, 0);
-    } else if (strcmp(stmt->op, "case") == 0 || strcmp(stmt->op, "default") == 0) {
+    } else if (stmt->op_enum == OP_CASE || stmt->op_enum == OP_DEFAULT) {
         ir_push(fn, "label", stmt->name, 0);
-    } else if (strcmp(stmt->op, "array_decl") == 0) {
+    } else if (stmt->op_enum == OP_ARRAY_DECL) {
         if (hashmap_has(&fn->locals, stmt->name)) {
             char msg[256];
             snprintf(msg, sizeof(msg), "duplicate local %s", stmt->name);
@@ -2532,7 +2533,7 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
         ir_push(fn, "store", "", base_slot);
 
         for (int k = 0; k < stmt->body.count; ++k) {
-            if (strcmp(stmt->body.data[k]->op, "init_item") == 0) {
+            if (stmt->body.data[k]->op_enum == OP_INIT_ITEM) {
                 int size = atoi(stmt->body.data[k]->name);
                 long offset = stmt->body.data[k]->value;
                 if (size > target_scale) {
@@ -2571,11 +2572,11 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
                 ir_push(fn, "store_index", "", base_size);
             }
         }
-    } else if (strcmp(stmt->op, "store_index") == 0) {
+    } else if (stmt->op_enum == OP_STORE_INDEX) {
         int scale = get_lvalue_store_size(stmt->lhs, fn);
         if (scale == 0) scale = target_scale;
 
-        int rhs_is_call = (strcmp(stmt->rhs->op, "call") == 0);
+        int rhs_is_call = (stmt->rhs->op_enum == OP_CALL);
         int rhs_is_aggregate = expr_is_aggregate_value(stmt->rhs, fn);
         if (scale > 8 || (rhs_is_aggregate && !rhs_is_call)) {
             if (rhs_is_call) {
@@ -2591,7 +2592,7 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
             }
         } else {
             /* Check if this is a bitfield store */
-            int is_bf = (strcmp(stmt->lhs->op, "index") == 0 &&
+            int is_bf = (stmt->lhs->op_enum == OP_INDEX &&
                          strcmp(stmt->lhs->name, "byte_offset") == 0 &&
                          stmt->lhs->bit_width > 0);
             if (is_bf) {
@@ -2617,9 +2618,9 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
                 }
             }
         }
-    } else if (strcmp(stmt->op, "empty") == 0) {
+    } else if (stmt->op_enum == OP_EMPTY) {
         // Empty statement: do nothing
-    } else if (strcmp(stmt->op, "asm") == 0) {
+    } else if (stmt->op_enum == OP_ASM) {
         ir_push(fn, "asm", stmt->name, 0);
     } else {
         char msg[256];

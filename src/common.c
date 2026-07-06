@@ -108,16 +108,16 @@ void sb_appendf(StringBuilder *sb, const char *fmt, long a1, long a2, long a3, l
 }
 #else
 void sb_appendf(StringBuilder *sb, const char *fmt, ...) {
+    char stack_buf[512];
     va_list args;
     va_start(args, fmt);
-    // Find required size
-    va_list args_copy;
-    va_copy(args_copy, args);
-    int needed = vsnprintf(nullptr, 0, fmt, args_copy);
-    va_end(args_copy);
+    int needed = vsnprintf(stack_buf, sizeof(stack_buf), fmt, args);
+    va_end(args);
 
-    if (needed < 0) {
-        va_end(args);
+    if (needed < 0) return;
+
+    if ((size_t)needed < sizeof(stack_buf)) {
+        sb_append(sb, stack_buf);
         return;
     }
 
@@ -126,15 +126,16 @@ void sb_appendf(StringBuilder *sb, const char *fmt, ...) {
         sb->buf = realloc(sb->buf, sb->cap);
     }
 
+    va_start(args, fmt);
     vsnprintf(sb->buf + sb->len, needed + 1, fmt, args);
-    sb->len = sb->len + needed;
     va_end(args);
+    sb->len = sb->len + needed;
 }
 #endif
 
 char *sb_to_string(StringBuilder *sb, Arena *a) {
     if (!sb->buf) return arena_strdup(a, "");
-    return arena_strdup(a, sb->buf);
+    return arena_strndup(a, sb->buf, sb->len);
 }
 
 void sb_free(StringBuilder *sb) {

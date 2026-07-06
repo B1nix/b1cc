@@ -82,6 +82,7 @@ static const char *resolve_name(const ParserState *p, const char *name) {
 static Node *create_node(ParserState *p, const char *op, int line, int col) {
     Node *node = arena_alloc(p->arena, sizeof(struct Node));
     node->op = op;
+    node->op_enum = str_to_op(op);
     node->name = "";
     node->value = 0;
     node->is_static = 0;
@@ -124,14 +125,14 @@ static void parser_set_struct_float_aggregate_class(ParserState *p, const char *
 
 static const char *infer_struct_tag(const ParserState *p, const Node *node) {
     if (!node) return "";
-    if (strcmp(node->op, "var") == 0) {
+    if (node->op_enum == OP_VAR) {
         HashMapEntry *entry = hashmap_get((HashMap *)&p->var_struct_tags, node->name);
         return entry ? (const char *)entry->val_ptr : "";
     }
-    if (strcmp(node->op, "index") == 0 && node->type_tag && node->type_tag[0]) {
+    if (node->op_enum == OP_INDEX && node->type_tag && node->type_tag[0]) {
         return node->type_tag;
     }
-    if (strcmp(node->op, "unary_*") == 0 && node->lhs) {
+    if (node->op_enum == OP_UNARY_DEREF && node->lhs) {
         return infer_struct_tag(p, node->lhs);
     }
     return "";
@@ -142,7 +143,7 @@ static long sizeof_expr(const ParserState *p, const Node *node);
 
 static int const_expr_has_runtime_var(ParserState *p, const Node *node) {
     if (!node) return 0;
-    if (strcmp(node->op, "var") == 0) {
+    if (node->op_enum == OP_VAR) {
         return !hashmap_has(&p->global_enums, node->name) && !hashmap_has(&p->constexpr_vars, node->name);
     }
     if (const_expr_has_runtime_var(p, node->lhs) || const_expr_has_runtime_var(p, node->rhs)) return 1;
@@ -153,45 +154,45 @@ static int const_expr_has_runtime_var(ParserState *p, const Node *node) {
 }
 
 static long eval_const(ParserState *p, const Node *node) {
-    if (strcmp(node->op, "num") == 0) return node->value;
-    if (strcmp(node->op, "char") == 0) return node->value;
-    if (strcmp(node->op, "cast") == 0) return eval_const(p, node->lhs);
-    if (strcmp(node->op, "unary_-") == 0) return -eval_const(p, node->lhs);
-    if (strcmp(node->op, "unary_~") == 0) return ~eval_const(p, node->lhs);
-    if (strcmp(node->op, "unary_!") == 0) return !eval_const(p, node->lhs);
-    if (strcmp(node->op, "+") == 0) return eval_const(p, node->lhs) + eval_const(p, node->rhs);
-    if (strcmp(node->op, "-") == 0) {
+    if (node->op_enum == OP_NUM) return node->value;
+    if (node->op_enum == OP_CHAR) return node->value;
+    if (node->op_enum == OP_CAST) return eval_const(p, node->lhs);
+    if (node->op_enum == OP_UNARY_MINUS) return -eval_const(p, node->lhs);
+    if (node->op_enum == OP_UNARY_TILDE) return ~eval_const(p, node->lhs);
+    if (node->op_enum == OP_UNARY_NOT) return !eval_const(p, node->lhs);
+    if (node->op_enum == OP_ADD) return eval_const(p, node->lhs) + eval_const(p, node->rhs);
+    if (node->op_enum == OP_SUB) {
         if (node->rhs) return eval_const(p, node->lhs) - eval_const(p, node->rhs);
         return -eval_const(p, node->lhs);
     }
-    if (strcmp(node->op, "*") == 0) return eval_const(p, node->lhs) * eval_const(p, node->rhs);
-    if (strcmp(node->op, "/") == 0) {
+    if (node->op_enum == OP_MUL) return eval_const(p, node->lhs) * eval_const(p, node->rhs);
+    if (node->op_enum == OP_DIV) {
         long divisor = eval_const(p, node->rhs);
         if (divisor == 0) parser_error(p, "division by zero in constant expression");
         return eval_const(p, node->lhs) / divisor;
     }
-    if (strcmp(node->op, "==") == 0) return eval_const(p, node->lhs) == eval_const(p, node->rhs);
-    if (strcmp(node->op, "!=") == 0) return eval_const(p, node->lhs) != eval_const(p, node->rhs);
-    if (strcmp(node->op, "<") == 0) return eval_const(p, node->lhs) < eval_const(p, node->rhs);
-    if (strcmp(node->op, ">") == 0) return eval_const(p, node->lhs) > eval_const(p, node->rhs);
-    if (strcmp(node->op, "<=") == 0) return eval_const(p, node->lhs) <= eval_const(p, node->rhs);
-    if (strcmp(node->op, ">=") == 0) return eval_const(p, node->lhs) >= eval_const(p, node->rhs);
-    if (strcmp(node->op, "&&") == 0) return eval_const(p, node->lhs) && eval_const(p, node->rhs);
-    if (strcmp(node->op, "||") == 0) return eval_const(p, node->lhs) || eval_const(p, node->rhs);
-    if (strcmp(node->op, "&") == 0) return eval_const(p, node->lhs) & eval_const(p, node->rhs);
-    if (strcmp(node->op, "|") == 0) return eval_const(p, node->lhs) | eval_const(p, node->rhs);
-    if (strcmp(node->op, "^") == 0) return eval_const(p, node->lhs) ^ eval_const(p, node->rhs);
-    if (strcmp(node->op, "<<") == 0) return eval_const(p, node->lhs) << eval_const(p, node->rhs);
-    if (strcmp(node->op, ">>") == 0) return eval_const(p, node->lhs) >> eval_const(p, node->rhs);
-    if (strcmp(node->op, "?") == 0) {
+    if (node->op_enum == OP_EQ) return eval_const(p, node->lhs) == eval_const(p, node->rhs);
+    if (node->op_enum == OP_NE) return eval_const(p, node->lhs) != eval_const(p, node->rhs);
+    if (node->op_enum == OP_LT) return eval_const(p, node->lhs) < eval_const(p, node->rhs);
+    if (node->op_enum == OP_GT) return eval_const(p, node->lhs) > eval_const(p, node->rhs);
+    if (node->op_enum == OP_LE) return eval_const(p, node->lhs) <= eval_const(p, node->rhs);
+    if (node->op_enum == OP_GE) return eval_const(p, node->lhs) >= eval_const(p, node->rhs);
+    if (node->op_enum == OP_LAND) return eval_const(p, node->lhs) && eval_const(p, node->rhs);
+    if (node->op_enum == OP_LOR) return eval_const(p, node->lhs) || eval_const(p, node->rhs);
+    if (node->op_enum == OP_BAND) return eval_const(p, node->lhs) & eval_const(p, node->rhs);
+    if (node->op_enum == OP_BOR) return eval_const(p, node->lhs) | eval_const(p, node->rhs);
+    if (node->op_enum == OP_BXOR) return eval_const(p, node->lhs) ^ eval_const(p, node->rhs);
+    if (node->op_enum == OP_SHL) return eval_const(p, node->lhs) << eval_const(p, node->rhs);
+    if (node->op_enum == OP_SHR) return eval_const(p, node->lhs) >> eval_const(p, node->rhs);
+    if (node->op_enum == OP_TERNARY) {
         long cond = eval_const(p, node->lhs);
         if (node->body.count < 2) parser_error(p, "invalid conditional constant expression");
         return cond ? eval_const(p, node->body.data[0]) : eval_const(p, node->body.data[1]);
     }
-    if (strcmp(node->op, "sizeof") == 0) {
+    if (node->op_enum == OP_SIZEOF) {
         return sizeof_expr(p, node->lhs);
     }
-    if (strcmp(node->op, "var") == 0) {
+    if (node->op_enum == OP_VAR) {
         if (strcmp(node->name, ";") == 0 || strcmp(node->name, "}") == 0) {
             return 0;
         }
@@ -205,18 +206,18 @@ static long eval_const(ParserState *p, const Node *node) {
 
 static int node_address_ref(ParserState *p, const Node *node, const char **base, long *offset) {
     if (!node) return 0;
-    if (strcmp(node->op, "cast") == 0) {
+    if (node->op_enum == OP_CAST) {
         return node_address_ref(p, node->lhs, base, offset);
     }
-    if (strcmp(node->op, "unary_&") == 0) {
+    if (node->op_enum == OP_UNARY_ADDR) {
         return node_address_ref(p, node->lhs, base, offset);
     }
-    if (strcmp(node->op, "var") == 0) {
+    if (node->op_enum == OP_VAR) {
         *base = node->name;
         *offset = 0;
         return 1;
     }
-    if (strcmp(node->op, "index") == 0) {
+    if (node->op_enum == OP_INDEX) {
         const char *inner_base = nullptr;
         long inner_offset = 0;
         if (!node_address_ref(p, node->lhs, &inner_base, &inner_offset)) return 0;
@@ -228,7 +229,7 @@ static int node_address_ref(ParserState *p, const Node *node, const char **base,
             scale = node->elem_size;
         } else if (node->type_size > 0) {
             scale = node->type_size;
-        } else if (node->lhs && strcmp(node->lhs->op, "var") == 0) {
+        } else if (node->lhs && node->lhs->op_enum == OP_VAR) {
             char local_key[512];
             snprintf(local_key, sizeof(local_key), "%s$%s", p->current_func_name ? p->current_func_name : "", node->lhs->name);
             int base_size = ir_get_local_array_base_size(local_key);
@@ -286,19 +287,19 @@ static void get_expr_type_info(const ParserState *p, const Node *node, int *type
     *struct_tag = "";
     *elem_size = 0;
     if (!node) return;
-    if (strcmp(node->op, "num") == 0) {
+    if (node->op_enum == OP_NUM) {
         *type_size = node->type_size ? node->type_size : 4;
         *is_unsigned = node->is_unsigned;
         return;
     }
-    if (strcmp(node->op, "str") == 0) {
+    if (node->op_enum == OP_STR) {
         *type_size = p->target_scale;
         *is_unsigned = 1;
         *is_pointer = 1;
         *elem_size = 1;
         return;
     }
-    if (strcmp(node->op, "var") == 0) {
+    if (node->op_enum == OP_VAR) {
         HashMapEntry *entry = hashmap_get((HashMap *)&p->value_sizes, node->name);
         *type_size = entry ? entry->val_int : p->target_scale;
         entry = hashmap_get((HashMap *)&p->unsigned_vars, node->name);
@@ -322,12 +323,12 @@ static void get_expr_type_info(const ParserState *p, const Node *node, int *type
         }
         return;
     }
-    if (strcmp(node->op, "cast") == 0) {
+    if (node->op_enum == OP_CAST) {
         *type_size = node->type_size;
         *is_unsigned = node->is_unsigned;
         return;
     }
-    if (strcmp(node->op, "unary_*") == 0) {
+    if (node->op_enum == OP_UNARY_DEREF) {
         const char *lhs_tag = infer_struct_tag(p, node->lhs);
         if (lhs_tag && lhs_tag[0]) {
             *struct_tag = lhs_tag;
@@ -338,7 +339,7 @@ static void get_expr_type_info(const ParserState *p, const Node *node, int *type
         }
         return;
     }
-    if (strcmp(node->op, "index") == 0) {
+    if (node->op_enum == OP_INDEX) {
         *type_size = node->type_size ? node->type_size : p->target_scale;
         *struct_tag = node->type_tag ? node->type_tag : "";
         return;
@@ -360,16 +361,16 @@ static int match_generic_type(int ctrl_size, int ctrl_unsigned, int ctrl_pointer
 }
 
 static long sizeof_expr(const ParserState *p, const Node *node) {
-    if (strcmp(node->op, "num") == 0) return 8;
-    if (strcmp(node->op, "char") == 0) return 1;
-    if (strcmp(node->op, "var") == 0) {
+    if (node->op_enum == OP_NUM) return 8;
+    if (node->op_enum == OP_CHAR) return 1;
+    if (node->op_enum == OP_VAR) {
         HashMapEntry *entry = hashmap_get((HashMap *)&p->value_sizes, node->name);
         if (entry) return entry->val_int;
         return p->target_scale;
     }
-    if (strcmp(node->op, "index") == 0) {
+    if (node->op_enum == OP_INDEX) {
         if (node->elem_size > 0) return node->elem_size;
-        if (node->lhs && strcmp(node->lhs->op, "var") == 0) {
+        if (node->lhs && node->lhs->op_enum == OP_VAR) {
             char local_key[512];
             snprintf(local_key, sizeof(local_key), "%s$%s", p->current_func_name ? p->current_func_name : "", node->lhs->name);
             int base = ir_get_local_array_base_size(local_key);
@@ -379,10 +380,10 @@ static long sizeof_expr(const ParserState *p, const Node *node) {
         }
         return p->target_scale;
     }
-    if (strcmp(node->op, "cast") == 0) {
+    if (node->op_enum == OP_CAST) {
         return node->type_size;
     }
-    if (strcmp(node->op, "unary_*") == 0) {
+    if (node->op_enum == OP_UNARY_DEREF) {
         if (node->lhs && node->lhs->pointee_size > 0) {
             return node->lhs->pointee_size;
         }
@@ -392,10 +393,10 @@ static long sizeof_expr(const ParserState *p, const Node *node) {
             if (entry) return entry->val_int;
         }
         const Node *base = node->lhs;
-        if (base && strcmp(base->op, "index") == 0) {
+        if (base && base->op_enum == OP_INDEX) {
             base = base->lhs;
         }
-        if (base && strcmp(base->op, "var") == 0) {
+        if (base && base->op_enum == OP_VAR) {
             char local_key[512];
             snprintf(local_key, sizeof(local_key), "%s$%s", p->current_func_name ? p->current_func_name : "", base->name);
             int scale = ir_get_local_var_elem_scale(local_key);
@@ -405,9 +406,9 @@ static long sizeof_expr(const ParserState *p, const Node *node) {
         }
         return p->target_scale;
     }
-    if (strcmp(node->op, "member") == 0 || strcmp(node->op, "member_ptr") == 0) {
+    if (node->op_enum == OP_MEMBER || node->op_enum == OP_MEMBER_PTR) {
         const char *tag = "";
-        if (strcmp(node->op, "member") == 0) {
+        if (node->op_enum == OP_MEMBER) {
             tag = infer_struct_tag(p, node->lhs);
         } else {
             tag = infer_struct_tag(p, node->lhs);
@@ -1262,7 +1263,7 @@ static int is_function_decl(ParserState *p) {
 
 static void apply_integer_conversion(ParserState *p, Node *node) {
     (void)p;
-    if (strcmp(node->op, "num") == 0) {
+    if (node->op_enum == OP_NUM) {
         if (node->value > 2147483647L || node->value < -2147483648L) {
             node->type_size = 8;
         } else {
@@ -1273,11 +1274,11 @@ static void apply_integer_conversion(ParserState *p, Node *node) {
 
 static int promoted_is_unsigned(const Node *node) {
     if (!node) return 0;
-    if (strcmp(node->op, "==") == 0 || strcmp(node->op, "!=") == 0 ||
-        strcmp(node->op, "<") == 0 || strcmp(node->op, ">") == 0 ||
-        strcmp(node->op, "<=") == 0 || strcmp(node->op, ">=") == 0 ||
-        strcmp(node->op, "&&") == 0 || strcmp(node->op, "||") == 0 ||
-        strcmp(node->op, "unary_!") == 0) {
+    if (node->op_enum == OP_EQ || node->op_enum == OP_NE ||
+        node->op_enum == OP_LT || node->op_enum == OP_GT ||
+        node->op_enum == OP_LE || node->op_enum == OP_GE ||
+        node->op_enum == OP_LAND || node->op_enum == OP_LOR ||
+        node->op_enum == OP_UNARY_NOT) {
         return 0;
     }
     return node && node->is_unsigned && node->type_size >= 4;
@@ -1670,10 +1671,10 @@ static Node *primary(ParserState *p) {
 
 static int is_lvalue_node(const Node *n) {
     if (!n) return 0;
-    if (strcmp(n->op, "var") == 0 || strcmp(n->op, "index") == 0 || strcmp(n->op, "unary_*") == 0) {
+    if (n->op_enum == OP_VAR || n->op_enum == OP_INDEX || n->op_enum == OP_UNARY_DEREF) {
         return 1;
     }
-    if (strcmp(n->op, ",") == 0) {
+    if (n->op_enum == OP_COMMA) {
         return is_lvalue_node(n->rhs);
     }
     return 0;
@@ -1699,7 +1700,7 @@ static Node *factor(ParserState *p) {
 	                deref->elem_size = n->pointee_size;
 	                deref->type_size = n->pointee_size;
 	                deref->is_unsigned = n->pointee_unsigned_known ? n->pointee_unsigned : n->is_unsigned;
-	            } else if (strcmp(n->op, "var") == 0) {
+	            } else if (n->op_enum == OP_VAR) {
 	                char local_key[512];
 	                snprintf(local_key, sizeof(local_key), "%s$%s", p->current_func_name ? p->current_func_name : "", n->name);
 	                int elem = ir_get_local_array_base_size(local_key);
@@ -1740,7 +1741,7 @@ static Node *factor(ParserState *p) {
                 }
             }
             take(p, ")");
-            if (strcmp(n->op, "var") == 0) {
+            if (n->op_enum == OP_VAR) {
                 HashMapEntry *ret_size = hashmap_get(&p->function_return_sizes, n->name);
                 if (ret_size) call->type_size = ret_size->val_int;
                 HashMapEntry *ret_unsigned = hashmap_get(&p->function_return_unsigned, n->name);
@@ -1886,7 +1887,7 @@ static Node *unary(ParserState *p) {
         n->lhs = unary(p);
         n->is_unsigned = n->lhs ? n->lhs->is_unsigned : 0;
         int elem = (n->lhs && n->lhs->pointee_size > 0) ? n->lhs->pointee_size : 0;
-        if (elem == 0 && n->lhs && strcmp(n->lhs->op, "var") == 0) {
+        if (elem == 0 && n->lhs && n->lhs->op_enum == OP_VAR) {
             char local_key[512];
             snprintf(local_key, sizeof(local_key), "%s$%s", p->current_func_name ? p->current_func_name : "", n->lhs->name);
             elem = ir_get_local_var_elem_scale(local_key);
@@ -1918,7 +1919,7 @@ static Node *unary(ParserState *p) {
         snprintf(op_name, sizeof(op_name), "prefix_%s", op);
         Node *n = create_node(p, arena_strdup(p->arena, op_name), tok_line, tok_col);
         n->lhs = unary(p);
-        if (strcmp(n->lhs->op, "var") == 0) {
+        if (n->lhs->op_enum == OP_VAR) {
             n->name = n->lhs->name;
         }
         n->type_size = n->lhs->type_size;
@@ -2447,7 +2448,7 @@ static Node *expr(ParserState *p) {
             apply_integer_conversion(p, bin_node);
             rhs = bin_node;
         }
-        if (strcmp(cond->op, "var") == 0) {
+        if (cond->op_enum == OP_VAR) {
             HashMapEntry *const_entry = hashmap_get(&p->const_vars, cond->name);
             if (const_entry && const_entry->val_int) {
                 diagnostics_error(tok_line, tok_col, "assignment of read-only (const-qualified) variable");
@@ -2804,7 +2805,7 @@ static void parse_aggregate_init_internal(ParserState *p, long base_offset, cons
                         InitElement *prev = &inits->data[init_i];
                         if (prev->offset == base_offset + field_offset &&
                             prev->size == field_size &&
-                            strcmp(prev->val->op, "num") == 0) {
+                            prev->val->op_enum == OP_NUM) {
                             prev->val->value |= val->value;
                             merged = 1;
                             break;
@@ -3674,10 +3675,10 @@ static Node *stmt(ParserState *p) {
                     char *byte_buf = calloc(total_byte_size + 1, 1);
                     for (int item_i = 0; item_i < parsed_inits.count; ++item_i) {
                         Node *init_val = parsed_inits.data[item_i].val;
-                        if (strcmp(init_val->op, "cast") == 0 && init_val->lhs && strcmp(init_val->lhs->op, "str") == 0) {
+                        if (init_val->op_enum == OP_CAST && init_val->lhs && init_val->lhs->op_enum == OP_STR) {
                             init_val = init_val->lhs;
                         }
-                        long val = strcmp(init_val->op, "str") == 0 ? 0 : eval_const(p, init_val);
+                        long val = init_val->op_enum == OP_STR ? 0 : eval_const(p, init_val);
                         for (int b = 0; b < parsed_inits.data[item_i].size; ++b) {
                             if (parsed_inits.data[item_i].offset + b < total_byte_size) {
                                 byte_buf[parsed_inits.data[item_i].offset + b] = (val >> (b * 8)) & 0xff;
@@ -3797,7 +3798,7 @@ static Node *stmt(ParserState *p) {
                         if (is_bool && stars == 0) {
                             init = bool_normalize(p, init);
                         }
-                        if (node->array_dims.count > 0 && orig_base_size == 1 && strcmp(init->op, "str") == 0) {
+                        if (node->array_dims.count > 0 && orig_base_size == 1 && init->op_enum == OP_STR) {
                             const char *lit = init->name;
                             long byte_count = 0;
                             while (lit[byte_count] != '\0') {
@@ -4949,11 +4950,11 @@ static void global_decl(ParserState *p, int is_static, int is_extern) {
                         int *byte_str_idx = calloc(type_size + 1, sizeof(int));
                         for (int k = 0; k < inits.count; ++k) {
                             Node *init_val = inits.data[k].val;
-                            if (strcmp(init_val->op, "cast") == 0 && init_val->lhs && strcmp(init_val->lhs->op, "str") == 0) {
+                            if (init_val->op_enum == OP_CAST && init_val->lhs && init_val->lhs->op_enum == OP_STR) {
                                 init_val = init_val->lhs;
                             }
                             char addr_ref[512];
-                            if (strcmp(init_val->op, "str") == 0) {
+                            if (init_val->op_enum == OP_STR) {
                                 char label[256];
                                 snprintf(label, sizeof(label), ".Lstr_glob_%s_%d", name, strings.count);
                                 StringPair sp;
@@ -5004,11 +5005,11 @@ static void global_decl(ParserState *p, int is_static, int is_extern) {
                             for (int k = 0; k < inits.count; ++k) {
                                 if (inits.data[k].offset == offset) {
                                     Node *init_val = inits.data[k].val;
-                                    if (strcmp(init_val->op, "cast") == 0 && init_val->lhs && strcmp(init_val->lhs->op, "str") == 0) {
+                                    if (init_val->op_enum == OP_CAST && init_val->lhs && init_val->lhs->op_enum == OP_STR) {
                                         init_val = init_val->lhs;
                                     }
                                     char addr_ref[512];
-                                    if (strcmp(init_val->op, "str") == 0) {
+                                    if (init_val->op_enum == OP_STR) {
                                         char label[256];
                                         snprintf(label, sizeof(label), ".Lstr_glob_%s_%d", name, strings.count);
                                         StringPair sp;
@@ -5069,10 +5070,10 @@ static void global_decl(ParserState *p, int is_static, int is_extern) {
                 int fp_init = base_float && stars == 0;
                 double fp_d = 0.0;
                 int got_fp = 0;
-                if (fp_init && strcmp(val_node->op, "fnum") == 0) {
+                if (fp_init && val_node->op_enum == OP_FNUM) {
                     fp_d = val_node->fvalue; got_fp = 1;
-                } else if (fp_init && strcmp(val_node->op, "unary_-") == 0 &&
-                           val_node->lhs && strcmp(val_node->lhs->op, "fnum") == 0) {
+                } else if (fp_init && val_node->op_enum == OP_UNARY_MINUS &&
+                           val_node->lhs && val_node->lhs->op_enum == OP_FNUM) {
                     fp_d = -val_node->lhs->fvalue; got_fp = 1;
                 }
                 if (got_fp) {
@@ -5094,9 +5095,9 @@ static void global_decl(ParserState *p, int is_static, int is_extern) {
                     ir_set_global_initializers_with_strings(name, init_vals, is_string, strings);
                     int_array_free(&is_string);
                     string_pair_array_free(&strings);
-                } else if (strcmp(val_node->op, "str") == 0 ||
-                           ((stars > 0 || is_func_ptr) && strcmp(val_node->op, "cast") == 0 && val_node->lhs && strcmp(val_node->lhs->op, "str") == 0)) {
-                    Node *str_node = strcmp(val_node->op, "str") == 0 ? val_node : val_node->lhs;
+                } else if (val_node->op_enum == OP_STR ||
+                           ((stars > 0 || is_func_ptr) && val_node->op_enum == OP_CAST && val_node->lhs && val_node->lhs->op_enum == OP_STR)) {
+                    Node *str_node = val_node->op_enum == OP_STR ? val_node : val_node->lhs;
                     char label[256];
                     snprintf(label, sizeof(label), ".Lstr_glob_%s_0", name);
                     StringPair sp;
