@@ -340,12 +340,12 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
             int stack_bytes = (local_slots * 16 + align_sz - 1) & ~(align_sz - 1);
             emit_sub_imm(&out, "sp", "sp", stack_bytes);
             if (has_custom_align) {
-                sb_appendf(&out, "    str x11, [x29, #-%d]\n", (save_rsp_slot + 1) * 16);
+                emit_store_fp(&out, 11, -((save_rsp_slot + 1) * 16));
             }
         }
         if (indirect_ret) {
             int off = -((fn->locals.size + 1) * 16);
-            sb_appendf(&out, "    str x8, [x29, #%d]\n", off);
+            emit_store_fp(&out, 8, off);
         }
         int abi_word = 0;
         int stack_word = 0;
@@ -1231,7 +1231,7 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                 }
             }
             if (has_custom_align) {
-                sb_appendf(&out, "    ldr x11, [x29, #-%d]\n", (save_rsp_slot + 1) * 16);
+                emit_load_fp(&out, 11, -((save_rsp_slot + 1) * 16));
                 sb_append(&out, "    mov sp, x11\n");
                 sb_append(&out, "    ldp x29, x30, [sp], #16\n");
             } else if (frame) {
@@ -1242,7 +1242,7 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
         } else if (strcmp(inst->op, "ret") == 0) {
             sb_append(&out, "    ldr x0, [sp], #16\n");
             if (has_custom_align) {
-                sb_appendf(&out, "    ldr x11, [x29, #-%d]\n", (save_rsp_slot + 1) * 16);
+                emit_load_fp(&out, 11, -((save_rsp_slot + 1) * 16));
                 sb_append(&out, "    mov sp, x11\n");
                 sb_append(&out, "    ldp x29, x30, [sp], #16\n");
             } else if (frame) {

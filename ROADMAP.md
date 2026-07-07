@@ -382,3 +382,30 @@ Skipped: full C/C++ upfront. Add features only when a test or B1NIX source needs
 - [x] Implement internal or static library compiler-runtime helpers (like `__divdi3` / `__moddi3`) for division/modulo operations. `runtime/divdi3.c` provides signed/unsigned 64-bit software division and modulo for 32-bit targets (i386), covering `__divdi3`, `__moddi3`, `__udivdi3`, and `__umoddi3`.
 - [x] Provide a minimal self-sufficient runtime/libc layer (implementing `memcpy`, `memset`, `memmove`, `strlen`, etc.) to eliminate dependency on host/external `libc`. `runtime/runtime.c` provides `memcpy`, `memmove`, `memset`, `memcmp`, `strlen`, `strcmp`, `strncmp`, `strcpy`, `strcat`, `strchr`, `strrchr`, `strstr`, `snprintf`, `sprintf`, `atol`, `atoi`, `abort`, and `exit`.
 - [x] Support compiling and static-linking standalone / bare-metal binaries without host linker requirements. The driver accepts `-ffreestanding` to auto-compile and link the runtime helpers, and `-nostdlib` to skip runtime linking. For ELF targets (B1NIX/kernel), runtime is compiled via b1cc's native ELF writer; for Darwin, the host `cc` compiles the runtime objects.
+
+## M31: Compiler Performance Optimizations
+
+- [x] Replace `strcmp(node->op, ...)` with integer enum comparisons (`OpKind`) across 137+ call sites in `parser.c` and `ir.c`. Adds `OpKind` enum to `ast.h`, `op_enum` field to `Node` struct, and `str_to_op()`/`op_to_str()` lookup functions in `ast.c`.
+- [x] Optimize `sb_appendf()` to single-pass with 512-byte stack buffer. Avoids double `vsnprintf` call (once for length, once for formatting) for the common case.
+- [x] Use `arena_strndup()` with known length in `sb_to_string()` instead of `arena_strdup()` which recomputes length via `strlen`.
+- [x] Replace `active_macros` HashMap clone with `StringArray` recursion guard in lexer macro expansion. Linear search over ~3-5 entries is faster than HashMap clone for small sets.
+- [x] Use POSIX `access()` instead of `fopen()`/`fclose()` for file existence checks in preprocessor and driver.
+
+### M31 Benchmark Results
+
+Measured on arm64-darwin, 200 iterations each:
+
+| File | Before | After | Speedup |
+|------|--------|-------|---------|
+| `tests/for.c` (120 lines) | 5.138s | 1.865s | **2.75x** |
+| `bench_large.c` (~200 lines) | 4.926s | 2.780s | **1.77x** |
+
+### Open Performance Work
+
+- [ ] Cache hash values in `HashMapEntry` (reverted — caused segfault, needs careful `calloc`-based approach).
+- [ ] Open-addressing HashMap with linear probing for better cache locality.
+- [ ] Parallel function emission in backends via pthreads.
+- [ ] String interning for frequently compared operator/keyword strings.
+- [ ] Compact IR representation (opcode as enum, operands as indices).
+- [x] `sb_append_n()` with known length to avoid `strlen` for string literals in backends.
+- [ ] Pool-allocate `HashMapEntry` instead of per-entry `malloc`.

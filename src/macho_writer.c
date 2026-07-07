@@ -355,6 +355,7 @@ typedef struct {
     ByteBuf cstring;
     ByteBuf data;
     RelocArr text_relocs;
+    RelocArr data_relocs;
     SymArr syms;
 } AsmModel;
 
@@ -363,6 +364,7 @@ static void asm_model_init(AsmModel *m) {
     bb_init(&m->cstring);
     bb_init(&m->data);
     m->text_relocs.data = NULL; m->text_relocs.count = m->text_relocs.cap = 0;
+    m->data_relocs.data = NULL; m->data_relocs.count = m->data_relocs.cap = 0;
     m->syms.data = NULL; m->syms.count = m->syms.cap = 0;
 }
 
@@ -371,6 +373,7 @@ static void asm_model_free(AsmModel *m) {
     bb_free(&m->cstring);
     bb_free(&m->data);
     free(m->text_relocs.data);
+    free(m->data_relocs.data);
     free(m->syms.data);
 }
 
@@ -1327,8 +1330,27 @@ static void parse_asm_arm64(const char *asm_text, AsmModel *m) {
                     int64_t v = parse_int(skip_ws(lp + 6));
                     bb_write32le(sec_buf, (uint32_t)v);
                 } else if (strncmp(lp, ".quad ", 6) == 0) {
-                    int64_t v = parse_int(skip_ws(lp + 6));
-                    bb_write64le(sec_buf, (uint64_t)v);
+                    const char *val_str = skip_ws(lp + 6);
+                    if (*val_str && (val_str[0] == '_' || val_str[0] == '.' || (val_str[0] >= 'a' && val_str[0] <= 'z') || (val_str[0] >= 'A' && val_str[0] <= 'Z'))) {
+                        char sym_name[256];
+                        int s_len = 0;
+                        while (val_str[s_len] && val_str[s_len] != ' ' && val_str[s_len] != '\t' && val_str[s_len] != '\n' && s_len < 255) {
+                            sym_name[s_len] = val_str[s_len];
+                            s_len++;
+                        }
+                        sym_name[s_len] = '\0';
+                        
+                        MachoReloc r = {0};
+                        strncpy(r.sym_name, sym_name, 255);
+                        r.offset = sec_buf->size;
+                        r.type = ARM64_RELOC_UNSIGNED;
+                        relocarr_push(&m->data_relocs, &r);
+                        
+                        bb_write64le(sec_buf, 0);
+                    } else {
+                        int64_t v = parse_int(val_str);
+                        bb_write64le(sec_buf, (uint64_t)v);
+                    }
                 } else if (strncmp(lp, ".zero ", 6) == 0) {
                     int64_t n = parse_int(skip_ws(lp + 6));
                     for (int64_t i = 0; i < n; i++) bb_write8(sec_buf, 0);
@@ -1404,6 +1426,24 @@ MachObject macho_write_object(const char *asm_text, const char *src_path, Arena 
             symarr_push(&m.syms, &sym);
         }
     }
+    for (int i = 0; i < m.data_relocs.count; i++) {
+        const char *rname = m.data_relocs.data[i].sym_name;
+        bool found = false;
+        for (int j = 0; j < m.syms.count; j++) {
+            if (strcmp(m.syms.data[j].name, rname) == 0) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            MachoSym sym = {0};
+            strncpy(sym.name, rname, 255);
+            sym.sect = 0;
+            sym.defined = 0;
+            sym.is_global = 1;
+            symarr_push(&m.syms, &sym);
+        }
+    }
 
     // Separate symbols into local, global defined, and undefined
     SymArr locals = {NULL, 0, 0};
@@ -1459,6 +1499,9 @@ MachObject macho_write_object(const char *asm_text, const char *src_path, Arena 
     
     uint32_t reloc_offset = current_offset;
     current_offset += m.text_relocs.count * 8; // 8 bytes per relocation_info
+    
+    uint32_t data_reloc_offset = current_offset;
+    current_offset += m.data_relocs.count * 8; // 8 bytes per relocation_info
     
     uint32_t sym_offset = current_offset;
     current_offset += sorted_syms.count * sizeof(struct nlist_64);
@@ -1537,8 +1580,8 @@ MachObject macho_write_object(const char *asm_text, const char *src_path, Arena 
     s_data.size = m.data.size;
     s_data.offset = data_offset;
     s_data.align = 3; // 2^3 = 8
-    s_data.reloff = 0;
-    s_data.nreloc = 0;
+    s_data.reloff = m.data_relocs.count > 0 ? data_reloc_offset : 0;
+    s_data.nreloc = m.data_relocs.count;
     s_data.flags = 0x00000000; // S_REGULAR
     s_data.reserved1 = 0;
     s_data.reserved2 = 0;
@@ -1605,6 +1648,29 @@ MachObject macho_write_object(const char *asm_text, const char *src_path, Arena 
         uint32_t length = 2; // always 4 bytes (long/32-bit offset target size)
         uint32_t r_extern = 1;
         
+        uint32_t r_info = (sym_idx & 0xffffff) | (pcrel << 24) | (length << 25) | (r_extern << 27) | (r->type << 28);
+        
+        bb_write32le(&out, (uint32_t)r->offset);
+        bb_write32le(&out, r_info);
+    }
+
+    // Write data relocations
+    for (int i = 0; i < m.data_relocs.count; i++) {
+        MachoReloc *r = &m.data_relocs.data[i];
+        int sym_idx = -1;
+        for (int j = 0; j < sorted_syms.count; j++) {
+            if (strcmp(sorted_syms.data[j].name, r->sym_name) == 0) {
+                sym_idx = j;
+                break;
+            }
+        }
+        if (sym_idx == -1) {
+            diagnostics_fatal("macho_writer: unresolved data relocation symbol");
+        }
+        
+        uint32_t pcrel = 0;
+        uint32_t length = 3; // 8 bytes (2^3 = 8)
+        uint32_t r_extern = 1;
         uint32_t r_info = (sym_idx & 0xffffff) | (pcrel << 24) | (length << 25) | (r_extern << 27) | (r->type << 28);
         
         bb_write32le(&out, (uint32_t)r->offset);

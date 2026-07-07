@@ -42,6 +42,8 @@ typedef struct StringBuilder {
 
 void sb_init(StringBuilder *sb);
 void sb_append(StringBuilder *sb, const char *s);
+void sb_append_n(StringBuilder *sb, const char *s, size_t slen);
+#define sb_append_lit(sb, lit) sb_append_n(sb, lit, sizeof(lit) - 1)
 void sb_append_char(StringBuilder *sb, char c);
 #ifdef __b1cc__
 void sb_appendf(StringBuilder *sb, const char *fmt, long a1, long a2, long a3, long a4, long a5, long a6);

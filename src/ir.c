@@ -93,6 +93,7 @@ void ir_global_var_array_push(IrGlobalVarArray *arr, const IrGlobalVar *val) {
     arr->data[arr->count].is_extern = val->is_extern;
     arr->data[arr->count].elem_size = val->elem_size;
     arr->data[arr->count].align = val->align;
+    arr->data[arr->count].is_thread_local = val->is_thread_local;
     arr->count = arr->count + 1;
 }
 void ir_global_var_array_free(IrGlobalVarArray *arr) {

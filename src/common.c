@@ -86,6 +86,19 @@ void sb_append(StringBuilder *sb, const char *s) {
     sb->buf[sb->len] = '\0';
 }
 
+void sb_append_n(StringBuilder *sb, const char *s, size_t slen) {
+    if (!s || slen == 0) return;
+    size_t needed = sb->len + slen + 1;
+    if (needed > sb->cap) {
+        size_t new_cap = needed + 16;
+        sb->cap = new_cap;
+        sb->buf = realloc(sb->buf, sb->cap);
+    }
+    memcpy(sb->buf + sb->len, s, slen);
+    sb->len = sb->len + slen;
+    sb->buf[sb->len] = '\0';
+}
+
 void sb_append_char(StringBuilder *sb, char c) {
     size_t needed = sb->len + 2;
     if (needed > sb->cap) {
