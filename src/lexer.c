@@ -175,7 +175,7 @@ TokenArray lex(const char *src, HashMap *macros, StringArray *active_macros, Are
                 }
             }
             (void)suffix_start;
-            const char *num_str = arena_strndup(arena, src + start, i - start);
+            const char *num_str = intern_string_n(arena, src + start, i - start);
             push_token(&out, num_str, tok_line, tok_col);
         } else if (is_alpha(c)) {
             size_t start = i;
@@ -186,7 +186,7 @@ TokenArray lex(const char *src, HashMap *macros, StringArray *active_macros, Are
                     break;
                 CONSUME(1);
             }
-            const char *ident = arena_strndup(arena, src + start, i - start);
+            const char *ident = intern_string_n(arena, src + start, i - start);
             if (strcmp(ident, "L") == 0 && i < src_len && src[i] == '\'') {
                 size_t char_start = i;
                 CONSUME(1);
@@ -201,13 +201,13 @@ TokenArray lex(const char *src, HashMap *macros, StringArray *active_macros, Are
                     diagnostics_error(tok_line, tok_col, "unterminated wide character literal");
                 }
                 CONSUME(1);
-                push_token(&out, arena_strndup(arena, src + char_start, i - char_start), tok_line, tok_col);
+                push_token(&out, intern_string_n(arena, src + char_start, i - char_start), tok_line, tok_col);
                 continue;
             }
             if (strcmp(ident, "__LINE__") == 0) {
                 char buf[32];
                 snprintf(buf, sizeof(buf), "%d", preprocessor_current_line);
-                push_token(&out, arena_strdup(arena, buf), tok_line, tok_col);
+                push_token(&out, intern_string(arena, buf), tok_line, tok_col);
                 continue;
             }
             if (strcmp(ident, "__FILE__") == 0) {
@@ -224,14 +224,14 @@ TokenArray lex(const char *src, HashMap *macros, StringArray *active_macros, Are
                     }
                 }
                 sb_append_char(&sb, '"');
-                push_token(&out, sb_to_string(&sb, arena), tok_line, tok_col);
+                push_token(&out, intern_string(arena, sb_to_string(&sb, arena)), tok_line, tok_col);
                 sb_free(&sb);
                 continue;
             }
             if (strcmp(ident, "__COUNTER__") == 0) {
                 char buf[32];
                 snprintf(buf, sizeof(buf), "%d", preprocessor_counter++);
-                push_token(&out, arena_strdup(arena, buf), tok_line, tok_col);
+                push_token(&out, intern_string(arena, buf), tok_line, tok_col);
                 continue;
             }
             HashMapEntry *macro_entry = macros ? hashmap_get(macros, ident) : nullptr;
@@ -377,7 +377,7 @@ TokenArray lex(const char *src, HashMap *macros, StringArray *active_macros, Are
                             while (arg[s_idx] && is_space(arg[s_idx])) s_idx++;
                             size_t e_idx = strlen(arg);
                             while (e_idx > s_idx && is_space(arg[e_idx - 1])) e_idx--;
-                            args.data[arg_idx] = arena_strndup(arena, arg + s_idx, e_idx - s_idx);
+                            args.data[arg_idx] = intern_string_n(arena, arg + s_idx, e_idx - s_idx);
                         }
 
                         TokenArray body_tokens = lex(m->body, nullptr, nullptr, arena);
@@ -520,15 +520,17 @@ TokenArray lex(const char *src, HashMap *macros, StringArray *active_macros, Are
                                     const char *right = expanded.data[k + 1].text;
                                     char *pasted_text;
                                     if (left[0] == '\0') {
-                                        pasted_text = arena_strdup(arena, right);
+                                        pasted_text = (char *)intern_string(arena, right);
                                     } else if (right[0] == '\0') {
-                                        pasted_text = arena_strdup(arena, left);
+                                        pasted_text = (char *)intern_string(arena, left);
                                     } else {
                                         size_t len1 = strlen(left);
                                         size_t len2 = strlen(right);
-                                        pasted_text = arena_alloc(arena, len1 + len2 + 1);
-                                        strcpy(pasted_text, left);
-                                        strcat(pasted_text, right);
+                                        char *tmp = malloc(len1 + len2 + 1);
+                                        strcpy(tmp, left);
+                                        strcat(tmp, right);
+                                        pasted_text = (char *)intern_string_n(arena, tmp, len1 + len2);
+                                        free(tmp);
                                     }
                                     pasted.data[pasted.count - 1].text = pasted_text;
                                     k++;
@@ -586,7 +588,7 @@ TokenArray lex(const char *src, HashMap *macros, StringArray *active_macros, Are
                 diagnostics_error(tok_line, tok_col, "unterminated string literal");
             }
             CONSUME(1);
-            const char *str_val = arena_strndup(arena, src + start, i - start);
+            const char *str_val = intern_string_n(arena, src + start, i - start);
             push_token(&out, str_val, tok_line, tok_col);
         } else if (c == '\'') {
             size_t start = i;
@@ -602,7 +604,7 @@ TokenArray lex(const char *src, HashMap *macros, StringArray *active_macros, Are
                 diagnostics_error(tok_line, tok_col, "unterminated character literal");
             }
             CONSUME(1);
-            const char *char_val = arena_strndup(arena, src + start, i - start);
+            const char *char_val = intern_string_n(arena, src + start, i - start);
             push_token(&out, char_val, tok_line, tok_col);
         } else if (i + 2 < src_len && src[i] == '.' && src[i+1] == '.' && src[i+2] == '.') {
             CONSUME(3);
@@ -610,7 +612,7 @@ TokenArray lex(const char *src, HashMap *macros, StringArray *active_macros, Are
         } else if (i + 2 < src_len &&
                    ((src[i] == '<' && src[i + 1] == '<' && src[i + 2] == '=') ||
                     (src[i] == '>' && src[i + 1] == '>' && src[i + 2] == '='))) {
-            const char *text = arena_strndup(arena, src + i, 3);
+            const char *text = intern_string_n(arena, src + i, 3);
             CONSUME(3);
             push_token(&out, text, tok_line, tok_col);
         } else if (i + 1 < src_len &&
@@ -633,11 +635,11 @@ TokenArray lex(const char *src, HashMap *macros, StringArray *active_macros, Are
                     (src[i] == '&' && src[i + 1] == '=') ||
                     (src[i] == '^' && src[i + 1] == '=') ||
                     (src[i] == '|' && src[i + 1] == '='))) {
-            const char *text = arena_strndup(arena, src + i, 2);
+            const char *text = intern_string_n(arena, src + i, 2);
             CONSUME(2);
             push_token(&out, text, tok_line, tok_col);
         } else if (strchr("{}[](),;=+-*/%<>.&!|^~:?", c) != nullptr) {
-            const char *text = arena_strndup(arena, src + i, 1);
+            const char *text = intern_string_n(arena, src + i, 1);
             CONSUME(1);
             push_token(&out, text, tok_line, tok_col);
         } else {

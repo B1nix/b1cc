@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdbool.h>
+#include <string.h>
 
 #ifdef __b1cc__
 #define B1CC_THREAD_LOCAL
@@ -55,15 +56,21 @@ void sb_free(StringBuilder *sb);
 const char *escape_asm_string(const char *s, Arena *arena);
 
 // --- Hash Map ---
+#define TOMBSTONE ((const char *)-1)
+
 typedef struct HashMapEntry {
     const char *key;
     void *val_ptr;
     long val_int;
-    struct HashMapEntry *next;
 } HashMapEntry;
 
+const char *intern_string(Arena *arena, const char *s);
+const char *intern_string_n(Arena *arena, const char *s, size_t len);
+
+#define strcmp(s1, s2) ((s1) == (s2) ? 0 : (strcmp)(s1, s2))
+
 typedef struct HashMap {
-    HashMapEntry **buckets;
+    HashMapEntry *entries;
     int bucket_count;
     int size;
 } HashMap;

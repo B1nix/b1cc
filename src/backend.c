@@ -3,6 +3,9 @@
 #include "lexer.h"
 #include "parser.h"
 #include "preprocessor.h"
+#ifndef __b1cc__
+#include <pthread.h>
+#endif
 #include "diagnostics.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,8 +41,8 @@ static void dump_ir(IrFunctionArray funcs) {
         fprintf(stderr, "Function %s:\n", fn->name);
         for (int i_i = 0; i_i < fn->code.count; ++i_i) {
             const IrInst *inst = &fn->code.data[i_i];
-            fprintf(stderr, "  %s", inst->op);
-            if (inst->arg && inst->arg[0]) fprintf(stderr, " %s", inst->arg);
+            fprintf(stderr, "  %s", ir_op_to_string(inst->op));
+            if (ir_arg_str(inst->arg) && ir_arg_str(inst->arg)[0]) fprintf(stderr, " %s", ir_arg_str(inst->arg));
             if (inst->value != 0) fprintf(stderr, " %ld", inst->value);
             fprintf(stderr, " (line=%d, col=%d)\n", inst->line, inst->col);
         }
@@ -135,6 +138,24 @@ static const char *peephole_optimize(const char *asm_text, const char *target, A
     return res;
 }
 
+#ifndef __b1cc__
+typedef struct {
+    TargetBackend *backend;
+    IrFunction *ir_func;
+    char *result_asm;
+} EmitThreadArg;
+
+static void *emit_function_thread(void *arg) {
+    EmitThreadArg *targ = (EmitThreadArg *)arg;
+    Arena thread_arena;
+    arena_init(&thread_arena);
+    const char *asm_str = targ->backend->emit_function(targ->backend, targ->ir_func, &thread_arena);
+    targ->result_asm = strdup(asm_str);
+    arena_free(&thread_arena);
+    return nullptr;
+}
+#endif
+
 const char *backend_compile_asm(const char *src, const char *target, const char *mcmodel, bool dump_ast_flag, bool dump_ir_flag, Arena *arena) {
     ir_reset_state();
 
@@ -146,10 +167,9 @@ const char *backend_compile_asm(const char *src, const char *target, const char 
     HashMap macros;
     hashmap_init(&macros, 64);
     for (int b = 0; b < preprocessor_driver_macros.bucket_count; ++b) {
-        HashMapEntry *curr = preprocessor_driver_macros.buckets[b];
-        while (curr) {
+        HashMapEntry *curr = &preprocessor_driver_macros.entries[b];
+        if (curr->key && curr->key != TOMBSTONE) {
             hashmap_put(&macros, curr->key, curr->val_ptr, curr->val_int);
-            curr = curr->next;
         }
     }
 
@@ -207,9 +227,33 @@ const char *backend_compile_asm(const char *src, const char *target, const char 
     }
     sb_append(&out, backend->emit_globals(backend, &ir_global_decls, arena));
 
+#ifndef __b1cc__
+    if (ir_functions.count > 0) {
+        EmitThreadArg *thread_args = calloc(ir_functions.count, sizeof(EmitThreadArg));
+        pthread_t *threads = calloc(ir_functions.count, sizeof(pthread_t));
+        for (int k = 0; k < ir_functions.count; ++k) {
+            thread_args[k].backend = backend;
+            thread_args[k].ir_func = &ir_functions.data[k];
+            thread_args[k].result_asm = nullptr;
+            pthread_create(&threads[k], nullptr, emit_function_thread, &thread_args[k]);
+        }
+        for (int k = 0; k < ir_functions.count; ++k) {
+            pthread_join(threads[k], nullptr);
+        }
+        for (int k = 0; k < ir_functions.count; ++k) {
+            if (thread_args[k].result_asm) {
+                sb_append(&out, thread_args[k].result_asm);
+                free(thread_args[k].result_asm);
+            }
+        }
+        free(thread_args);
+        free(threads);
+    }
+#else
     for (int k = 0; k < ir_functions.count; ++k) {
         sb_append(&out, backend->emit_function(backend, &ir_functions.data[k], arena));
     }
+#endif
 
     // Free ir functions
     for (int k = 0; k < ir_functions.count; ++k) {

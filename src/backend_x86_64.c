@@ -326,18 +326,18 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
             last_loc_line = inst->line;
             last_loc_col = inst->col;
         }
-        if (strcmp(inst->op, "asm") == 0) {
-            sb_append(&out, inst->arg);
-            if (inst->arg[0] && inst->arg[strlen(inst->arg) - 1] != '\n') {
+        if (inst->op == IR_ASM) {
+            sb_append(&out, ir_arg_str(inst->arg));
+            if (ir_arg_str(inst->arg)[0] && ir_arg_str(inst->arg)[strlen(ir_arg_str(inst->arg)) - 1] != '\n') {
                 sb_append(&out, "\n");
             }
-        } else if (strcmp(inst->op, "const") == 0) {
+        } else if (inst->op == IR_CONST) {
             sb_appendf(&out, "    movq $%ld, %%rax\n", inst->value);
             sb_append(&out, "    pushq %rax\n");
-        } else if (strcmp(inst->op, "load") == 0) {
+        } else if (inst->op == IR_LOAD) {
             sb_appendf(&out, "    movq -%ld(%%rbp), %%rax\n", (inst->value + 1) * 16);
             sb_append(&out, "    pushq %rax\n");
-        } else if (strcmp(inst->op, "va_start") == 0) {
+        } else if (inst->op == IR_VA_START) {
             int num_fixed = fn->params.count;
             if (num_fixed > 0 && strcmp(fn->params.data[num_fixed - 1], "...") == 0) {
                 num_fixed--;
@@ -394,25 +394,25 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                 sb_appendf(&out, "    leaq %d(%%rbp), %%rax\n", off);
             }
             sb_appendf(&out, "    movq %%rax, -%ld(%%rbp)\n", (inst->value + 1) * 16);
-        } else if (strcmp(inst->op, "str") == 0) {
-            sb_appendf(&out, "    leaq %s(%%rip), %%rax\n", inst->arg);
+        } else if (inst->op == IR_STR) {
+            sb_appendf(&out, "    leaq %s(%%rip), %%rax\n", ir_arg_str(inst->arg));
             sb_append(&out, "    pushq %rax\n");
-        } else if (strcmp(inst->op, "store") == 0) {
+        } else if (inst->op == IR_STORE) {
             sb_append(&out, "    popq %rax\n");
             sb_appendf(&out, "    movq %%rax, -%ld(%%rbp)\n", (inst->value + 1) * 16);
-        } else if (strcmp(inst->op, "dup") == 0) {
+        } else if (inst->op == IR_DUP) {
             sb_append(&out, "    movq (%rsp), %rax\n");
             sb_append(&out, "    pushq %rax\n");
-        } else if (strcmp(inst->op, "pop") == 0) {
+        } else if (inst->op == IR_POP) {
             sb_append(&out, "    addq $8, %rsp\n");
-        } else if (strcmp(inst->op, "vla_alloc") == 0) {
+        } else if (inst->op == IR_VLA_ALLOC) {
             sb_append(&out, "    popq %rax\n");
             sb_append(&out, "    addq $15, %rax\n");
             sb_append(&out, "    andq $-16, %rax\n");
             sb_append(&out, "    subq %rax, %rsp\n");
             sb_append(&out, "    movq %rsp, %rax\n");
             sb_append(&out, "    pushq %rax\n");
-        } else if (strcmp(inst->op, "load_addr") == 0) {
+        } else if (inst->op == IR_LOAD_ADDR) {
             sb_append(&out, "    popq %rax\n");
             if (inst->value == 1) {
                 sb_append(&out, "    movsbq (%rax), %rax\n");
@@ -424,20 +424,20 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                 sb_append(&out, "    movq (%rax), %rax\n");
             }
             sb_append(&out, "    pushq %rax\n");
-        } else if (strcmp(inst->op, "+") == 0 || strcmp(inst->op, "-") == 0 || strcmp(inst->op, "*") == 0 ||
-                   strcmp(inst->op, "/") == 0 || strcmp(inst->op, "%") == 0 ||
-                   strcmp(inst->op, "u/") == 0 || strcmp(inst->op, "u%") == 0 ||
-                   strcmp(inst->op, "==") == 0 || strcmp(inst->op, "!=") == 0 ||
-                   strcmp(inst->op, "<") == 0 || strcmp(inst->op, ">") == 0 || strcmp(inst->op, "<=") == 0 ||
-                   strcmp(inst->op, "u<") == 0 || strcmp(inst->op, "u>") == 0 || strcmp(inst->op, "u<=") == 0 ||
-                   strcmp(inst->op, "u>=") == 0 || strcmp(inst->op, "u>>") == 0 ||
-                   strcmp(inst->op, ">=") == 0 || strcmp(inst->op, "index") == 0 ||
-                   strcmp(inst->op, "&") == 0 || strcmp(inst->op, "|") == 0 || strcmp(inst->op, "^") == 0 ||
-                   strcmp(inst->op, "<<") == 0 || strcmp(inst->op, ">>") == 0) {
+        } else if (inst->op == IR_ADD || inst->op == IR_SUB || inst->op == IR_MUL ||
+                   inst->op == IR_DIV || inst->op == IR_MOD ||
+                   inst->op == IR_UDIV || inst->op == IR_UMOD ||
+                   inst->op == IR_EQEQ || inst->op == IR_NOTEQ ||
+                   inst->op == IR_LT || inst->op == IR_GT || inst->op == IR_LTEQ ||
+                   inst->op == IR_ULT || inst->op == IR_UGT || inst->op == IR_ULTEQ ||
+                   inst->op == IR_UGTEQ || inst->op == IR_UGTGT ||
+                   inst->op == IR_GTEQ || inst->op == IR_INDEX ||
+                   inst->op == IR_AND || inst->op == IR_OR || inst->op == IR_XOR ||
+                   inst->op == IR_LTLT || inst->op == IR_GTGT) {
             
             sb_append(&out, "    popq %rcx\n");
             sb_append(&out, "    popq %rax\n");
-            if (strcmp(inst->op, "index") == 0) {
+            if (inst->op == IR_INDEX) {
                 if (inst->value == 1) {
                     sb_append(&out, "    movsbq (%rax,%rcx,1), %rax\n");
                 } else if (inst->value == 2) {
@@ -447,79 +447,79 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                 } else {
                     sb_append(&out, "    movq (%rax,%rcx,8), %rax\n");
                 }
-            } else if (strcmp(inst->op, "+") == 0)
+            } else if (inst->op == IR_ADD)
                 sb_append(&out, "    addq %rcx, %rax\n");
-            else if (strcmp(inst->op, "-") == 0)
+            else if (inst->op == IR_SUB)
                 sb_append(&out, "    subq %rcx, %rax\n");
-            else if (strcmp(inst->op, "*") == 0)
+            else if (inst->op == IR_MUL)
                 sb_append(&out, "    imulq %rcx, %rax\n");
-            else if (strcmp(inst->op, "/") == 0) {
+            else if (inst->op == IR_DIV) {
                 sb_append(&out, "    cqto\n");
                 sb_append(&out, "    idivq %rcx\n");
-            } else if (strcmp(inst->op, "%") == 0) {
+            } else if (inst->op == IR_MOD) {
                 sb_append(&out, "    cqto\n");
                 sb_append(&out, "    idivq %rcx\n");
                 sb_append(&out, "    movq %rdx, %rax\n");
-            } else if (strcmp(inst->op, "u/") == 0) {
+            } else if (inst->op == IR_UDIV) {
                 sb_append(&out, "    xorq %rdx, %rdx\n");
                 sb_append(&out, "    divq %rcx\n");
-            } else if (strcmp(inst->op, "u%") == 0) {
+            } else if (inst->op == IR_UMOD) {
                 sb_append(&out, "    xorq %rdx, %rdx\n");
                 sb_append(&out, "    divq %rcx\n");
                 sb_append(&out, "    movq %rdx, %rax\n");
-            } else if (strcmp(inst->op, "&") == 0)
+            } else if (inst->op == IR_AND)
                 sb_append(&out, "    andq %rcx, %rax\n");
-            else if (strcmp(inst->op, "|") == 0)
+            else if (inst->op == IR_OR)
                 sb_append(&out, "    orq %rcx, %rax\n");
-            else if (strcmp(inst->op, "^") == 0)
+            else if (inst->op == IR_XOR)
                 sb_append(&out, "    xorq %rcx, %rax\n");
-            else if (strcmp(inst->op, "<<") == 0 || strcmp(inst->op, ">>") == 0 || strcmp(inst->op, "u>>") == 0) {
-                if (strcmp(inst->op, "<<") == 0)
+            else if (inst->op == IR_LTLT || inst->op == IR_GTGT || inst->op == IR_UGTGT) {
+                if (inst->op == IR_LTLT)
                     sb_append(&out, "    shlq %cl, %rax\n");
-                else if (strcmp(inst->op, ">>") == 0)
+                else if (inst->op == IR_GTGT)
                     sb_append(&out, "    sarq %cl, %rax\n");
                 else
                     sb_append(&out, "    shrq %cl, %rax\n");
             } else {
                 sb_append(&out, "    cmpq %rcx, %rax\n");
-                if (strcmp(inst->op, "==") == 0)
+                if (inst->op == IR_EQEQ)
                     sb_append(&out, "    sete %al\n");
-                else if (strcmp(inst->op, "!=") == 0)
+                else if (inst->op == IR_NOTEQ)
                     sb_append(&out, "    setne %al\n");
-                else if (strcmp(inst->op, "<") == 0)
+                else if (inst->op == IR_LT)
                     sb_append(&out, "    setl %al\n");
-                else if (strcmp(inst->op, ">") == 0)
+                else if (inst->op == IR_GT)
                     sb_append(&out, "    setg %al\n");
-                else if (strcmp(inst->op, "<=") == 0)
+                else if (inst->op == IR_LTEQ)
                     sb_append(&out, "    setle %al\n");
-                else if (strcmp(inst->op, ">=") == 0)
+                else if (inst->op == IR_GTEQ)
                     sb_append(&out, "    setge %al\n");
-                else if (strcmp(inst->op, "u<") == 0)
+                else if (inst->op == IR_ULT)
                     sb_append(&out, "    setb %al\n");
-                else if (strcmp(inst->op, "u>") == 0)
+                else if (inst->op == IR_UGT)
                     sb_append(&out, "    seta %al\n");
-                else if (strcmp(inst->op, "u<=") == 0)
+                else if (inst->op == IR_ULTEQ)
                     sb_append(&out, "    setbe %al\n");
                 else
                     sb_append(&out, "    setae %al\n");
                 sb_append(&out, "    movzbq %al, %rax\n");
             }
             sb_append(&out, "    pushq %rax\n");
-        } else if (strcmp(inst->op, "~") == 0 || strcmp(inst->op, "!") == 0 || strcmp(inst->op, "neg") == 0 ||
-                   strcmp(inst->op, "cast") == 0 || strcmp(inst->op, "ucast") == 0) {
+        } else if (inst->op == IR_TILDE || inst->op == IR_NOT || inst->op == IR_NEG ||
+                   inst->op == IR_CAST || inst->op == IR_UCAST) {
             sb_append(&out, "    popq %rax\n");
-            if (strcmp(inst->op, "~") == 0)
+            if (inst->op == IR_TILDE)
                 sb_append(&out, "    notq %rax\n");
-            else if (strcmp(inst->op, "neg") == 0)
+            else if (inst->op == IR_NEG)
                 sb_append(&out, "    negq %rax\n");
-            else if (strcmp(inst->op, "cast") == 0) {
+            else if (inst->op == IR_CAST) {
                 if (inst->value == 1)
                     sb_append(&out, "    movsbq %al, %rax\n");
                 else if (inst->value == 2)
                     sb_append(&out, "    movswq %ax, %rax\n");
                 else if (inst->value == 4)
                     sb_append(&out, "    movslq %eax, %rax\n");
-            } else if (strcmp(inst->op, "ucast") == 0) {
+            } else if (inst->op == IR_UCAST) {
                 if (inst->value == 1)
                     sb_append(&out, "    movzbq %al, %rax\n");
                 else if (inst->value == 2)
@@ -532,36 +532,36 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                 sb_append(&out, "    movzbq %al, %rax\n");
             }
             sb_append(&out, "    pushq %rax\n");
-        } else if (strcmp(inst->op, "jz") == 0) {
+        } else if (inst->op == IR_JZ) {
             sb_append(&out, "    popq %rax\n");
             sb_append(&out, "    cmpq $0, %rax\n");
-            sb_appendf(&out, "    je %s\n", inst->arg);
-        } else if (strcmp(inst->op, "jmp") == 0) {
-            sb_appendf(&out, "    jmp %s\n", inst->arg);
-        } else if (strcmp(inst->op, "label") == 0) {
-            sb_appendf(&out, "%s:\n", inst->arg);
-        } else if (strcmp(inst->op, "call") == 0 || strcmp(inst->op, "icall") == 0) {
+            sb_appendf(&out, "    je %s\n", ir_arg_str(inst->arg));
+        } else if (inst->op == IR_JMP) {
+            sb_appendf(&out, "    jmp %s\n", ir_arg_str(inst->arg));
+        } else if (inst->op == IR_LABEL) {
+            sb_appendf(&out, "%s:\n", ir_arg_str(inst->arg));
+        } else if (inst->op == IR_CALL || inst->op == IR_ICALL) {
             long num_args = inst->value;
             /* Float-scalar call path (System V): scalar float/double args go
                in XMM0-7 then stack slots, integer/pointer args use the GPR
                sequence then stack slots, and float/double returns come back in XMM0. */
-            if (strcmp(inst->op, "call") == 0 || strcmp(inst->op, "icall") == 0) {
+            if (inst->op == IR_CALL || inst->op == IR_ICALL) {
                 IntArray *pf = nullptr;
                 int retf = 0;
-                HashMapEntry *pe = strcmp(inst->op, "call") == 0 ?
-                    hashmap_get(&ir_function_param_floats, inst->arg) :
-                    hashmap_get(&ir_function_pointer_param_floats, inst->arg);
+                HashMapEntry *pe = inst->op == IR_CALL ?
+                    hashmap_get(&ir_function_param_floats, ir_arg_str(inst->arg)) :
+                    hashmap_get(&ir_function_pointer_param_floats, ir_arg_str(inst->arg));
                 if (pe) pf = (IntArray *)pe->val_ptr;
-                HashMapEntry *re = strcmp(inst->op, "call") == 0 ?
-                    hashmap_get(&ir_function_return_floats, inst->arg) :
-                    hashmap_get(&ir_function_pointer_return_floats, inst->arg);
+                HashMapEntry *re = inst->op == IR_CALL ?
+                    hashmap_get(&ir_function_return_floats, ir_arg_str(inst->arg)) :
+                    hashmap_get(&ir_function_pointer_return_floats, ir_arg_str(inst->arg));
                 if (re) retf = re->val_int;
                 int scalar_path_ret_agg_size = 0;
                 int scalar_path_has_agg_arg = 0;
-                if (strcmp(inst->op, "call") == 0) {
-                    HashMapEntry *ae = hashmap_get(&ir_function_return_aggregate_sizes, inst->arg);
+                if (inst->op == IR_CALL) {
+                    HashMapEntry *ae = hashmap_get(&ir_function_return_aggregate_sizes, ir_arg_str(inst->arg));
                     if (ae) scalar_path_ret_agg_size = ae->val_int;
-                    ae = hashmap_get(&ir_function_param_aggregate_sizes, inst->arg);
+                    ae = hashmap_get(&ir_function_param_aggregate_sizes, ir_arg_str(inst->arg));
                     if (ae) {
                         IntArray *as = (IntArray *)ae->val_ptr;
                         for (int ai = 0; ai < as->count; ++ai) {
@@ -624,13 +624,13 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                         }
                     }
                     sb_appendf(&out, "    movl $%d, %%eax\n", ssec > 8 ? 8 : ssec);
-                    if (strcmp(inst->op, "icall") == 0) {
+                    if (inst->op == IR_ICALL) {
                         sb_appendf(&out, "    movq %d(%%rsp), %%r11\n", stack_bytes + (int)num_args * 8);
                         sb_append(&out, "    call *%r11\n");
                     } else {
-                        sb_appendf(&out, "    call %s\n", inst->arg);
+                        sb_appendf(&out, "    call %s\n", ir_arg_str(inst->arg));
                     }
-                    sb_appendf(&out, "    addq $%d, %%rsp\n", stack_bytes + (int)num_args * 8 + (strcmp(inst->op, "icall") == 0 ? 8 : 0));
+                    sb_appendf(&out, "    addq $%d, %%rsp\n", stack_bytes + (int)num_args * 8 + (inst->op == IR_ICALL ? 8 : 0));
                     if (retf) {
                         sb_append(&out, "    subq $8, %rsp\n");
                         if (retf == 4) {
@@ -648,12 +648,12 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
             IntArray *agg_sizes = nullptr;
             IntArray *agg_float_classes = nullptr;
             IntArray *param_floats_for_agg = nullptr;
-            if (strcmp(inst->op, "call") == 0) {
-                HashMapEntry *entry = hashmap_get(&ir_function_param_aggregate_sizes, inst->arg);
+            if (inst->op == IR_CALL) {
+                HashMapEntry *entry = hashmap_get(&ir_function_param_aggregate_sizes, ir_arg_str(inst->arg));
                 if (entry) agg_sizes = (IntArray *)entry->val_ptr;
-                entry = hashmap_get(&ir_function_param_aggregate_float_classes, inst->arg);
+                entry = hashmap_get(&ir_function_param_aggregate_float_classes, ir_arg_str(inst->arg));
                 if (entry) agg_float_classes = (IntArray *)entry->val_ptr;
-                entry = hashmap_get(&ir_function_param_floats, inst->arg);
+                entry = hashmap_get(&ir_function_param_floats, ir_arg_str(inst->arg));
                 if (entry) param_floats_for_agg = (IntArray *)entry->val_ptr;
             }
             int has_aggregate_arg = 0;
@@ -666,12 +666,12 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
             int ret_agg_size = 0;
             int ret_agg_float = 0;
             int ret_float_for_agg = 0;
-            if (strcmp(inst->op, "call") == 0) {
-                HashMapEntry *entry = hashmap_get(&ir_function_return_aggregate_sizes, inst->arg);
+            if (inst->op == IR_CALL) {
+                HashMapEntry *entry = hashmap_get(&ir_function_return_aggregate_sizes, ir_arg_str(inst->arg));
                 if (entry) ret_agg_size = entry->val_int;
-                entry = hashmap_get(&ir_function_return_aggregate_float_classes, inst->arg);
+                entry = hashmap_get(&ir_function_return_aggregate_float_classes, ir_arg_str(inst->arg));
                 if (entry) ret_agg_float = entry->val_int;
-                entry = hashmap_get(&ir_function_return_floats, inst->arg);
+                entry = hashmap_get(&ir_function_return_floats, ir_arg_str(inst->arg));
                 if (entry) ret_float_for_agg = entry->val_int;
             }
             int ret_val_bytes = 0;
@@ -787,28 +787,28 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                     sb_appendf(&out, "    leaq %d(%%rsp), %%rdi\n", stack_bytes);
                 }
 
-                if (strcmp(inst->op, "icall") == 0) {
+                if (inst->op == IR_ICALL) {
                     sb_appendf(&out, "    movq %d(%%rsp), %%rax\n", stack_bytes + (int)num_args * 8 + ret_val_bytes);
                     sb_append(&out, "    movq %rax, %r11\n");
                     sb_append(&out, "    xorl %eax, %eax\n");
                     sb_append(&out, "    call *%r11\n");
                 } else {
                     sb_append(&out, "    xorl %eax, %eax\n");
-                    sb_appendf(&out, "    call %s\n", inst->arg);
+                    sb_appendf(&out, "    call %s\n", ir_arg_str(inst->arg));
                 }
-                sb_appendf(&out, "    addq $%d, %%rsp\n", stack_bytes + (int)num_args * 8 + (strcmp(inst->op, "icall") == 0 ? 8 : 0));
+                sb_appendf(&out, "    addq $%d, %%rsp\n", stack_bytes + (int)num_args * 8 + (inst->op == IR_ICALL ? 8 : 0));
             } else if (num_args <= 6) {
                 for (long i = num_args - 1; i >= 0; --i) {
                     sb_appendf(&out, "    popq %s\n", regs[i]);
                 }
-                if (strcmp(inst->op, "icall") == 0) {
+                if (inst->op == IR_ICALL) {
                     sb_append(&out, "    popq %rax\n");
                     sb_append(&out, "    movq %rax, %r11\n");
                     sb_append(&out, "    xorl %eax, %eax\n");
                     sb_append(&out, "    call *%r11\n");
                 } else {
                     sb_append(&out, "    xorl %eax, %eax\n");
-                    sb_appendf(&out, "    call %s\n", inst->arg);
+                    sb_appendf(&out, "    call %s\n", ir_arg_str(inst->arg));
                 }
             } else {
                 long num_stack_args = num_args - 6;
@@ -820,20 +820,20 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                 for (long i = 5; i >= 0; --i) {
                     sb_appendf(&out, "    popq %s\n", regs[i]);
                 }
-                if (strcmp(inst->op, "icall") == 0) {
+                if (inst->op == IR_ICALL) {
                     sb_append(&out, "    popq %rax\n");
                 }
                 for (long i = num_args - 1; i >= 6; --i) {
                     int t_idx = (int)(i - 6);
                     sb_appendf(&out, "    pushq %s\n", temp_regs[t_idx % 6]);
                 }
-                if (strcmp(inst->op, "icall") == 0) {
+                if (inst->op == IR_ICALL) {
                     sb_append(&out, "    movq %rax, %r10\n");
                     sb_append(&out, "    xorl %eax, %eax\n");
                     sb_append(&out, "    call *%r10\n");
                 } else {
                     sb_append(&out, "    xorl %eax, %eax\n");
-                    sb_appendf(&out, "    call %s\n", inst->arg);
+                    sb_appendf(&out, "    call %s\n", ir_arg_str(inst->arg));
                 }
                 sb_appendf(&out, "    addq $%ld, %%rsp\n", num_stack_args * 8);
             }
@@ -864,35 +864,35 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                     }
                 }
             }
-        } else if (strcmp(inst->op, "addr") == 0) {
+        } else if (inst->op == IR_ADDR) {
             sb_appendf(&out, "    leaq -%ld(%%rbp), %%rax\n", (inst->value + 1) * 16);
             sb_append(&out, "    pushq %rax\n");
-        } else if (strcmp(inst->op, "gload") == 0) {
-            int gsize = ir_get_global_storage_size(inst->arg);
+        } else if (inst->op == IR_GLOAD) {
+            int gsize = ir_get_global_storage_size(ir_arg_str(inst->arg));
             if (gsize == 0) gsize = 8;
-            int g_is_unsigned = ir_get_var_unsigned(inst->arg);
+            int g_is_unsigned = ir_get_var_unsigned(ir_arg_str(inst->arg));
 
-            if (ir_is_global_var_thread_local(inst->arg)) {
+            if (ir_is_global_var_thread_local(ir_arg_str(inst->arg))) {
                 sb_append(&out, "    movq %fs:0, %rcx\n");
                 if (gsize == 1) {
                     if (g_is_unsigned)
-                        sb_appendf(&out, "    movzbl %s@tpoff(%%rcx), %%eax\n", inst->arg);
+                        sb_appendf(&out, "    movzbl %s@tpoff(%%rcx), %%eax\n", ir_arg_str(inst->arg));
                     else
-                        sb_appendf(&out, "    movsbl %s@tpoff(%%rcx), %%eax\n", inst->arg);
+                        sb_appendf(&out, "    movsbl %s@tpoff(%%rcx), %%eax\n", ir_arg_str(inst->arg));
                 } else if (gsize == 2) {
                     if (g_is_unsigned)
-                        sb_appendf(&out, "    movzwq %s@tpoff(%%rcx), %%rax\n", inst->arg);
+                        sb_appendf(&out, "    movzwq %s@tpoff(%%rcx), %%rax\n", ir_arg_str(inst->arg));
                     else
-                        sb_appendf(&out, "    movswq %s@tpoff(%%rcx), %%rax\n", inst->arg);
+                        sb_appendf(&out, "    movswq %s@tpoff(%%rcx), %%rax\n", ir_arg_str(inst->arg));
                 } else if (gsize == 4) {
                     if (g_is_unsigned)
-                        sb_appendf(&out, "    movl %s@tpoff(%%rcx), %%eax\n", inst->arg);
+                        sb_appendf(&out, "    movl %s@tpoff(%%rcx), %%eax\n", ir_arg_str(inst->arg));
                     else
-                        sb_appendf(&out, "    movslq %s@tpoff(%%rcx), %%rax\n", inst->arg);
+                        sb_appendf(&out, "    movslq %s@tpoff(%%rcx), %%rax\n", ir_arg_str(inst->arg));
                 } else
-                    sb_appendf(&out, "    movq %s@tpoff(%%rcx), %%rax\n", inst->arg);
+                    sb_appendf(&out, "    movq %s@tpoff(%%rcx), %%rax\n", ir_arg_str(inst->arg));
             } else if (ir_pic_mode) {
-                sb_appendf(&out, "    movq %s@GOTPCREL(%%rip), %%rcx\n", inst->arg);
+                sb_appendf(&out, "    movq %s@GOTPCREL(%%rip), %%rcx\n", ir_arg_str(inst->arg));
                 if (gsize == 1) {
                     if (g_is_unsigned)
                         sb_append(&out, "    movzbl (%rcx), %eax\n");
@@ -912,7 +912,7 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                     sb_append(&out, "    movq (%rcx), %rax\n");
             } else if (ir_code_model == 1) {
                 /* Kernel model: load address first, then dereference */
-                sb_appendf(&out, "    movabs $%s, %%rcx\n", inst->arg);
+                sb_appendf(&out, "    movabs $%s, %%rcx\n", ir_arg_str(inst->arg));
                 if (gsize == 1) {
                     if (g_is_unsigned)
                         sb_append(&out, "    movzbl (%rcx), %eax\n");
@@ -933,40 +933,40 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
             } else {
                 if (gsize == 1) {
                     if (g_is_unsigned)
-                        sb_appendf(&out, "    movzbl %s(%%rip), %%eax\n", inst->arg);
+                        sb_appendf(&out, "    movzbl %s(%%rip), %%eax\n", ir_arg_str(inst->arg));
                     else
-                        sb_appendf(&out, "    movsbl %s(%%rip), %%eax\n", inst->arg);
+                        sb_appendf(&out, "    movsbl %s(%%rip), %%eax\n", ir_arg_str(inst->arg));
                 } else if (gsize == 2) {
                     if (g_is_unsigned)
-                        sb_appendf(&out, "    movzwq %s(%%rip), %%rax\n", inst->arg);
+                        sb_appendf(&out, "    movzwq %s(%%rip), %%rax\n", ir_arg_str(inst->arg));
                     else
-                        sb_appendf(&out, "    movswq %s(%%rip), %%rax\n", inst->arg);
+                        sb_appendf(&out, "    movswq %s(%%rip), %%rax\n", ir_arg_str(inst->arg));
                 } else if (gsize == 4) {
                     if (g_is_unsigned)
-                        sb_appendf(&out, "    movl %s(%%rip), %%eax\n", inst->arg);
+                        sb_appendf(&out, "    movl %s(%%rip), %%eax\n", ir_arg_str(inst->arg));
                     else
-                        sb_appendf(&out, "    movslq %s(%%rip), %%rax\n", inst->arg);
+                        sb_appendf(&out, "    movslq %s(%%rip), %%rax\n", ir_arg_str(inst->arg));
                 } else
-                    sb_appendf(&out, "    movq %s(%%rip), %%rax\n", inst->arg);
+                    sb_appendf(&out, "    movq %s(%%rip), %%rax\n", ir_arg_str(inst->arg));
             }
             sb_append(&out, "    pushq %rax\n");
-        } else if (strcmp(inst->op, "gstore") == 0) {
+        } else if (inst->op == IR_GSTORE) {
             sb_append(&out, "    popq %rax\n");
-            int gsize = ir_get_global_storage_size(inst->arg);
+            int gsize = ir_get_global_storage_size(ir_arg_str(inst->arg));
             if (gsize == 0) gsize = 8;
 
-            if (ir_is_global_var_thread_local(inst->arg)) {
+            if (ir_is_global_var_thread_local(ir_arg_str(inst->arg))) {
                 sb_append(&out, "    movq %fs:0, %rcx\n");
                 if (gsize == 1)
-                    sb_appendf(&out, "    movb %%al, %s@tpoff(%%rcx)\n", inst->arg);
+                    sb_appendf(&out, "    movb %%al, %s@tpoff(%%rcx)\n", ir_arg_str(inst->arg));
                 else if (gsize == 2)
-                    sb_appendf(&out, "    movw %%ax, %s@tpoff(%%rcx)\n", inst->arg);
+                    sb_appendf(&out, "    movw %%ax, %s@tpoff(%%rcx)\n", ir_arg_str(inst->arg));
                 else if (gsize == 4)
-                    sb_appendf(&out, "    movl %%eax, %s@tpoff(%%rcx)\n", inst->arg);
+                    sb_appendf(&out, "    movl %%eax, %s@tpoff(%%rcx)\n", ir_arg_str(inst->arg));
                 else
-                    sb_appendf(&out, "    movq %%rax, %s@tpoff(%%rcx)\n", inst->arg);
+                    sb_appendf(&out, "    movq %%rax, %s@tpoff(%%rcx)\n", ir_arg_str(inst->arg));
             } else if (ir_pic_mode) {
-                sb_appendf(&out, "    movq %s@GOTPCREL(%%rip), %%rcx\n", inst->arg);
+                sb_appendf(&out, "    movq %s@GOTPCREL(%%rip), %%rcx\n", ir_arg_str(inst->arg));
                 if (gsize == 1)
                     sb_append(&out, "    movb %al, (%rcx)\n");
                 else if (gsize == 2)
@@ -977,7 +977,7 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                     sb_append(&out, "    movq %rax, (%rcx)\n");
             } else if (ir_code_model == 1) {
                 /* Kernel model: load address first, then store through register */
-                sb_appendf(&out, "    movabs $%s, %%rcx\n", inst->arg);
+                sb_appendf(&out, "    movabs $%s, %%rcx\n", ir_arg_str(inst->arg));
                 if (gsize == 1)
                     sb_append(&out, "    movb %al, (%rcx)\n");
                 else if (gsize == 2)
@@ -988,29 +988,29 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                     sb_append(&out, "    movq %rax, (%rcx)\n");
             } else {
                 if (gsize == 1)
-                    sb_appendf(&out, "    movb %%al, %s(%%rip)\n", inst->arg);
+                    sb_appendf(&out, "    movb %%al, %s(%%rip)\n", ir_arg_str(inst->arg));
                 else if (gsize == 2)
-                    sb_appendf(&out, "    movw %%ax, %s(%%rip)\n", inst->arg);
+                    sb_appendf(&out, "    movw %%ax, %s(%%rip)\n", ir_arg_str(inst->arg));
                 else if (gsize == 4)
-                    sb_appendf(&out, "    movl %%eax, %s(%%rip)\n", inst->arg);
+                    sb_appendf(&out, "    movl %%eax, %s(%%rip)\n", ir_arg_str(inst->arg));
                 else
-                    sb_appendf(&out, "    movq %%rax, %s(%%rip)\n", inst->arg);
+                    sb_appendf(&out, "    movq %%rax, %s(%%rip)\n", ir_arg_str(inst->arg));
             }
-        } else if (strcmp(inst->op, "gaddr") == 0) {
-            if (ir_is_global_var_thread_local(inst->arg)) {
+        } else if (inst->op == IR_GADDR) {
+            if (ir_is_global_var_thread_local(ir_arg_str(inst->arg))) {
                 sb_append(&out, "    movq %fs:0, %rax\n");
-                sb_appendf(&out, "    leaq %s@tpoff(%%rax), %%rax\n", inst->arg);
+                sb_appendf(&out, "    leaq %s@tpoff(%%rax), %%rax\n", ir_arg_str(inst->arg));
             } else if (ir_pic_mode) {
-                sb_appendf(&out, "    movq %s@GOTPCREL(%%rip), %%rax\n", inst->arg);
+                sb_appendf(&out, "    movq %s@GOTPCREL(%%rip), %%rax\n", ir_arg_str(inst->arg));
             } else if (ir_code_model == 1) {
                 /* Kernel model: absolute address (data may be >2GB from code) */
-                sb_appendf(&out, "    movabs $%s, %%rax\n", inst->arg);
+                sb_appendf(&out, "    movabs $%s, %%rax\n", ir_arg_str(inst->arg));
             } else {
-                sb_appendf(&out, "    leaq %s(%%rip), %%rax\n", inst->arg);
+                sb_appendf(&out, "    leaq %s(%%rip), %%rax\n", ir_arg_str(inst->arg));
             }
             sb_append(&out, "    pushq %rax\n");
-        } else if (strcmp(inst->op, "store_index") == 0 || strcmp(inst->op, "store_index_keep") == 0) {
-            int keep_value = strcmp(inst->op, "store_index_keep") == 0;
+        } else if (inst->op == IR_STORE_INDEX || inst->op == IR_STORE_INDEX_KEEP) {
+            int keep_value = inst->op == IR_STORE_INDEX_KEEP;
             sb_append(&out, "    popq %rax\n"); // dest_addr
             sb_append(&out, "    popq %rcx\n"); // offset
             if (inst->value > 8) {
@@ -1035,7 +1035,7 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                     sb_append(&out, "    pushq %rdx\n");
                 }
             }
-        } else if (strcmp(inst->op, "store_agg") == 0) {
+        } else if (inst->op == IR_STORE_AGG) {
             sb_append(&out, "    popq %r10\n"); // dest_addr
             if (inst->value > 16) {
                 x86_64_emit_block_copy(&out, "%rsp", "%r10", inst->value);
@@ -1049,11 +1049,11 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                 sb_append(&out, "    popq %rax\n");
                 sb_append(&out, "    movq %rax, (%r10)\n");
             }
-        } else if (strcmp(inst->op, "copy") == 0) {
+        } else if (inst->op == IR_COPY) {
             sb_append(&out, "    popq %r10\n"); // dest_addr
             sb_append(&out, "    popq %rax\n"); // src_addr
             x86_64_emit_block_copy(&out, "%rax", "%r10", inst->value);
-        } else if (strcmp(inst->op, "ret_agg") == 0) {
+        } else if (inst->op == IR_RET_AGG) {
             int ret_size = inst->value;
             sb_append(&out, "    popq %r10\n"); // src_addr
             if (fn->return_aggregate_float_class) {
@@ -1079,7 +1079,7 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                 sb_append(&out, "    leave\n");
             }
             sb_append(&out, "    ret\n");
-        } else if (strcmp(inst->op, "ret") == 0) {
+        } else if (inst->op == IR_RET) {
             sb_append(&out, "    popq %rax\n");
             if (has_custom_align) {
                 sb_appendf(&out, "    movq -%d(%%rbp), %%rsp\n", (save_rsp_slot + 1) * 16);
@@ -1088,7 +1088,7 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                 sb_append(&out, "    leave\n");
             }
             sb_append(&out, "    ret\n");
-        } else if (strcmp(inst->op, "extract_bits") == 0) {
+        } else if (inst->op == IR_EXTRACT_BITS) {
             int bf_offset = (int)(inst->value & 0xFFFF);
             int bf_width  = (int)((inst->value >> 16) & 0xFFFF);
             sb_append(&out, "    popq %rax\n");
@@ -1098,7 +1098,7 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
             long mask = (bf_width < 64) ? ((1L << bf_width) - 1) : -1L;
             sb_appendf(&out, "    andq $%ld, %%rax\n", mask);
             sb_append(&out, "    pushq %rax\n");
-        } else if (strcmp(inst->op, "insert_bits") == 0) {
+        } else if (inst->op == IR_INSERT_BITS) {
             int bf_offset = (int)(inst->value & 0xFFFF);
             int bf_width  = (int)((inst->value >> 16) & 0xFFFF);
             long mask = (bf_width < 64) ? ((1L << bf_width) - 1) : -1L;
@@ -1113,81 +1113,81 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
             sb_appendf(&out, "    andq $%ld, %%rcx\n", ~(mask << bf_offset));
             sb_append(&out, "    orq %rax, %rcx\n");
             sb_append(&out, "    movq %rcx, (%rdi)\n");
-        } else if (strcmp(inst->op, "fconst") == 0) {
+        } else if (inst->op == IR_FCONST) {
             sb_appendf(&out, "    movabsq $%ld, %%rax\n", inst->value);
             sb_append(&out, "    pushq %rax\n");
-        } else if (strcmp(inst->op, "fadd") == 0 || strcmp(inst->op, "fsub") == 0 ||
-                   strcmp(inst->op, "fmul") == 0 || strcmp(inst->op, "fdiv") == 0) {
-            const char *fop = strcmp(inst->op, "fadd") == 0 ? "addsd" :
-                              strcmp(inst->op, "fsub") == 0 ? "subsd" :
-                              strcmp(inst->op, "fmul") == 0 ? "mulsd" : "divsd";
+        } else if (inst->op == IR_FADD || inst->op == IR_FSUB ||
+                   inst->op == IR_FMUL || inst->op == IR_FDIV) {
+            const char *fop = inst->op == IR_FADD ? "addsd" :
+                              inst->op == IR_FSUB ? "subsd" :
+                              inst->op == IR_FMUL ? "mulsd" : "divsd";
             sb_append(&out, "    movsd 8(%rsp), %xmm0\n");  /* lhs (deeper) */
             sb_append(&out, "    movsd (%rsp), %xmm1\n");   /* rhs (top) */
             sb_appendf(&out, "    %s %%xmm1, %%xmm0\n", fop);
             sb_append(&out, "    addq $8, %rsp\n");
             sb_append(&out, "    movsd %xmm0, (%rsp)\n");
-        } else if (strcmp(inst->op, "fneg") == 0) {
+        } else if (inst->op == IR_FNEG) {
             sb_append(&out, "    movabsq $-9223372036854775808, %rcx\n");
             sb_append(&out, "    xorq %rcx, (%rsp)\n");
-        } else if (strcmp(inst->op, "i2f") == 0) {
+        } else if (inst->op == IR_I2F) {
             sb_append(&out, "    popq %rax\n");
             sb_append(&out, "    cvtsi2sdq %rax, %xmm0\n");
             sb_append(&out, "    movq %xmm0, %rax\n");
             sb_append(&out, "    pushq %rax\n");
-        } else if (strcmp(inst->op, "f2i") == 0) {
+        } else if (inst->op == IR_F2I) {
             sb_append(&out, "    movsd (%rsp), %xmm0\n");
             sb_append(&out, "    cvttsd2si %xmm0, %rax\n");
             sb_append(&out, "    movq %rax, (%rsp)\n");
-        } else if (strcmp(inst->op, "d2f") == 0) {
+        } else if (inst->op == IR_D2F) {
             sb_append(&out, "    movsd (%rsp), %xmm0\n");
             sb_append(&out, "    cvtsd2ss %xmm0, %xmm0\n");
             sb_append(&out, "    cvtss2sd %xmm0, %xmm0\n");
             sb_append(&out, "    movsd %xmm0, (%rsp)\n");
-        } else if (inst->op[0] == 'f' && (strcmp(inst->op, "f<") == 0 || strcmp(inst->op, "f>") == 0 ||
-                   strcmp(inst->op, "f<=") == 0 || strcmp(inst->op, "f>=") == 0 ||
-                   strcmp(inst->op, "f==") == 0 || strcmp(inst->op, "f!=") == 0)) {
+        } else if (inst->op == IR_FLT || inst->op == IR_FGT ||
+                   inst->op == IR_FLTEQ || inst->op == IR_FGTEQ ||
+                   inst->op == IR_FEQEQ || inst->op == IR_FNOTEQ) {
             sb_append(&out, "    movsd 8(%rsp), %xmm0\n");  /* lhs */
             sb_append(&out, "    movsd (%rsp), %xmm1\n");   /* rhs */
             sb_append(&out, "    addq $16, %rsp\n");
             sb_append(&out, "    ucomisd %xmm1, %xmm0\n");
-            const char *cc = strcmp(inst->op, "f<") == 0 ? "setb" :
-                             strcmp(inst->op, "f<=") == 0 ? "setbe" :
-                             strcmp(inst->op, "f>") == 0 ? "seta" :
-                             strcmp(inst->op, "f>=") == 0 ? "setae" :
-                             strcmp(inst->op, "f==") == 0 ? "sete" : "setne";
+            const char *cc = inst->op == IR_FLT ? "setb" :
+                             inst->op == IR_FLTEQ ? "setbe" :
+                             inst->op == IR_FGT ? "seta" :
+                             inst->op == IR_FGTEQ ? "setae" :
+                             inst->op == IR_FEQEQ ? "sete" : "setne";
             sb_appendf(&out, "    %s %%al\n", cc);
             sb_append(&out, "    movzbq %al, %rax\n");
             sb_append(&out, "    pushq %rax\n");
-        } else if (strcmp(inst->op, "fload4") == 0) {
+        } else if (inst->op == IR_FLOAD4) {
             /* load a 4-byte float local, widen to double on the eval stack */
             sb_appendf(&out, "    cvtss2sd -%ld(%%rbp), %%xmm0\n", (inst->value + 1) * 16);
             sb_append(&out, "    subq $8, %rsp\n");
             sb_append(&out, "    movsd %xmm0, (%rsp)\n");
-        } else if (strcmp(inst->op, "fload8") == 0) {
+        } else if (inst->op == IR_FLOAD8) {
             /* load an 8-byte double local onto the eval stack */
             sb_appendf(&out, "    movq -%ld(%%rbp), %%rax\n", (inst->value + 1) * 16);
             sb_append(&out, "    pushq %rax\n");
-        } else if (strcmp(inst->op, "fstore4") == 0) {
+        } else if (inst->op == IR_FSTORE4) {
             /* store double eval value into a 4-byte float local */
             sb_append(&out, "    movsd (%rsp), %xmm0\n");
             sb_append(&out, "    addq $8, %rsp\n");
             sb_append(&out, "    cvtsd2ss %xmm0, %xmm0\n");
             sb_appendf(&out, "    movss %%xmm0, -%ld(%%rbp)\n", (inst->value + 1) * 16);
-        } else if (strcmp(inst->op, "fstore8") == 0) {
+        } else if (inst->op == IR_FSTORE8) {
             sb_append(&out, "    popq %rax\n");
             sb_appendf(&out, "    movq %%rax, -%ld(%%rbp)\n", (inst->value + 1) * 16);
-        } else if (strcmp(inst->op, "fgload") == 0) {
-            int gsize = ir_get_global_storage_size(inst->arg);
+        } else if (inst->op == IR_FGLOAD) {
+            int gsize = ir_get_global_storage_size(ir_arg_str(inst->arg));
             if (gsize == 0) gsize = 8;
-            if (ir_is_global_var_thread_local(inst->arg)) {
+            if (ir_is_global_var_thread_local(ir_arg_str(inst->arg))) {
                 sb_append(&out, "    movq %fs:0, %rcx\n");
                 if (gsize == 4) {
-                    sb_appendf(&out, "    cvtss2sd %s@tpoff(%%rcx), %%xmm0\n", inst->arg);
+                    sb_appendf(&out, "    cvtss2sd %s@tpoff(%%rcx), %%xmm0\n", ir_arg_str(inst->arg));
                 } else {
-                    sb_appendf(&out, "    movsd %s@tpoff(%%rcx), %%xmm0\n", inst->arg);
+                    sb_appendf(&out, "    movsd %s@tpoff(%%rcx), %%xmm0\n", ir_arg_str(inst->arg));
                 }
             } else if (ir_pic_mode) {
-                sb_appendf(&out, "    movq %s@GOTPCREL(%%rip), %%rcx\n", inst->arg);
+                sb_appendf(&out, "    movq %s@GOTPCREL(%%rip), %%rcx\n", ir_arg_str(inst->arg));
                 if (gsize == 4) {
                     sb_append(&out, "    cvtss2sd (%rcx), %xmm0\n");
                 } else {
@@ -1195,7 +1195,7 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                 }
             } else if (ir_code_model == 1) {
                 /* Kernel model: load address first, then access through register */
-                sb_appendf(&out, "    movabs $%s, %%rcx\n", inst->arg);
+                sb_appendf(&out, "    movabs $%s, %%rcx\n", ir_arg_str(inst->arg));
                 if (gsize == 4) {
                     sb_append(&out, "    cvtss2sd (%rcx), %xmm0\n");
                 } else {
@@ -1203,28 +1203,28 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                 }
             } else {
                 if (gsize == 4) {
-                    sb_appendf(&out, "    cvtss2sd %s(%%rip), %%xmm0\n", inst->arg);
+                    sb_appendf(&out, "    cvtss2sd %s(%%rip), %%xmm0\n", ir_arg_str(inst->arg));
                 } else {
-                    sb_appendf(&out, "    movsd %s(%%rip), %%xmm0\n", inst->arg);
+                    sb_appendf(&out, "    movsd %s(%%rip), %%xmm0\n", ir_arg_str(inst->arg));
                 }
             }
             sb_append(&out, "    subq $8, %rsp\n");
             sb_append(&out, "    movsd %xmm0, (%rsp)\n");
-        } else if (strcmp(inst->op, "fgstore") == 0) {
-            int gsize = ir_get_global_storage_size(inst->arg);
+        } else if (inst->op == IR_FGSTORE) {
+            int gsize = ir_get_global_storage_size(ir_arg_str(inst->arg));
             if (gsize == 0) gsize = 8;
             sb_append(&out, "    movsd (%rsp), %xmm0\n");
             sb_append(&out, "    addq $8, %rsp\n");
-            if (ir_is_global_var_thread_local(inst->arg)) {
+            if (ir_is_global_var_thread_local(ir_arg_str(inst->arg))) {
                 sb_append(&out, "    movq %fs:0, %rcx\n");
                 if (gsize == 4) {
                     sb_append(&out, "    cvtsd2ss %xmm0, %xmm0\n");
-                    sb_appendf(&out, "    movss %%xmm0, %s@tpoff(%%rcx)\n", inst->arg);
+                    sb_appendf(&out, "    movss %%xmm0, %s@tpoff(%%rcx)\n", ir_arg_str(inst->arg));
                 } else {
-                    sb_appendf(&out, "    movsd %%xmm0, %s@tpoff(%%rcx)\n", inst->arg);
+                    sb_appendf(&out, "    movsd %%xmm0, %s@tpoff(%%rcx)\n", ir_arg_str(inst->arg));
                 }
             } else if (ir_pic_mode) {
-                sb_appendf(&out, "    movq %s@GOTPCREL(%%rip), %%rcx\n", inst->arg);
+                sb_appendf(&out, "    movq %s@GOTPCREL(%%rip), %%rcx\n", ir_arg_str(inst->arg));
                 if (gsize == 4) {
                     sb_append(&out, "    cvtsd2ss %xmm0, %xmm0\n");
                     sb_append(&out, "    movss %xmm0, (%rcx)\n");
@@ -1233,7 +1233,7 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                 }
             } else if (ir_code_model == 1) {
                 /* Kernel model: load address first, then store through register */
-                sb_appendf(&out, "    movabs $%s, %%rcx\n", inst->arg);
+                sb_appendf(&out, "    movabs $%s, %%rcx\n", ir_arg_str(inst->arg));
                 if (gsize == 4) {
                     sb_append(&out, "    cvtsd2ss %xmm0, %xmm0\n");
                     sb_append(&out, "    movss %xmm0, (%rcx)\n");
@@ -1243,31 +1243,31 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
             } else {
                 if (gsize == 4) {
                     sb_append(&out, "    cvtsd2ss %xmm0, %xmm0\n");
-                    sb_appendf(&out, "    movss %%xmm0, %s(%%rip)\n", inst->arg);
+                    sb_appendf(&out, "    movss %%xmm0, %s(%%rip)\n", ir_arg_str(inst->arg));
                 } else {
-                    sb_appendf(&out, "    movsd %%xmm0, %s(%%rip)\n", inst->arg);
+                    sb_appendf(&out, "    movsd %%xmm0, %s(%%rip)\n", ir_arg_str(inst->arg));
                 }
             }
-        } else if (strcmp(inst->op, "fload_addr4") == 0 || strcmp(inst->op, "fload_addr8") == 0) {
+        } else if (inst->op == IR_FLOAD_ADDR4 || inst->op == IR_FLOAD_ADDR8) {
             sb_append(&out, "    popq %rax\n");
-            if (strcmp(inst->op, "fload_addr4") == 0) {
+            if (inst->op == IR_FLOAD_ADDR4) {
                 sb_append(&out, "    cvtss2sd (%rax), %xmm0\n");
             } else {
                 sb_append(&out, "    movsd (%rax), %xmm0\n");
             }
             sb_append(&out, "    subq $8, %rsp\n");
             sb_append(&out, "    movsd %xmm0, (%rsp)\n");
-        } else if (strcmp(inst->op, "fstore_addr4") == 0 || strcmp(inst->op, "fstore_addr8") == 0) {
+        } else if (inst->op == IR_FSTORE_ADDR4 || inst->op == IR_FSTORE_ADDR8) {
             sb_append(&out, "    popq %rax\n");
             sb_append(&out, "    movsd (%rsp), %xmm0\n");
             sb_append(&out, "    addq $8, %rsp\n");
-            if (strcmp(inst->op, "fstore_addr4") == 0) {
+            if (inst->op == IR_FSTORE_ADDR4) {
                 sb_append(&out, "    cvtsd2ss %xmm0, %xmm0\n");
                 sb_append(&out, "    movss %xmm0, (%rax)\n");
             } else {
                 sb_append(&out, "    movsd %xmm0, (%rax)\n");
             }
-        } else if (strcmp(inst->op, "fret") == 0) {
+        } else if (inst->op == IR_FRET) {
             sb_append(&out, "    movsd (%rsp), %xmm0\n");
             if (inst->value == 4) {
                 sb_append(&out, "    cvtsd2ss %xmm0, %xmm0\n");  /* return float as single */
@@ -1279,14 +1279,14 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
             sb_append(&out, "    ret\n");
         } else {
             char msg[128];
-            snprintf(msg, sizeof(msg), "unknown IR op %s", inst->op);
+            snprintf(msg, sizeof(msg), "unknown IR op %s", ir_op_to_string(inst->op));
             diagnostics_fatal(msg);
         }
     }
     int has_explicit_ret = 0;
     if (fn->code.count > 0) {
-        const char *last_op = fn->code.data[fn->code.count - 1].op;
-        has_explicit_ret = strcmp(last_op, "ret") == 0 || strcmp(last_op, "ret_agg") == 0;
+        IrOp last_op = fn->code.data[fn->code.count - 1].op;
+        has_explicit_ret = last_op == IR_RET || last_op == IR_RET_AGG;
     }
     if (!has_explicit_ret) {
         if (frame) {

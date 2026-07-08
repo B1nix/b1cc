@@ -346,10 +346,9 @@ int main(int argc, char **argv) {
             HashMap macros;
             hashmap_init(&macros, 64);
             for (int b = 0; b < preprocessor_driver_macros.bucket_count; ++b) {
-                HashMapEntry *curr = preprocessor_driver_macros.buckets[b];
-                while (curr) {
+                HashMapEntry *curr = &preprocessor_driver_macros.entries[b];
+                if (curr->key && curr->key != TOMBSTONE) {
                     hashmap_put(&macros, curr->key, curr->val_ptr, curr->val_int);
-                    curr = curr->next;
                 }
             }
 
@@ -396,11 +395,10 @@ int main(int argc, char **argv) {
         }
         // clean preprocessor macros params
         for (int b = 0; b < preprocessor_driver_macros.bucket_count; ++b) {
-            HashMapEntry *curr = preprocessor_driver_macros.buckets[b];
-            while (curr) {
+            HashMapEntry *curr = &preprocessor_driver_macros.entries[b];
+            if (curr->key && curr->key != TOMBSTONE) {
                 Macro *m = (Macro *)curr->val_ptr;
                 string_array_free(&m->params);
-                curr = curr->next;
             }
         }
         hashmap_free(&preprocessor_driver_macros);
@@ -439,11 +437,10 @@ int main(int argc, char **argv) {
             free((void *)builtin_inc_dir);
         }
         for (int b = 0; b < preprocessor_driver_macros.bucket_count; ++b) {
-            HashMapEntry *curr = preprocessor_driver_macros.buckets[b];
-            while (curr) {
+            HashMapEntry *curr = &preprocessor_driver_macros.entries[b];
+            if (curr->key && curr->key != TOMBSTONE) {
                 Macro *m = (Macro *)curr->val_ptr;
                 string_array_free(&m->params);
-                curr = curr->next;
             }
         }
         hashmap_free(&preprocessor_driver_macros);
@@ -588,11 +585,10 @@ int main(int argc, char **argv) {
             free((void *)builtin_inc_dir);
         }
         for (int b = 0; b < preprocessor_driver_macros.bucket_count; ++b) {
-            HashMapEntry *curr = preprocessor_driver_macros.buckets[b];
-            while (curr) {
+            HashMapEntry *curr = &preprocessor_driver_macros.entries[b];
+            if (curr->key && curr->key != TOMBSTONE) {
                 Macro *m = (Macro *)curr->val_ptr;
                 string_array_free(&m->params);
-                curr = curr->next;
             }
         }
         hashmap_free(&preprocessor_driver_macros);
@@ -631,11 +627,10 @@ int main(int argc, char **argv) {
                 free((void *)builtin_inc_dir);
             }
             for (int b = 0; b < preprocessor_driver_macros.bucket_count; ++b) {
-                HashMapEntry *curr = preprocessor_driver_macros.buckets[b];
-                while (curr) {
+                HashMapEntry *curr = &preprocessor_driver_macros.entries[b];
+                if (curr->key && curr->key != TOMBSTONE) {
                     Macro *m = (Macro *)curr->val_ptr;
                     string_array_free(&m->params);
-                    curr = curr->next;
                 }
             }
             hashmap_free(&preprocessor_driver_macros);
@@ -673,11 +668,10 @@ int main(int argc, char **argv) {
                 free((void *)builtin_inc_dir);
             }
             for (int b = 0; b < preprocessor_driver_macros.bucket_count; ++b) {
-                HashMapEntry *curr = preprocessor_driver_macros.buckets[b];
-                while (curr) {
+                HashMapEntry *curr = &preprocessor_driver_macros.entries[b];
+                if (curr->key && curr->key != TOMBSTONE) {
                     Macro *m = (Macro *)curr->val_ptr;
                     string_array_free(&m->params);
-                    curr = curr->next;
                 }
             }
             hashmap_free(&preprocessor_driver_macros);
@@ -734,11 +728,10 @@ int main(int argc, char **argv) {
         string_array_free(&link_flags);
         string_array_free(&preprocessor_driver_include_dirs);
         for (int b = 0; b < preprocessor_driver_macros.bucket_count; ++b) {
-            HashMapEntry *curr = preprocessor_driver_macros.buckets[b];
-            while (curr) {
+            HashMapEntry *curr = &preprocessor_driver_macros.entries[b];
+            if (curr->key && curr->key != TOMBSTONE) {
                 Macro *m = (Macro *)curr->val_ptr;
                 string_array_free(&m->params);
-                curr = curr->next;
             }
         }
         hashmap_free(&preprocessor_driver_macros);
@@ -891,11 +884,10 @@ int main(int argc, char **argv) {
         free((void *)builtin_inc_dir);
     }
     for (int b = 0; b < preprocessor_driver_macros.bucket_count; ++b) {
-        HashMapEntry *curr = preprocessor_driver_macros.buckets[b];
-        while (curr) {
+        HashMapEntry *curr = &preprocessor_driver_macros.entries[b];
+        if (curr->key && curr->key != TOMBSTONE) {
             Macro *m = (Macro *)curr->val_ptr;
             string_array_free(&m->params);
-            curr = curr->next;
         }
     }
     hashmap_free(&preprocessor_driver_macros);

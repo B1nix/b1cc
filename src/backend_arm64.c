@@ -112,8 +112,8 @@ static int agg_float_count(int cls) {
 static int get_max_call_ret_size(const IrFunction *fn, int threshold) {
     int max_size = 0;
     for (int i = 0; i < fn->code.count; ++i) {
-        if (strcmp(fn->code.data[i].op, "call") == 0) {
-            HashMapEntry *entry = hashmap_get(&ir_function_return_aggregate_sizes, fn->code.data[i].arg);
+        if (fn->code.data[i].op == IR_CALL) {
+            HashMapEntry *entry = hashmap_get(&ir_function_return_aggregate_sizes, ir_arg_str(fn->code.data[i].arg));
             if (entry && entry->val_int > threshold) {
                 if (entry->val_int > max_size) {
                     max_size = entry->val_int;
@@ -458,12 +458,12 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
             last_loc_line = inst->line;
             last_loc_col = inst->col;
         }
-        if (strcmp(inst->op, "asm") == 0) {
-            sb_append(&out, inst->arg);
-            if (inst->arg[0] && inst->arg[strlen(inst->arg) - 1] != '\n') {
+        if (inst->op == IR_ASM) {
+            sb_append(&out, ir_arg_str(inst->arg));
+            if (ir_arg_str(inst->arg)[0] && ir_arg_str(inst->arg)[strlen(ir_arg_str(inst->arg)) - 1] != '\n') {
                 sb_append(&out, "\n");
             }
-        } else if (strcmp(inst->op, "const") == 0) {
+        } else if (inst->op == IR_CONST) {
             if (inst->value >= 0 && inst->value <= 65535) {
                 sb_appendf(&out, "    mov x0, #%ld\n", inst->value);
             } else {
@@ -477,10 +477,10 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                     sb_appendf(&out, "    movk x0, #%d, lsl #48\n", (int)((val >> 48) & 0xffff));
             }
             sb_append(&out, "    str x0, [sp, #-16]!\n");
-        } else if (strcmp(inst->op, "load") == 0) {
+        } else if (inst->op == IR_LOAD) {
             emit_load_fp(&out, 0, -((inst->value + 1) * 16));
             sb_append(&out, "    str x0, [sp, #-16]!\n");
-        } else if (strcmp(inst->op, "va_start") == 0) {
+        } else if (inst->op == IR_VA_START) {
             int stack_word = 0;
             int abi_word = 0;
             int v_word = 0;
@@ -532,26 +532,26 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
             }
             sb_appendf(&out, "    add x0, x29, #%d\n", 16 + stack_word * 8);
             emit_store_fp(&out, 0, -((inst->value + 1) * 16));
-        } else if (strcmp(inst->op, "str") == 0) {
-            sb_appendf(&out, "    adrp x0, %s@PAGE\n", inst->arg);
-            sb_appendf(&out, "    add x0, x0, %s@PAGEOFF\n", inst->arg);
+        } else if (inst->op == IR_STR) {
+            sb_appendf(&out, "    adrp x0, %s@PAGE\n", ir_arg_str(inst->arg));
+            sb_appendf(&out, "    add x0, x0, %s@PAGEOFF\n", ir_arg_str(inst->arg));
             sb_append(&out, "    str x0, [sp, #-16]!\n");
-        } else if (strcmp(inst->op, "store") == 0) {
+        } else if (inst->op == IR_STORE) {
             sb_append(&out, "    ldr x0, [sp], #16\n");
             emit_store_fp(&out, 0, -((inst->value + 1) * 16));
-        } else if (strcmp(inst->op, "dup") == 0) {
+        } else if (inst->op == IR_DUP) {
             sb_append(&out, "    ldr x0, [sp]\n");
             sb_append(&out, "    str x0, [sp, #-16]!\n");
-        } else if (strcmp(inst->op, "pop") == 0) {
+        } else if (inst->op == IR_POP) {
             sb_append(&out, "    add sp, sp, #16\n");
-        } else if (strcmp(inst->op, "vla_alloc") == 0) {
+        } else if (inst->op == IR_VLA_ALLOC) {
             sb_append(&out, "    ldr x0, [sp], #16\n");
             sb_append(&out, "    add x0, x0, #15\n");
             sb_append(&out, "    and x0, x0, #~15\n");
             sb_append(&out, "    sub sp, sp, x0\n");
             sb_append(&out, "    mov x0, sp\n");
             sb_append(&out, "    str x0, [sp, #-16]!\n");
-        } else if (strcmp(inst->op, "load_addr") == 0) {
+        } else if (inst->op == IR_LOAD_ADDR) {
             sb_append(&out, "    ldr x0, [sp], #16\n");
             if (inst->value == 1) {
                 sb_append(&out, "    ldrsb x0, [x0]\n");
@@ -563,19 +563,19 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                 sb_append(&out, "    ldr x0, [x0]\n");
             }
             sb_append(&out, "    str x0, [sp, #-16]!\n");
-        } else if (strcmp(inst->op, "+") == 0 || strcmp(inst->op, "-") == 0 || strcmp(inst->op, "*") == 0 ||
-                   strcmp(inst->op, "/") == 0 || strcmp(inst->op, "%") == 0 || strcmp(inst->op, "u/") == 0 || strcmp(inst->op, "u%") == 0 ||
-                   strcmp(inst->op, "==") == 0 || strcmp(inst->op, "!=") == 0 ||
-                   strcmp(inst->op, "<") == 0 || strcmp(inst->op, ">") == 0 || strcmp(inst->op, "<=") == 0 ||
-                   strcmp(inst->op, "u<") == 0 || strcmp(inst->op, "u>") == 0 || strcmp(inst->op, "u<=") == 0 ||
-                   strcmp(inst->op, "u>=") == 0 || strcmp(inst->op, "u>>") == 0 ||
-                   strcmp(inst->op, ">=") == 0 || strcmp(inst->op, "index") == 0 ||
-                   strcmp(inst->op, "&") == 0 || strcmp(inst->op, "|") == 0 || strcmp(inst->op, "^") == 0 ||
-                   strcmp(inst->op, "<<") == 0 || strcmp(inst->op, ">>") == 0) {
+        } else if (inst->op == IR_ADD || inst->op == IR_SUB || inst->op == IR_MUL ||
+                   inst->op == IR_DIV || inst->op == IR_MOD || inst->op == IR_UDIV || inst->op == IR_UMOD ||
+                   inst->op == IR_EQEQ || inst->op == IR_NOTEQ ||
+                   inst->op == IR_LT || inst->op == IR_GT || inst->op == IR_LTEQ ||
+                   inst->op == IR_ULT || inst->op == IR_UGT || inst->op == IR_ULTEQ ||
+                   inst->op == IR_UGTEQ || inst->op == IR_UGTGT ||
+                   inst->op == IR_GTEQ || inst->op == IR_INDEX ||
+                   inst->op == IR_AND || inst->op == IR_OR || inst->op == IR_XOR ||
+                   inst->op == IR_LTLT || inst->op == IR_GTGT) {
             
             sb_append(&out, "    ldr x0, [sp], #16\n");
             sb_append(&out, "    ldr x1, [sp], #16\n");
-            if (strcmp(inst->op, "index") == 0) {
+            if (inst->op == IR_INDEX) {
                 if (inst->value == 1) {
                     sb_append(&out, "    ldrsb x0, [x1, x0]\n");
                 } else if (inst->value == 2) {
@@ -585,75 +585,75 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                 } else {
                     sb_append(&out, "    ldr x0, [x1, x0, lsl #3]\n");
                 }
-            } else if (strcmp(inst->op, "+") == 0)
+            } else if (inst->op == IR_ADD)
                 sb_append(&out, "    add x0, x1, x0\n");
-            else if (strcmp(inst->op, "-") == 0)
+            else if (inst->op == IR_SUB)
                 sb_append(&out, "    sub x0, x1, x0\n");
-            else if (strcmp(inst->op, "*") == 0)
+            else if (inst->op == IR_MUL)
                 sb_append(&out, "    mul x0, x1, x0\n");
-            else if (strcmp(inst->op, "/") == 0)
+            else if (inst->op == IR_DIV)
                 sb_append(&out, "    sdiv x0, x1, x0\n");
-            else if (strcmp(inst->op, "u/") == 0)
+            else if (inst->op == IR_UDIV)
                 sb_append(&out, "    udiv x0, x1, x0\n");
-            else if (strcmp(inst->op, "%") == 0) {
+            else if (inst->op == IR_MOD) {
                 sb_append(&out, "    sdiv x2, x1, x0\n");
                 sb_append(&out, "    msub x0, x2, x0, x1\n");
             }
-            else if (strcmp(inst->op, "u%") == 0) {
+            else if (inst->op == IR_UMOD) {
                 sb_append(&out, "    udiv x2, x1, x0\n");
                 sb_append(&out, "    msub x0, x2, x0, x1\n");
             }
-            else if (strcmp(inst->op, "&") == 0)
+            else if (inst->op == IR_AND)
                 sb_append(&out, "    and x0, x1, x0\n");
-            else if (strcmp(inst->op, "|") == 0)
+            else if (inst->op == IR_OR)
                 sb_append(&out, "    orr x0, x1, x0\n");
-            else if (strcmp(inst->op, "^") == 0)
+            else if (inst->op == IR_XOR)
                 sb_append(&out, "    eor x0, x1, x0\n");
-            else if (strcmp(inst->op, "<<") == 0)
+            else if (inst->op == IR_LTLT)
                 sb_append(&out, "    lsl x0, x1, x0\n");
-            else if (strcmp(inst->op, ">>") == 0)
+            else if (inst->op == IR_GTGT)
                 sb_append(&out, "    asr x0, x1, x0\n");
-            else if (strcmp(inst->op, "u>>") == 0)
+            else if (inst->op == IR_UGTGT)
                 sb_append(&out, "    lsr x0, x1, x0\n");
             else {
                 sb_append(&out, "    cmp x1, x0\n");
-                if (strcmp(inst->op, "==") == 0)
+                if (inst->op == IR_EQEQ)
                     sb_append(&out, "    cset x0, eq\n");
-                else if (strcmp(inst->op, "!=") == 0)
+                else if (inst->op == IR_NOTEQ)
                     sb_append(&out, "    cset x0, ne\n");
-                else if (strcmp(inst->op, "<") == 0)
+                else if (inst->op == IR_LT)
                     sb_append(&out, "    cset x0, lt\n");
-                else if (strcmp(inst->op, ">") == 0)
+                else if (inst->op == IR_GT)
                     sb_append(&out, "    cset x0, gt\n");
-                else if (strcmp(inst->op, "<=") == 0)
+                else if (inst->op == IR_LTEQ)
                     sb_append(&out, "    cset x0, le\n");
-                else if (strcmp(inst->op, ">=") == 0)
+                else if (inst->op == IR_GTEQ)
                     sb_append(&out, "    cset x0, ge\n");
-                else if (strcmp(inst->op, "u<") == 0)
+                else if (inst->op == IR_ULT)
                     sb_append(&out, "    cset x0, lo\n");
-                else if (strcmp(inst->op, "u>") == 0)
+                else if (inst->op == IR_UGT)
                     sb_append(&out, "    cset x0, hi\n");
-                else if (strcmp(inst->op, "u<=") == 0)
+                else if (inst->op == IR_ULTEQ)
                     sb_append(&out, "    cset x0, ls\n");
                 else
                     sb_append(&out, "    cset x0, hs\n");
             }
             sb_append(&out, "    str x0, [sp, #-16]!\n");
-        } else if (strcmp(inst->op, "~") == 0 || strcmp(inst->op, "!") == 0 || strcmp(inst->op, "neg") == 0 ||
-                   strcmp(inst->op, "cast") == 0 || strcmp(inst->op, "ucast") == 0) {
+        } else if (inst->op == IR_TILDE || inst->op == IR_NOT || inst->op == IR_NEG ||
+                   inst->op == IR_CAST || inst->op == IR_UCAST) {
             sb_append(&out, "    ldr x0, [sp], #16\n");
-            if (strcmp(inst->op, "~") == 0)
+            if (inst->op == IR_TILDE)
                 sb_append(&out, "    mvn x0, x0\n");
-            else if (strcmp(inst->op, "neg") == 0)
+            else if (inst->op == IR_NEG)
                 sb_append(&out, "    neg x0, x0\n");
-            else if (strcmp(inst->op, "cast") == 0) {
+            else if (inst->op == IR_CAST) {
                 if (inst->value == 1)
                     sb_append(&out, "    sxtb x0, w0\n");
                 else if (inst->value == 2)
                     sb_append(&out, "    sxth x0, w0\n");
                 else if (inst->value == 4)
                     sb_append(&out, "    sxtw x0, w0\n");
-            } else if (strcmp(inst->op, "ucast") == 0) {
+            } else if (inst->op == IR_UCAST) {
                 if (inst->value == 1)
                     sb_append(&out, "    and x0, x0, #0xff\n");
                 else if (inst->value == 2)
@@ -665,35 +665,35 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                 sb_append(&out, "    cset x0, eq\n");
             }
             sb_append(&out, "    str x0, [sp, #-16]!\n");
-        } else if (strcmp(inst->op, "jz") == 0) {
+        } else if (inst->op == IR_JZ) {
             sb_append(&out, "    ldr x0, [sp], #16\n");
             sb_append(&out, "    cmp x0, #0\n");
-            sb_appendf(&out, "    b.eq %s\n", inst->arg);
-        } else if (strcmp(inst->op, "jmp") == 0) {
-            sb_appendf(&out, "    b %s\n", inst->arg);
-        } else if (strcmp(inst->op, "label") == 0) {
-            sb_appendf(&out, "%s:\n", inst->arg);
-        } else if (strcmp(inst->op, "call") == 0 || strcmp(inst->op, "icall") == 0) {
+            sb_appendf(&out, "    b.eq %s\n", ir_arg_str(inst->arg));
+        } else if (inst->op == IR_JMP) {
+            sb_appendf(&out, "    b %s\n", ir_arg_str(inst->arg));
+        } else if (inst->op == IR_LABEL) {
+            sb_appendf(&out, "%s:\n", ir_arg_str(inst->arg));
+        } else if (inst->op == IR_CALL || inst->op == IR_ICALL) {
             long num_args = inst->value;
             /* Float-scalar call fast path (AAPCS64): float/double args -> V0-V7,
                integer/pointer args -> X0-X7, float/double return -> V0. */
-            if (strcmp(inst->op, "call") == 0 || strcmp(inst->op, "icall") == 0) {
+            if (inst->op == IR_CALL || inst->op == IR_ICALL) {
                 IntArray *pf = nullptr;
                 int retf = 0;
-                HashMapEntry *pe = strcmp(inst->op, "call") == 0 ?
-                    hashmap_get(&ir_function_param_floats, inst->arg) :
-                    hashmap_get(&ir_function_pointer_param_floats, inst->arg);
+                HashMapEntry *pe = inst->op == IR_CALL ?
+                    hashmap_get(&ir_function_param_floats, ir_arg_str(inst->arg)) :
+                    hashmap_get(&ir_function_pointer_param_floats, ir_arg_str(inst->arg));
                 if (pe) pf = (IntArray *)pe->val_ptr;
-                HashMapEntry *re = strcmp(inst->op, "call") == 0 ?
-                    hashmap_get(&ir_function_return_floats, inst->arg) :
-                    hashmap_get(&ir_function_pointer_return_floats, inst->arg);
+                HashMapEntry *re = inst->op == IR_CALL ?
+                    hashmap_get(&ir_function_return_floats, ir_arg_str(inst->arg)) :
+                    hashmap_get(&ir_function_pointer_return_floats, ir_arg_str(inst->arg));
                 if (re) retf = re->val_int;
                 int scalar_path_ret_agg_size = 0;
                 int scalar_path_has_agg_arg = 0;
-                if (strcmp(inst->op, "call") == 0) {
-                    HashMapEntry *ae = hashmap_get(&ir_function_return_aggregate_sizes, inst->arg);
+                if (inst->op == IR_CALL) {
+                    HashMapEntry *ae = hashmap_get(&ir_function_return_aggregate_sizes, ir_arg_str(inst->arg));
                     if (ae) scalar_path_ret_agg_size = ae->val_int;
-                    ae = hashmap_get(&ir_function_param_aggregate_sizes, inst->arg);
+                    ae = hashmap_get(&ir_function_param_aggregate_sizes, ir_arg_str(inst->arg));
                     if (ae) {
                         IntArray *as = (IntArray *)ae->val_ptr;
                         for (int ai = 0; ai < as->count; ++ai) {
@@ -754,13 +754,13 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                             }
                         }
                     }
-                    if (strcmp(inst->op, "icall") == 0) {
+                    if (inst->op == IR_ICALL) {
                         sb_appendf(&out, "    ldr x16, [sp, #%ld]\n", stack_bytes + num_args * 16);
                         sb_append(&out, "    blr x16\n");
                     } else {
-                        sb_appendf(&out, "    bl _%s\n", inst->arg);
+                        sb_appendf(&out, "    bl _%s\n", ir_arg_str(inst->arg));
                     }
-                    sb_appendf(&out, "    add sp, sp, #%ld\n", stack_bytes + num_args * 16 + (strcmp(inst->op, "icall") == 0 ? 16 : 0));
+                    sb_appendf(&out, "    add sp, sp, #%ld\n", stack_bytes + num_args * 16 + (inst->op == IR_ICALL ? 16 : 0));
                     if (retf) {
                         if (retf == 4) {
                             sb_append(&out, "    fcvt d0, s0\n");
@@ -776,12 +776,12 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
             IntArray *agg_sizes = nullptr;
             IntArray *agg_float_classes = nullptr;
             IntArray *param_floats_for_agg = nullptr;
-            if (strcmp(inst->op, "call") == 0) {
-                HashMapEntry *entry = hashmap_get(&ir_function_param_aggregate_sizes, inst->arg);
+            if (inst->op == IR_CALL) {
+                HashMapEntry *entry = hashmap_get(&ir_function_param_aggregate_sizes, ir_arg_str(inst->arg));
                 if (entry) agg_sizes = (IntArray *)entry->val_ptr;
-                entry = hashmap_get(&ir_function_param_aggregate_float_classes, inst->arg);
+                entry = hashmap_get(&ir_function_param_aggregate_float_classes, ir_arg_str(inst->arg));
                 if (entry) agg_float_classes = (IntArray *)entry->val_ptr;
-                entry = hashmap_get(&ir_function_param_floats, inst->arg);
+                entry = hashmap_get(&ir_function_param_floats, ir_arg_str(inst->arg));
                 if (entry) param_floats_for_agg = (IntArray *)entry->val_ptr;
             }
             int has_aggregate_arg = 0;
@@ -792,20 +792,20 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
             int *arg_stack_word = calloc(num_args + 1, sizeof(int));
 
             int vararg_fixed_count = -1;
-            if (strcmp(inst->op, "call") == 0) {
-                HashMapEntry *entry = hashmap_get(&ir_function_vararg_fixed_counts, inst->arg);
+            if (inst->op == IR_CALL) {
+                HashMapEntry *entry = hashmap_get(&ir_function_vararg_fixed_counts, ir_arg_str(inst->arg));
                 if (entry) vararg_fixed_count = entry->val_int;
             }
 
             int ret_agg_size = 0;
             int ret_agg_float = 0;
             int ret_float_for_agg = 0;
-            if (strcmp(inst->op, "call") == 0) {
-                HashMapEntry *entry = hashmap_get(&ir_function_return_aggregate_sizes, inst->arg);
+            if (inst->op == IR_CALL) {
+                HashMapEntry *entry = hashmap_get(&ir_function_return_aggregate_sizes, ir_arg_str(inst->arg));
                 if (entry) ret_agg_size = entry->val_int;
-                entry = hashmap_get(&ir_function_return_aggregate_float_classes, inst->arg);
+                entry = hashmap_get(&ir_function_return_aggregate_float_classes, ir_arg_str(inst->arg));
                 if (entry) ret_agg_float = entry->val_int;
-                entry = hashmap_get(&ir_function_return_floats, inst->arg);
+                entry = hashmap_get(&ir_function_return_floats, ir_arg_str(inst->arg));
                 if (entry) ret_float_for_agg = entry->val_int;
             }
 
@@ -874,7 +874,7 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                         sb_appendf(&out, "    str x9, [sp, #%ld]\n", (i - vararg_fixed_count) * 8);
                     }
                 }
-                sb_appendf(&out, "    bl _%s\n", inst->arg);
+                sb_appendf(&out, "    bl _%s\n", ir_arg_str(inst->arg));
                 sb_appendf(&out, "    add sp, sp, #%ld\n", stack_bytes + num_args * 16);
             } else if (has_aggregate_arg || ret_agg_size > 0) {
                 int stack_bytes = ((stack_words * 8 + 15) / 16) * 16;
@@ -944,22 +944,22 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                     emit_sub_imm(&out, "x8", "x29", -ret_buf_off);
                 }
 
-                if (strcmp(inst->op, "icall") == 0) {
+                if (inst->op == IR_ICALL) {
                     sb_appendf(&out, "    ldr x16, [sp, #%d]\n", stack_bytes + (int)num_args * 16);
                     sb_append(&out, "    blr x16\n");
                 } else {
-                    sb_appendf(&out, "    bl _%s\n", inst->arg);
+                    sb_appendf(&out, "    bl _%s\n", ir_arg_str(inst->arg));
                 }
-                sb_appendf(&out, "    add sp, sp, #%d\n", stack_bytes + (int)num_args * 16 + (strcmp(inst->op, "icall") == 0 ? 16 : 0));
+                sb_appendf(&out, "    add sp, sp, #%d\n", stack_bytes + (int)num_args * 16 + (inst->op == IR_ICALL ? 16 : 0));
             } else if (num_args <= 8) {
                 for (long i = num_args - 1; i >= 0; --i) {
                     sb_appendf(&out, "    ldr x%ld, [sp], #16\n", i);
                 }
-                if (strcmp(inst->op, "icall") == 0) {
+                if (inst->op == IR_ICALL) {
                     sb_append(&out, "    ldr x16, [sp], #16\n");
                     sb_append(&out, "    blr x16\n");
                 } else {
-                    sb_appendf(&out, "    bl _%s\n", inst->arg);
+                    sb_appendf(&out, "    bl _%s\n", ir_arg_str(inst->arg));
                 }
             } else {
                 long num_stack_args = num_args - 8;
@@ -970,7 +970,7 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                 for (long i = 7; i >= 0; --i) {
                     sb_appendf(&out, "    ldr x%ld, [sp], #16\n", i);
                 }
-                if (strcmp(inst->op, "icall") == 0) {
+                if (inst->op == IR_ICALL) {
                     sb_append(&out, "    ldr x16, [sp], #16\n");
                 }
                 long stack_bytes = ((num_stack_args + 1) / 2) * 16;
@@ -979,10 +979,10 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                     int reg_idx = 8 + (int)(i - 8);
                     sb_appendf(&out, "    str x%d, [sp, #%ld]\n", reg_idx, (i - 8) * 8);
                 }
-                if (strcmp(inst->op, "icall") == 0) {
+                if (inst->op == IR_ICALL) {
                     sb_append(&out, "    blr x16\n");
                 } else {
-                    sb_appendf(&out, "    bl _%s\n", inst->arg);
+                    sb_appendf(&out, "    bl _%s\n", ir_arg_str(inst->arg));
                 }
                 sb_appendf(&out, "    add sp, sp, #%ld\n", stack_bytes);
             }
@@ -1028,17 +1028,17 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                     sb_append(&out, "    str x0, [sp, #-16]!\n");
                 }
             }
-        } else if (strcmp(inst->op, "addr") == 0) {
+        } else if (inst->op == IR_ADDR) {
             emit_sub_imm(&out, "x0", "x29", (inst->value + 1) * 16);
             sb_append(&out, "    str x0, [sp, #-16]!\n");
-        } else if (strcmp(inst->op, "gload") == 0) {
-            int gsize = ir_get_global_storage_size(inst->arg);
+        } else if (inst->op == IR_GLOAD) {
+            int gsize = ir_get_global_storage_size(ir_arg_str(inst->arg));
             if (gsize == 0) gsize = 8;
 
-            int g_is_unsigned = ir_get_var_unsigned(inst->arg);
-            if (ir_is_global_var_thread_local(inst->arg)) {
-                sb_appendf(&out, "    adrp x0, _%s@TLVPPAGE\n", inst->arg);
-                sb_appendf(&out, "    ldr x0, [x0, _%s@TLVPPAGEOFF]\n", inst->arg);
+            int g_is_unsigned = ir_get_var_unsigned(ir_arg_str(inst->arg));
+            if (ir_is_global_var_thread_local(ir_arg_str(inst->arg))) {
+                sb_appendf(&out, "    adrp x0, _%s@TLVPPAGE\n", ir_arg_str(inst->arg));
+                sb_appendf(&out, "    ldr x0, [x0, _%s@TLVPPAGEOFF]\n", ir_arg_str(inst->arg));
                 sb_append(&out, "    ldr x8, [x0]\n");
                 sb_append(&out, "    blr x8\n");
                 if (gsize == 1) {
@@ -1059,29 +1059,29 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                 } else {
                     sb_append(&out, "    ldr x0, [x0]\n");
                 }
-            } else if (is_defined_global(inst->arg)) {
-                sb_appendf(&out, "    adrp x0, _%s@PAGE\n", inst->arg);
+            } else if (is_defined_global(ir_arg_str(inst->arg))) {
+                sb_appendf(&out, "    adrp x0, _%s@PAGE\n", ir_arg_str(inst->arg));
                 if (gsize == 1) {
                     if (g_is_unsigned)
-                        sb_appendf(&out, "    ldrb w0, [x0, _%s@PAGEOFF]\n", inst->arg);
+                        sb_appendf(&out, "    ldrb w0, [x0, _%s@PAGEOFF]\n", ir_arg_str(inst->arg));
                     else
-                        sb_appendf(&out, "    ldrsb x0, [x0, _%s@PAGEOFF]\n", inst->arg);
+                        sb_appendf(&out, "    ldrsb x0, [x0, _%s@PAGEOFF]\n", ir_arg_str(inst->arg));
                 } else if (gsize == 2) {
                     if (g_is_unsigned)
-                        sb_appendf(&out, "    ldrh w0, [x0, _%s@PAGEOFF]\n", inst->arg);
+                        sb_appendf(&out, "    ldrh w0, [x0, _%s@PAGEOFF]\n", ir_arg_str(inst->arg));
                     else
-                        sb_appendf(&out, "    ldrsh x0, [x0, _%s@PAGEOFF]\n", inst->arg);
+                        sb_appendf(&out, "    ldrsh x0, [x0, _%s@PAGEOFF]\n", ir_arg_str(inst->arg));
                 } else if (gsize == 4) {
                     if (g_is_unsigned)
-                        sb_appendf(&out, "    ldr w0, [x0, _%s@PAGEOFF]\n", inst->arg);
+                        sb_appendf(&out, "    ldr w0, [x0, _%s@PAGEOFF]\n", ir_arg_str(inst->arg));
                     else
-                        sb_appendf(&out, "    ldrsw x0, [x0, _%s@PAGEOFF]\n", inst->arg);
+                        sb_appendf(&out, "    ldrsw x0, [x0, _%s@PAGEOFF]\n", ir_arg_str(inst->arg));
                 } else {
-                    sb_appendf(&out, "    ldr x0, [x0, _%s@PAGEOFF]\n", inst->arg);
+                    sb_appendf(&out, "    ldr x0, [x0, _%s@PAGEOFF]\n", ir_arg_str(inst->arg));
                 }
             } else {
-                sb_appendf(&out, "    adrp x0, _%s@GOTPAGE\n", inst->arg);
-                sb_appendf(&out, "    ldr x0, [x0, _%s@GOTPAGEOFF]\n", inst->arg);
+                sb_appendf(&out, "    adrp x0, _%s@GOTPAGE\n", ir_arg_str(inst->arg));
+                sb_appendf(&out, "    ldr x0, [x0, _%s@GOTPAGEOFF]\n", ir_arg_str(inst->arg));
                 if (gsize == 1) {
                     if (g_is_unsigned)
                         sb_append(&out, "    ldrb w0, [x0]\n");
@@ -1102,15 +1102,15 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                 }
             }
             sb_append(&out, "    str x0, [sp, #-16]!\n");
-        } else if (strcmp(inst->op, "gstore") == 0) {
+        } else if (inst->op == IR_GSTORE) {
             sb_append(&out, "    ldr x0, [sp], #16\n");
-            int gsize = ir_get_global_storage_size(inst->arg);
+            int gsize = ir_get_global_storage_size(ir_arg_str(inst->arg));
             if (gsize == 0) gsize = 8;
 
-            if (ir_is_global_var_thread_local(inst->arg)) {
+            if (ir_is_global_var_thread_local(ir_arg_str(inst->arg))) {
                 sb_append(&out, "    mov x2, x0\n");
-                sb_appendf(&out, "    adrp x0, _%s@TLVPPAGE\n", inst->arg);
-                sb_appendf(&out, "    ldr x0, [x0, _%s@TLVPPAGEOFF]\n", inst->arg);
+                sb_appendf(&out, "    adrp x0, _%s@TLVPPAGE\n", ir_arg_str(inst->arg));
+                sb_appendf(&out, "    ldr x0, [x0, _%s@TLVPPAGEOFF]\n", ir_arg_str(inst->arg));
                 sb_append(&out, "    ldr x8, [x0]\n");
                 sb_append(&out, "    blr x8\n");
                 if (gsize == 1) {
@@ -1122,20 +1122,20 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                 } else {
                     sb_append(&out, "    str x2, [x0]\n");
                 }
-            } else if (is_defined_global(inst->arg)) {
-                sb_appendf(&out, "    adrp x1, _%s@PAGE\n", inst->arg);
+            } else if (is_defined_global(ir_arg_str(inst->arg))) {
+                sb_appendf(&out, "    adrp x1, _%s@PAGE\n", ir_arg_str(inst->arg));
                 if (gsize == 1) {
-                    sb_appendf(&out, "    strb w0, [x1, _%s@PAGEOFF]\n", inst->arg);
+                    sb_appendf(&out, "    strb w0, [x1, _%s@PAGEOFF]\n", ir_arg_str(inst->arg));
                 } else if (gsize == 2) {
-                    sb_appendf(&out, "    strh w0, [x1, _%s@PAGEOFF]\n", inst->arg);
+                    sb_appendf(&out, "    strh w0, [x1, _%s@PAGEOFF]\n", ir_arg_str(inst->arg));
                 } else if (gsize == 4) {
-                    sb_appendf(&out, "    str w0, [x1, _%s@PAGEOFF]\n", inst->arg);
+                    sb_appendf(&out, "    str w0, [x1, _%s@PAGEOFF]\n", ir_arg_str(inst->arg));
                 } else {
-                    sb_appendf(&out, "    str x0, [x1, _%s@PAGEOFF]\n", inst->arg);
+                    sb_appendf(&out, "    str x0, [x1, _%s@PAGEOFF]\n", ir_arg_str(inst->arg));
                 }
             } else {
-                sb_appendf(&out, "    adrp x1, _%s@GOTPAGE\n", inst->arg);
-                sb_appendf(&out, "    ldr x1, [x1, _%s@GOTPAGEOFF]\n", inst->arg);
+                sb_appendf(&out, "    adrp x1, _%s@GOTPAGE\n", ir_arg_str(inst->arg));
+                sb_appendf(&out, "    ldr x1, [x1, _%s@GOTPAGEOFF]\n", ir_arg_str(inst->arg));
                 if (gsize == 1) {
                     sb_append(&out, "    strb w0, [x1]\n");
                 } else if (gsize == 2) {
@@ -1146,22 +1146,22 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                     sb_append(&out, "    str x0, [x1]\n");
                 }
             }
-        } else if (strcmp(inst->op, "gaddr") == 0) {
-            if (ir_is_global_var_thread_local(inst->arg)) {
-                sb_appendf(&out, "    adrp x0, _%s@TLVPPAGE\n", inst->arg);
-                sb_appendf(&out, "    ldr x0, [x0, _%s@TLVPPAGEOFF]\n", inst->arg);
+        } else if (inst->op == IR_GADDR) {
+            if (ir_is_global_var_thread_local(ir_arg_str(inst->arg))) {
+                sb_appendf(&out, "    adrp x0, _%s@TLVPPAGE\n", ir_arg_str(inst->arg));
+                sb_appendf(&out, "    ldr x0, [x0, _%s@TLVPPAGEOFF]\n", ir_arg_str(inst->arg));
                 sb_append(&out, "    ldr x8, [x0]\n");
                 sb_append(&out, "    blr x8\n");
-            } else if (is_defined_global(inst->arg)) {
-                sb_appendf(&out, "    adrp x0, _%s@PAGE\n", inst->arg);
-                sb_appendf(&out, "    add x0, x0, _%s@PAGEOFF\n", inst->arg);
+            } else if (is_defined_global(ir_arg_str(inst->arg))) {
+                sb_appendf(&out, "    adrp x0, _%s@PAGE\n", ir_arg_str(inst->arg));
+                sb_appendf(&out, "    add x0, x0, _%s@PAGEOFF\n", ir_arg_str(inst->arg));
             } else {
-                sb_appendf(&out, "    adrp x0, _%s@GOTPAGE\n", inst->arg);
-                sb_appendf(&out, "    ldr x0, [x0, _%s@GOTPAGEOFF]\n", inst->arg);
+                sb_appendf(&out, "    adrp x0, _%s@GOTPAGE\n", ir_arg_str(inst->arg));
+                sb_appendf(&out, "    ldr x0, [x0, _%s@GOTPAGEOFF]\n", ir_arg_str(inst->arg));
             }
             sb_append(&out, "    str x0, [sp, #-16]!\n");
-        } else if (strcmp(inst->op, "store_index") == 0 || strcmp(inst->op, "store_index_keep") == 0) {
-            int keep_value = strcmp(inst->op, "store_index_keep") == 0;
+        } else if (inst->op == IR_STORE_INDEX || inst->op == IR_STORE_INDEX_KEEP) {
+            int keep_value = inst->op == IR_STORE_INDEX_KEEP;
             sb_append(&out, "    ldr x1, [sp], #16\n"); // dest_addr
             sb_append(&out, "    ldr x2, [sp], #16\n"); // offset
             if (inst->value > 8) {
@@ -1195,18 +1195,18 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                     sb_append(&out, "    str x0, [sp, #-16]!\n");
                 }
             }
-        } else if (strcmp(inst->op, "store_agg") == 0) {
+        } else if (inst->op == IR_STORE_AGG) {
             sb_append(&out, "    ldr x9, [sp], #16\n"); // dest_addr
             int words = (inst->value + 7) / 8;
             for (int w = words - 1; w >= 0; --w) {
                 sb_append(&out, "    ldr x0, [sp], #16\n");
                 sb_appendf(&out, "    str x0, [x9, #%d]\n", w * 8);
             }
-        } else if (strcmp(inst->op, "copy") == 0) {
+        } else if (inst->op == IR_COPY) {
             sb_append(&out, "    ldr x9, [sp], #16\n");  // dest_addr
             sb_append(&out, "    ldr x10, [sp], #16\n"); // src_addr
             emit_block_copy(&out, "x10", "x9", inst->value);
-        } else if (strcmp(inst->op, "ret_agg") == 0) {
+        } else if (inst->op == IR_RET_AGG) {
             int ret_size = inst->value;
             sb_append(&out, "    ldr x9, [sp], #16\n"); // src_addr
             if (fn->return_aggregate_float_class) {
@@ -1239,7 +1239,7 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                 sb_append(&out, "    ldp x29, x30, [sp], #16\n");
             }
             sb_append(&out, "    ret\n");
-        } else if (strcmp(inst->op, "ret") == 0) {
+        } else if (inst->op == IR_RET) {
             sb_append(&out, "    ldr x0, [sp], #16\n");
             if (has_custom_align) {
                 emit_load_fp(&out, 11, -((save_rsp_slot + 1) * 16));
@@ -1250,7 +1250,7 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                 sb_append(&out, "    ldp x29, x30, [sp], #16\n");
             }
             sb_append(&out, "    ret\n");
-        } else if (strcmp(inst->op, "extract_bits") == 0) {
+        } else if (inst->op == IR_EXTRACT_BITS) {
             /* packed value: low 16 bits = bit_offset, high bits = bit_width */
             int bf_offset = (int)(inst->value & 0xFFFF);
             int bf_width  = (int)((inst->value >> 16) & 0xFFFF);
@@ -1258,7 +1258,7 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
             /* UBFX: unsigned bit-field extract: x0 = x0[bf_offset + bf_width - 1 : bf_offset] */
             sb_appendf(&out, "    ubfx x0, x0, #%d, #%d\n", bf_offset, bf_width);
             sb_append(&out, "    str x0, [sp, #-16]!\n");
-        } else if (strcmp(inst->op, "sext_bits") == 0) {
+        } else if (inst->op == IR_SEXT_BITS) {
             int width = (int)inst->value;
             int shift = 64 - width;
             sb_append(&out, "    ldr x0, [sp], #16\n");
@@ -1267,7 +1267,7 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                 sb_appendf(&out, "    asr x0, x0, #%d\n", shift);
             }
             sb_append(&out, "    str x0, [sp, #-16]!\n");
-        } else if (strcmp(inst->op, "insert_bits") == 0) {
+        } else if (inst->op == IR_INSERT_BITS) {
             /* Stack: [top] dest_addr, offset(0), value */
             int bf_offset = (int)(inst->value & 0xFFFF);
             int bf_width  = (int)((inst->value >> 16) & 0xFFFF);
@@ -1279,76 +1279,76 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
             /* BFI: bit-field insert: x3 = x3 with bits [bf_offset+bf_width-1:bf_offset] = x0 */
             sb_appendf(&out, "    bfi x3, x0, #%d, #%d\n", bf_offset, bf_width);
             sb_append(&out, "    str x3, [x1]\n");
-        } else if (strcmp(inst->op, "fconst") == 0) {
+        } else if (inst->op == IR_FCONST) {
             unsigned long long val = inst->value;
             sb_appendf(&out, "    movz x0, #%d\n", (int)(val & 0xffff));
             if (val & 0xffff0000ULL) sb_appendf(&out, "    movk x0, #%d, lsl #16\n", (int)((val >> 16) & 0xffff));
             if (val & 0xffff00000000ULL) sb_appendf(&out, "    movk x0, #%d, lsl #32\n", (int)((val >> 32) & 0xffff));
             if (val & 0xffff000000000000ULL) sb_appendf(&out, "    movk x0, #%d, lsl #48\n", (int)((val >> 48) & 0xffff));
             sb_append(&out, "    str x0, [sp, #-16]!\n");
-        } else if (strcmp(inst->op, "fadd") == 0 || strcmp(inst->op, "fsub") == 0 ||
-                   strcmp(inst->op, "fmul") == 0 || strcmp(inst->op, "fdiv") == 0) {
-            const char *fop = strcmp(inst->op, "fadd") == 0 ? "fadd" :
-                              strcmp(inst->op, "fsub") == 0 ? "fsub" :
-                              strcmp(inst->op, "fmul") == 0 ? "fmul" : "fdiv";
+        } else if (inst->op == IR_FADD || inst->op == IR_FSUB ||
+                   inst->op == IR_FMUL || inst->op == IR_FDIV) {
+            const char *fop = inst->op == IR_FADD ? "fadd" :
+                              inst->op == IR_FSUB ? "fsub" :
+                              inst->op == IR_FMUL ? "fmul" : "fdiv";
             sb_append(&out, "    ldr d0, [sp], #16\n");  /* rhs */
             sb_append(&out, "    ldr d1, [sp], #16\n");  /* lhs */
             sb_appendf(&out, "    %s d0, d1, d0\n", fop);
             sb_append(&out, "    str d0, [sp, #-16]!\n");
-        } else if (strcmp(inst->op, "fneg") == 0) {
+        } else if (inst->op == IR_FNEG) {
             sb_append(&out, "    ldr d0, [sp], #16\n");
             sb_append(&out, "    fneg d0, d0\n");
             sb_append(&out, "    str d0, [sp, #-16]!\n");
-        } else if (strcmp(inst->op, "i2f") == 0) {
+        } else if (inst->op == IR_I2F) {
             sb_append(&out, "    ldr x0, [sp], #16\n");
             sb_append(&out, "    scvtf d0, x0\n");
             sb_append(&out, "    str d0, [sp, #-16]!\n");
-        } else if (strcmp(inst->op, "f2i") == 0) {
+        } else if (inst->op == IR_F2I) {
             sb_append(&out, "    ldr d0, [sp], #16\n");
             sb_append(&out, "    fcvtzs x0, d0\n");
             sb_append(&out, "    str x0, [sp, #-16]!\n");
-        } else if (strcmp(inst->op, "d2f") == 0) {
+        } else if (inst->op == IR_D2F) {
             sb_append(&out, "    ldr d0, [sp], #16\n");
             sb_append(&out, "    fcvt s0, d0\n");
             sb_append(&out, "    fcvt d0, s0\n");
             sb_append(&out, "    str d0, [sp, #-16]!\n");
-        } else if (strcmp(inst->op, "f<") == 0 || strcmp(inst->op, "f>") == 0 ||
-                   strcmp(inst->op, "f<=") == 0 || strcmp(inst->op, "f>=") == 0 ||
-                   strcmp(inst->op, "f==") == 0 || strcmp(inst->op, "f!=") == 0) {
+        } else if (inst->op == IR_FLT || inst->op == IR_FGT ||
+                   inst->op == IR_FLTEQ || inst->op == IR_FGTEQ ||
+                   inst->op == IR_FEQEQ || inst->op == IR_FNOTEQ) {
             sb_append(&out, "    ldr d0, [sp], #16\n");  /* rhs */
             sb_append(&out, "    ldr d1, [sp], #16\n");  /* lhs */
             sb_append(&out, "    fcmp d1, d0\n");
-            const char *cc = strcmp(inst->op, "f<") == 0 ? "lt" :
-                             strcmp(inst->op, "f<=") == 0 ? "le" :
-                             strcmp(inst->op, "f>") == 0 ? "gt" :
-                             strcmp(inst->op, "f>=") == 0 ? "ge" :
-                             strcmp(inst->op, "f==") == 0 ? "eq" : "ne";
+            const char *cc = inst->op == IR_FLT ? "lt" :
+                             inst->op == IR_FLTEQ ? "le" :
+                             inst->op == IR_FGT ? "gt" :
+                             inst->op == IR_FGTEQ ? "ge" :
+                             inst->op == IR_FEQEQ ? "eq" : "ne";
             sb_appendf(&out, "    cset x0, %s\n", cc);
             sb_append(&out, "    str x0, [sp, #-16]!\n");
-        } else if (strcmp(inst->op, "fload4") == 0) {
+        } else if (inst->op == IR_FLOAD4) {
             int off = -((inst->value + 1) * 16);
             emit_sub_imm(&out, "x9", "x29", -off);
             sb_append(&out, "    ldr s0, [x9]\n");
             sb_append(&out, "    fcvt d0, s0\n");
             sb_append(&out, "    str d0, [sp, #-16]!\n");
-        } else if (strcmp(inst->op, "fload8") == 0) {
+        } else if (inst->op == IR_FLOAD8) {
             emit_load_fp(&out, 0, -((inst->value + 1) * 16));
             sb_append(&out, "    str x0, [sp, #-16]!\n");
-        } else if (strcmp(inst->op, "fstore4") == 0) {
+        } else if (inst->op == IR_FSTORE4) {
             int off = -((inst->value + 1) * 16);
             sb_append(&out, "    ldr d0, [sp], #16\n");
             sb_append(&out, "    fcvt s0, d0\n");
             emit_sub_imm(&out, "x9", "x29", -off);
             sb_append(&out, "    str s0, [x9]\n");
-        } else if (strcmp(inst->op, "fstore8") == 0) {
+        } else if (inst->op == IR_FSTORE8) {
             sb_append(&out, "    ldr x0, [sp], #16\n");
             emit_store_fp(&out, 0, -((inst->value + 1) * 16));
-        } else if (strcmp(inst->op, "fgload") == 0) {
-            int gsize = ir_get_global_storage_size(inst->arg);
+        } else if (inst->op == IR_FGLOAD) {
+            int gsize = ir_get_global_storage_size(ir_arg_str(inst->arg));
             if (gsize == 0) gsize = 8;
-            if (ir_is_global_var_thread_local(inst->arg)) {
-                sb_appendf(&out, "    adrp x0, _%s@TLVPPAGE\n", inst->arg);
-                sb_appendf(&out, "    ldr x0, [x0, _%s@TLVPPAGEOFF]\n", inst->arg);
+            if (ir_is_global_var_thread_local(ir_arg_str(inst->arg))) {
+                sb_appendf(&out, "    adrp x0, _%s@TLVPPAGE\n", ir_arg_str(inst->arg));
+                sb_appendf(&out, "    ldr x0, [x0, _%s@TLVPPAGEOFF]\n", ir_arg_str(inst->arg));
                 sb_append(&out, "    ldr x8, [x0]\n");
                 sb_append(&out, "    blr x8\n");
                 if (gsize == 4) {
@@ -1357,9 +1357,9 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                 } else {
                     sb_append(&out, "    ldr d0, [x0]\n");
                 }
-            } else if (is_defined_global(inst->arg)) {
-                sb_appendf(&out, "    adrp x1, _%s@PAGE\n", inst->arg);
-                sb_appendf(&out, "    add x1, x1, _%s@PAGEOFF\n", inst->arg);
+            } else if (is_defined_global(ir_arg_str(inst->arg))) {
+                sb_appendf(&out, "    adrp x1, _%s@PAGE\n", ir_arg_str(inst->arg));
+                sb_appendf(&out, "    add x1, x1, _%s@PAGEOFF\n", ir_arg_str(inst->arg));
                 if (gsize == 4) {
                     sb_append(&out, "    ldr s0, [x1]\n");
                     sb_append(&out, "    fcvt d0, s0\n");
@@ -1367,8 +1367,8 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                     sb_append(&out, "    ldr d0, [x1]\n");
                 }
             } else {
-                sb_appendf(&out, "    adrp x1, _%s@GOTPAGE\n", inst->arg);
-                sb_appendf(&out, "    ldr x1, [x1, _%s@GOTPAGEOFF]\n", inst->arg);
+                sb_appendf(&out, "    adrp x1, _%s@GOTPAGE\n", ir_arg_str(inst->arg));
+                sb_appendf(&out, "    ldr x1, [x1, _%s@GOTPAGEOFF]\n", ir_arg_str(inst->arg));
                 if (gsize == 4) {
                     sb_append(&out, "    ldr s0, [x1]\n");
                     sb_append(&out, "    fcvt d0, s0\n");
@@ -1377,13 +1377,13 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                 }
             }
             sb_append(&out, "    str d0, [sp, #-16]!\n");
-        } else if (strcmp(inst->op, "fgstore") == 0) {
-            int gsize = ir_get_global_storage_size(inst->arg);
+        } else if (inst->op == IR_FGSTORE) {
+            int gsize = ir_get_global_storage_size(ir_arg_str(inst->arg));
             if (gsize == 0) gsize = 8;
             sb_append(&out, "    ldr d0, [sp], #16\n");
-            if (ir_is_global_var_thread_local(inst->arg)) {
-                sb_appendf(&out, "    adrp x0, _%s@TLVPPAGE\n", inst->arg);
-                sb_appendf(&out, "    ldr x0, [x0, _%s@TLVPPAGEOFF]\n", inst->arg);
+            if (ir_is_global_var_thread_local(ir_arg_str(inst->arg))) {
+                sb_appendf(&out, "    adrp x0, _%s@TLVPPAGE\n", ir_arg_str(inst->arg));
+                sb_appendf(&out, "    ldr x0, [x0, _%s@TLVPPAGEOFF]\n", ir_arg_str(inst->arg));
                 sb_append(&out, "    ldr x8, [x0]\n");
                 sb_append(&out, "    blr x8\n");
                 if (gsize == 4) {
@@ -1393,12 +1393,12 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                     sb_append(&out, "    str d0, [x0]\n");
                 }
             } else {
-                if (is_defined_global(inst->arg)) {
-                    sb_appendf(&out, "    adrp x1, _%s@PAGE\n", inst->arg);
-                    sb_appendf(&out, "    add x1, x1, _%s@PAGEOFF\n", inst->arg);
+                if (is_defined_global(ir_arg_str(inst->arg))) {
+                    sb_appendf(&out, "    adrp x1, _%s@PAGE\n", ir_arg_str(inst->arg));
+                    sb_appendf(&out, "    add x1, x1, _%s@PAGEOFF\n", ir_arg_str(inst->arg));
                 } else {
-                    sb_appendf(&out, "    adrp x1, _%s@GOTPAGE\n", inst->arg);
-                    sb_appendf(&out, "    ldr x1, [x1, _%s@GOTPAGEOFF]\n", inst->arg);
+                    sb_appendf(&out, "    adrp x1, _%s@GOTPAGE\n", ir_arg_str(inst->arg));
+                    sb_appendf(&out, "    ldr x1, [x1, _%s@GOTPAGEOFF]\n", ir_arg_str(inst->arg));
                 }
                 if (gsize == 4) {
                     sb_append(&out, "    fcvt s0, d0\n");
@@ -1407,18 +1407,18 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                     sb_append(&out, "    str d0, [x1]\n");
                 }
             }
-        } else if (strcmp(inst->op, "fload_addr4") == 0 || strcmp(inst->op, "fload_addr8") == 0) {
+        } else if (inst->op == IR_FLOAD_ADDR4 || inst->op == IR_FLOAD_ADDR8) {
             sb_append(&out, "    ldr x0, [sp], #16\n");
-            if (strcmp(inst->op, "fload_addr4") == 0) {
+            if (inst->op == IR_FLOAD_ADDR4) {
                 sb_append(&out, "    ldr s0, [x0]\n");
                 sb_append(&out, "    fcvt d0, s0\n");
             } else {
                 sb_append(&out, "    ldr d0, [x0]\n");
             }
             sb_append(&out, "    str d0, [sp, #-16]!\n");
-        } else if (strcmp(inst->op, "fstore_addr4") == 0 || strcmp(inst->op, "fstore_addr8") == 0) {
+        } else if (inst->op == IR_FSTORE_ADDR4 || inst->op == IR_FSTORE_ADDR8) {
             sb_append(&out, "    ldr x0, [sp], #16\n");
-            if (strcmp(inst->op, "fstore_addr4") == 0) {
+            if (inst->op == IR_FSTORE_ADDR4) {
                 sb_append(&out, "    ldr d0, [sp], #16\n");
                 sb_append(&out, "    fcvt s0, d0\n");
                 sb_append(&out, "    str s0, [x0]\n");
@@ -1426,7 +1426,7 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                 sb_append(&out, "    ldr x8, [sp], #16\n");
                 sb_append(&out, "    str x8, [x0]\n");
             }
-        } else if (strcmp(inst->op, "fret") == 0) {
+        } else if (inst->op == IR_FRET) {
             sb_append(&out, "    ldr d0, [sp], #16\n");
             if (inst->value == 4) {
                 sb_append(&out, "    fcvt s0, d0\n");  /* return float as single */
@@ -1438,15 +1438,15 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
             sb_append(&out, "    ret\n");
         } else {
             char msg[128];
-            snprintf(msg, sizeof(msg), "unknown IR op %s", inst->op);
+            snprintf(msg, sizeof(msg), "unknown IR op %s", ir_op_to_string(inst->op));
             diagnostics_fatal(msg);
         }
     }
 
     int has_explicit_ret = 0;
     if (fn->code.count > 0) {
-        const char *last_op = fn->code.data[fn->code.count - 1].op;
-        has_explicit_ret = strcmp(last_op, "ret") == 0 || strcmp(last_op, "ret_agg") == 0;
+        IrOp last_op = fn->code.data[fn->code.count - 1].op;
+        has_explicit_ret = last_op == IR_RET || last_op == IR_RET_AGG;
     }
     if (!has_explicit_ret) {
         if (frame) {

@@ -851,8 +851,8 @@ static int parse_base_type(ParserState *p) {
                         if (f_entry) {
                             HashMap *sub_fields = (HashMap *)f_entry->val_ptr;
                             for (int b = 0; b < sub_fields->bucket_count; ++b) {
-                                HashMapEntry *curr = sub_fields->buckets[b];
-                                while (curr) {
+                                HashMapEntry *curr = &sub_fields->entries[b];
+                                if (curr->key && curr->key != TOMBSTONE) {
                                     const char *sub_field_name = curr->key;
                                     int sub_offset = curr->val_int;
                                     
@@ -899,7 +899,6 @@ static int parse_base_type(ParserState *p) {
                                             hashmap_put(&p->global_struct_field_dims_by_tag, p_key_dup, dims_copy, 0);
                                         }
                                     }
-                                    curr = curr->next;
                                 }
                             }
                         }
@@ -2702,10 +2701,9 @@ static void parse_aggregate_init_internal(ParserState *p, long base_offset, cons
         
         int f_count = 0;
         for (int b = 0; b < fields->bucket_count; ++b) {
-            HashMapEntry *curr = fields->buckets[b];
-            while (curr) {
+            HashMapEntry *curr = &fields->entries[b];
+            if (curr->key && curr->key != TOMBSTONE) {
                 f_count++;
-                curr = curr->next;
             }
         }
         long last_field_offset = -1;
@@ -2716,8 +2714,8 @@ static void parse_aggregate_init_internal(ParserState *p, long base_offset, cons
             }
             HashMapEntry *f_entry = nullptr;
             for (int b = 0; b < fields->bucket_count; ++b) {
-                HashMapEntry *curr = fields->buckets[b];
-                while (curr) {
+                HashMapEntry *curr = &fields->entries[b];
+                if (curr->key && curr->key != TOMBSTONE) {
                     int after_last = curr->val_int > last_field_offset ||
                                      (curr->val_int == last_field_offset && strcmp(curr->key, last_field_name) > 0);
                     int before_best = !f_entry ||
@@ -2726,7 +2724,6 @@ static void parse_aggregate_init_internal(ParserState *p, long base_offset, cons
                     if (after_last && before_best) {
                         f_entry = curr;
                     }
-                    curr = curr->next;
                 }
             }
             if (!f_entry) break;
@@ -2852,8 +2849,8 @@ static void fill_aggregate_zero(ParserState *p, long base_offset, const char *st
         if (entry) {
             HashMap *fields = (HashMap *)entry->val_ptr;
             for (int b = 0; b < fields->bucket_count; ++b) {
-                HashMapEntry *curr = fields->buckets[b];
-                while (curr) {
+                HashMapEntry *curr = &fields->entries[b];
+                if (curr->key && curr->key != TOMBSTONE) {
                     const char *field_name = curr->key;
                     long field_offset = curr->val_int;
                     char key[256];
@@ -2878,7 +2875,6 @@ static void fill_aggregate_zero(ParserState *p, long base_offset, const char *st
                         item.size = field_size;
                         init_element_array_push(inits, &item);
                     }
-                    curr = curr->next;
                 }
             }
         }
@@ -3335,7 +3331,7 @@ static Node *stmt(ParserState *p) {
         }
         if (tag[0]) {
             HashMap *fields_alloc = malloc(sizeof(HashMap));
-            fields_alloc->buckets = fields.buckets;
+            fields_alloc->entries = fields.entries;
             fields_alloc->bucket_count = fields.bucket_count;
             fields_alloc->size = fields.size;
             hashmap_put(&p->global_structs, tag, fields_alloc, 0);
@@ -5182,12 +5178,11 @@ static void parser_state_cleanup(ParserState *state) {
     hashmap_free(&state->constexpr_vars);
     
     for (int b = 0; b < state->global_structs.bucket_count; ++b) {
-        HashMapEntry *curr = state->global_structs.buckets[b];
-        while (curr) {
+        HashMapEntry *curr = &state->global_structs.entries[b];
+        if (curr->key && curr->key != TOMBSTONE) {
             HashMap *fields = (HashMap *)curr->val_ptr;
             hashmap_free(fields);
             free(fields);
-            curr = curr->next;
         }
     }
     hashmap_free(&state->global_structs);
@@ -5209,12 +5204,11 @@ static void parser_state_cleanup(ParserState *state) {
     hashmap_free(&state->global_struct_float_aggregate_classes);
 
     for (int b = 0; b < state->global_struct_field_dims_by_tag.bucket_count; ++b) {
-        HashMapEntry *curr = state->global_struct_field_dims_by_tag.buckets[b];
-        while (curr) {
+        HashMapEntry *curr = &state->global_struct_field_dims_by_tag.entries[b];
+        if (curr->key && curr->key != TOMBSTONE) {
             LongArray *arr = (LongArray *)curr->val_ptr;
             long_array_free(arr);
             free(arr);
-            curr = curr->next;
         }
     }
     hashmap_free(&state->global_struct_field_dims_by_tag);
@@ -5480,90 +5474,78 @@ NodeArray parser_parse(const TokenArray *tokens, int target_scale, Arena *arena)
     // In b1cc, parser state type properties (unsigned_vars, bool_vars, value_sizes, var_struct_tags)
     // are queried during IR lowering. So we populate the IR global state!
     for (int b = 0; b < state.unsigned_vars.bucket_count; ++b) {
-        HashMapEntry *curr = state.unsigned_vars.buckets[b];
-        while (curr) {
+        HashMapEntry *curr = &state.unsigned_vars.entries[b];
+        if (curr->key && curr->key != TOMBSTONE) {
             ir_set_var_unsigned(curr->key, curr->val_int);
-            curr = curr->next;
         }
     }
     for (int b = 0; b < state.bool_vars.bucket_count; ++b) {
-        HashMapEntry *curr = state.bool_vars.buckets[b];
-        while (curr) {
+        HashMapEntry *curr = &state.bool_vars.entries[b];
+        if (curr->key && curr->key != TOMBSTONE) {
             ir_set_var_bool(curr->key, curr->val_int);
-            curr = curr->next;
         }
     }
     for (int b = 0; b < state.value_sizes.bucket_count; ++b) {
-        HashMapEntry *curr = state.value_sizes.buckets[b];
-        while (curr) {
+        HashMapEntry *curr = &state.value_sizes.entries[b];
+        if (curr->key && curr->key != TOMBSTONE) {
             ir_set_var_type_size(curr->key, curr->val_int);
-            curr = curr->next;
         }
     }
     for (int b = 0; b < state.float_vars.bucket_count; ++b) {
-        HashMapEntry *curr = state.float_vars.buckets[b];
-        while (curr) {
+        HashMapEntry *curr = &state.float_vars.entries[b];
+        if (curr->key && curr->key != TOMBSTONE) {
             ir_set_var_float(curr->key, curr->val_int);
-            curr = curr->next;
         }
     }
     for (int b = 0; b < state.var_struct_tags.bucket_count; ++b) {
-        HashMapEntry *curr = state.var_struct_tags.buckets[b];
-        while (curr) {
+        HashMapEntry *curr = &state.var_struct_tags.entries[b];
+        if (curr->key && curr->key != TOMBSTONE) {
             ir_set_var_struct_tag(curr->key, (const char *)curr->val_ptr);
-            curr = curr->next;
         }
     }
 
     // copy struct offsets/sizes for IR
     for (int b = 0; b < state.global_struct_field_offsets_by_tag.bucket_count; ++b) {
-        HashMapEntry *curr = state.global_struct_field_offsets_by_tag.buckets[b];
-        while (curr) {
+        HashMapEntry *curr = &state.global_struct_field_offsets_by_tag.entries[b];
+        if (curr->key && curr->key != TOMBSTONE) {
             ir_set_struct_field_offset(curr->key, curr->val_int);
-            curr = curr->next;
         }
     }
     for (int b = 0; b < state.global_struct_field_sizes_by_tag.bucket_count; ++b) {
-        HashMapEntry *curr = state.global_struct_field_sizes_by_tag.buckets[b];
-        while (curr) {
+        HashMapEntry *curr = &state.global_struct_field_sizes_by_tag.entries[b];
+        if (curr->key && curr->key != TOMBSTONE) {
             ir_set_struct_field_size(curr->key, curr->val_int);
-            curr = curr->next;
         }
     }
     for (int b = 0; b < state.global_struct_field_total_sizes_by_tag.bucket_count; ++b) {
-        HashMapEntry *curr = state.global_struct_field_total_sizes_by_tag.buckets[b];
-        while (curr) {
+        HashMapEntry *curr = &state.global_struct_field_total_sizes_by_tag.entries[b];
+        if (curr->key && curr->key != TOMBSTONE) {
             ir_set_struct_field_total_size(curr->key, curr->val_int);
-            curr = curr->next;
         }
     }
     for (int b = 0; b < state.global_struct_field_dims_by_tag.bucket_count; ++b) {
-        HashMapEntry *curr = state.global_struct_field_dims_by_tag.buckets[b];
-        while (curr) {
+        HashMapEntry *curr = &state.global_struct_field_dims_by_tag.entries[b];
+        if (curr->key && curr->key != TOMBSTONE) {
             LongArray *dims = (LongArray *)curr->val_ptr;
             ir_set_struct_field_dims(curr->key, *dims);
-            curr = curr->next;
         }
     }
     for (int b = 0; b < state.global_struct_field_tags.bucket_count; ++b) {
-        HashMapEntry *curr = state.global_struct_field_tags.buckets[b];
-        while (curr) {
+        HashMapEntry *curr = &state.global_struct_field_tags.entries[b];
+        if (curr->key && curr->key != TOMBSTONE) {
             ir_set_struct_field_tag(curr->key, (const char *)curr->val_ptr);
-            curr = curr->next;
         }
     }
     for (int b = 0; b < state.global_struct_field_bit_offsets_by_tag.bucket_count; ++b) {
-        HashMapEntry *curr = state.global_struct_field_bit_offsets_by_tag.buckets[b];
-        while (curr) {
+        HashMapEntry *curr = &state.global_struct_field_bit_offsets_by_tag.entries[b];
+        if (curr->key && curr->key != TOMBSTONE) {
             ir_set_struct_field_bit_offset(curr->key, curr->val_int);
-            curr = curr->next;
         }
     }
     for (int b = 0; b < state.global_struct_field_bit_widths_by_tag.bucket_count; ++b) {
-        HashMapEntry *curr = state.global_struct_field_bit_widths_by_tag.buckets[b];
-        while (curr) {
+        HashMapEntry *curr = &state.global_struct_field_bit_widths_by_tag.entries[b];
+        if (curr->key && curr->key != TOMBSTONE) {
             ir_set_struct_field_bit_width(curr->key, curr->val_int);
-            curr = curr->next;
         }
     }
 

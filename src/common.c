@@ -194,83 +194,133 @@ static unsigned int hash_key(const char *str) {
     return h;
 }
 
+static HashMap intern_map;
+static int intern_map_initialized = 0;
+static void hashmap_pool_free(void) {
+    if (intern_map_initialized) {
+        if (intern_map.entries) {
+            free(intern_map.entries);
+            intern_map.entries = nullptr;
+        }
+        intern_map_initialized = 0;
+    }
+}
+
+const char *intern_string_n(Arena *arena, const char *s, size_t len) {
+    if (!s) return NULL;
+    if (!intern_map_initialized) {
+        hashmap_init(&intern_map, 4096);
+        intern_map_initialized = 1;
+        atexit(hashmap_pool_free);
+    }
+    char *tmp = malloc(len + 1);
+    memcpy(tmp, s, len);
+    tmp[len] = '\0';
+    HashMapEntry *entry = hashmap_get(&intern_map, tmp);
+    if (entry) {
+        free(tmp);
+        return entry->key;
+    }
+    char *interned = arena_alloc(arena, len + 1);
+    memcpy(interned, tmp, len + 1);
+    free(tmp);
+    hashmap_put(&intern_map, interned, (void *)interned, 0);
+    return interned;
+}
+
+const char *intern_string(Arena *arena, const char *s) {
+    if (!s) return NULL;
+    return intern_string_n(arena, s, strlen(s));
+}
+
 void hashmap_init(HashMap *map, int bucket_count) {
     map->bucket_count = bucket_count;
-    map->buckets = calloc(bucket_count, sizeof(HashMapEntry*));
+    map->entries = calloc(bucket_count, sizeof(HashMapEntry));
     map->size = 0;
 }
 
 void hashmap_free(HashMap *map) {
-    if (!map->buckets) return;
-    for (int i = 0; i < map->bucket_count; ++i) {
-        HashMapEntry *curr = map->buckets[i];
-        while (curr) {
-            HashMapEntry *next = curr->next;
-            // Note: we don't free the key because it's usually owned by arena
-            free(curr);
-            curr = next;
-        }
-    }
-    free(map->buckets);
-    map->buckets = nullptr;
+    if (!map->entries) return;
+    free(map->entries);
+    map->entries = nullptr;
     map->bucket_count = 0;
     map->size = 0;
 }
 
 static void hashmap_resize(HashMap *map, int new_bucket_count) {
-    HashMapEntry **new_buckets = calloc(new_bucket_count, sizeof(HashMapEntry*));
-    if (!new_buckets) return;
+    HashMapEntry *old_entries = map->entries;
+    int old_count = map->bucket_count;
 
-    for (int i = 0; i < map->bucket_count; ++i) {
-        HashMapEntry *curr = map->buckets[i];
-        while (curr) {
-            HashMapEntry *next = curr->next;
-            unsigned int h = hash_key(curr->key) % new_bucket_count;
-            curr->next = new_buckets[h];
-            new_buckets[h] = curr;
-            curr = next;
+    map->bucket_count = new_bucket_count;
+    map->entries = calloc(new_bucket_count, sizeof(HashMapEntry));
+    map->size = 0;
+
+    for (int i = 0; i < old_count; ++i) {
+        HashMapEntry *entry = &old_entries[i];
+        if (entry->key && entry->key != TOMBSTONE) {
+            hashmap_put(map, entry->key, entry->val_ptr, entry->val_int);
         }
     }
 
-    free(map->buckets);
-    map->buckets = new_buckets;
-    map->bucket_count = new_bucket_count;
+    free(old_entries);
 }
 
 void hashmap_put(HashMap *map, const char *key, void *val_ptr, long val_int) {
-    unsigned int h = hash_key(key) % map->bucket_count;
-    HashMapEntry *curr = map->buckets[h];
-    while (curr) {
-        if (strcmp(curr->key, key) == 0) {
-            curr->val_ptr = val_ptr;
-            curr->val_int = val_int;
-            return;
-        }
-        curr = curr->next;
-    }
-
-    HashMapEntry *entry = malloc(sizeof(HashMapEntry));
-    entry->key = key;
-    entry->val_ptr = val_ptr;
-    entry->val_int = val_int;
-    entry->next = map->buckets[h];
-    map->buckets[h] = entry;
-    map->size = map->size + 1;
-
     if (map->size > map->bucket_count * 0.75) {
         hashmap_resize(map, map->bucket_count * 2);
+    }
+
+    unsigned int h = hash_key(key) % map->bucket_count;
+    int tombstone_idx = -1;
+
+    for (int i = 0; i < map->bucket_count; ++i) {
+        int idx = (h + i) % map->bucket_count;
+        HashMapEntry *entry = &map->entries[idx];
+        if (!entry->key) {
+            int dest = (tombstone_idx != -1) ? tombstone_idx : idx;
+            map->entries[dest].key = key;
+            map->entries[dest].val_ptr = val_ptr;
+            map->entries[dest].val_int = val_int;
+            map->size++;
+            return;
+        }
+        if (entry->key == TOMBSTONE) {
+            if (tombstone_idx == -1) {
+                tombstone_idx = idx;
+            }
+            continue;
+        }
+        if (strcmp(entry->key, key) == 0) {
+            entry->val_ptr = val_ptr;
+            entry->val_int = val_int;
+            return;
+        }
+    }
+
+    if (tombstone_idx != -1) {
+        map->entries[tombstone_idx].key = key;
+        map->entries[tombstone_idx].val_ptr = val_ptr;
+        map->entries[tombstone_idx].val_int = val_int;
+        map->size++;
     }
 }
 
 HashMapEntry *hashmap_get(HashMap *map, const char *key) {
-    if (!map->buckets) return nullptr;
+    if (!map->entries) return nullptr;
     unsigned int h = hash_key(key) % map->bucket_count;
-    HashMapEntry *curr = map->buckets[h];
-    while (curr) {
-        if (strcmp(curr->key, key) == 0) {
-            return curr;
+
+    for (int i = 0; i < map->bucket_count; ++i) {
+        int idx = (h + i) % map->bucket_count;
+        HashMapEntry *entry = &map->entries[idx];
+        if (!entry->key) {
+            return nullptr;
         }
-        curr = curr->next;
+        if (entry->key == TOMBSTONE) {
+            continue;
+        }
+        if (strcmp(entry->key, key) == 0) {
+            return entry;
+        }
     }
     return nullptr;
 }
@@ -280,23 +330,25 @@ int hashmap_has(HashMap *map, const char *key) {
 }
 
 void hashmap_remove(HashMap *map, const char *key) {
-    if (!map->buckets) return;
+    if (!map->entries) return;
     unsigned int h = hash_key(key) % map->bucket_count;
-    HashMapEntry *curr = map->buckets[h];
-    HashMapEntry *prev = nullptr;
-    while (curr) {
-        if (strcmp(curr->key, key) == 0) {
-            if (prev) {
-                prev->next = curr->next;
-            } else {
-                map->buckets[h] = curr->next;
-            }
-            free(curr);
-            map->size = map->size - 1;
+
+    for (int i = 0; i < map->bucket_count; ++i) {
+        int idx = (h + i) % map->bucket_count;
+        HashMapEntry *entry = &map->entries[idx];
+        if (!entry->key) {
             return;
         }
-        prev = curr;
-        curr = curr->next;
+        if (entry->key == TOMBSTONE) {
+            continue;
+        }
+        if (strcmp(entry->key, key) == 0) {
+            entry->key = TOMBSTONE;
+            entry->val_ptr = nullptr;
+            entry->val_int = 0;
+            map->size--;
+            return;
+        }
     }
 }
 

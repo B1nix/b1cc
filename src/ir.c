@@ -30,6 +30,10 @@ HashMap ir_function_pointer_return_floats;
 HashMap ir_function_return_int_sizes;
 HashMap ir_function_param_int_sizes;
 StringArray ir_global_asm_blocks;
+static StringArray ir_arg_pool;   /* index -> operand string */
+static HashMap ir_arg_index;      /* operand string -> index (val_int) */
+static int ir_arg_pool_ready = 0;
+static void ir_arg_pool_reset(void);
 int ir_current_target_scale = 8;
 int ir_code_model = 0; /* 0=small, 1=kernel */
 int ir_pic_mode = 0;   /* 0=non-PIC, 1=PIC/PIE */
@@ -239,6 +243,8 @@ static void long_string_pair_array_free(LongStringPairArray *arr) {
 }
 
 void ir_reset_state(void) {
+    ir_arg_pool_reset();
+
     string_array_free(&ir_global_asm_blocks);
     string_array_init(&ir_global_asm_blocks);
 
@@ -258,24 +264,22 @@ void ir_reset_state(void) {
     hashmap_init(&ir_global_struct_vars, 64);
 
     for (int b = 0; b < ir_global_array_dims.bucket_count; ++b) {
-        HashMapEntry *curr = ir_global_array_dims.buckets[b];
-        while (curr) {
+        HashMapEntry *curr = &ir_global_array_dims.entries[b];
+        if (curr->key && curr->key != TOMBSTONE) {
             LongArray *arr = (LongArray *)curr->val_ptr;
             long_array_free(arr);
             free(arr);
-            curr = curr->next;
         }
     }
     hashmap_free(&ir_global_array_dims);
     hashmap_init(&ir_global_array_dims, 64);
 
     for (int b = 0; b < ir_local_array_dims.bucket_count; ++b) {
-        HashMapEntry *curr = ir_local_array_dims.buckets[b];
-        while (curr) {
+        HashMapEntry *curr = &ir_local_array_dims.entries[b];
+        if (curr->key && curr->key != TOMBSTONE) {
             LongArray *arr = (LongArray *)curr->val_ptr;
             long_array_free(arr);
             free(arr);
-            curr = curr->next;
         }
     }
     hashmap_free(&ir_local_array_dims);
@@ -303,12 +307,11 @@ void ir_reset_state(void) {
     hashmap_init(&ir_function_return_aggregate_sizes, 64);
 
     for (int b = 0; b < ir_function_param_aggregate_sizes.bucket_count; ++b) {
-        HashMapEntry *curr = ir_function_param_aggregate_sizes.buckets[b];
-        while (curr) {
+        HashMapEntry *curr = &ir_function_param_aggregate_sizes.entries[b];
+        if (curr->key && curr->key != TOMBSTONE) {
             IntArray *arr = (IntArray *)curr->val_ptr;
             int_array_free(arr);
             free(arr);
-            curr = curr->next;
         }
     }
     hashmap_free(&ir_function_param_aggregate_sizes);
@@ -318,12 +321,11 @@ void ir_reset_state(void) {
     hashmap_init(&ir_function_return_aggregate_float_classes, 64);
 
     for (int b = 0; b < ir_function_param_aggregate_float_classes.bucket_count; ++b) {
-        HashMapEntry *curr = ir_function_param_aggregate_float_classes.buckets[b];
-        while (curr) {
+        HashMapEntry *curr = &ir_function_param_aggregate_float_classes.entries[b];
+        if (curr->key && curr->key != TOMBSTONE) {
             IntArray *arr = (IntArray *)curr->val_ptr;
             int_array_free(arr);
             free(arr);
-            curr = curr->next;
         }
     }
     hashmap_free(&ir_function_param_aggregate_float_classes);
@@ -333,12 +335,11 @@ void ir_reset_state(void) {
     hashmap_init(&ir_function_vararg_fixed_counts, 64);
 
     for (int b = 0; b < ir_function_param_floats.bucket_count; ++b) {
-        HashMapEntry *curr = ir_function_param_floats.buckets[b];
-        while (curr) {
+        HashMapEntry *curr = &ir_function_param_floats.entries[b];
+        if (curr->key && curr->key != TOMBSTONE) {
             IntArray *arr = (IntArray *)curr->val_ptr;
             int_array_free(arr);
             free(arr);
-            curr = curr->next;
         }
     }
     hashmap_free(&ir_function_param_floats);
@@ -351,24 +352,22 @@ void ir_reset_state(void) {
     hashmap_init(&ir_function_return_int_sizes, 64);
 
     for (int b = 0; b < ir_function_param_int_sizes.bucket_count; ++b) {
-        HashMapEntry *curr = ir_function_param_int_sizes.buckets[b];
-        while (curr) {
+        HashMapEntry *curr = &ir_function_param_int_sizes.entries[b];
+        if (curr->key && curr->key != TOMBSTONE) {
             IntArray *arr = (IntArray *)curr->val_ptr;
             int_array_free(arr);
             free(arr);
-            curr = curr->next;
         }
     }
     hashmap_free(&ir_function_param_int_sizes);
     hashmap_init(&ir_function_param_int_sizes, 64);
 
     for (int b = 0; b < ir_function_pointer_param_floats.bucket_count; ++b) {
-        HashMapEntry *curr = ir_function_pointer_param_floats.buckets[b];
-        while (curr) {
+        HashMapEntry *curr = &ir_function_pointer_param_floats.entries[b];
+        if (curr->key && curr->key != TOMBSTONE) {
             IntArray *arr = (IntArray *)curr->val_ptr;
             int_array_free(arr);
             free(arr);
-            curr = curr->next;
         }
     }
     hashmap_free(&ir_function_pointer_param_floats);
@@ -405,12 +404,11 @@ void ir_reset_state(void) {
     hashmap_init(&ir_struct_field_total_sizes, 64);
 
     for (int b = 0; b < ir_struct_field_dims.bucket_count; ++b) {
-        HashMapEntry *curr = ir_struct_field_dims.buckets[b];
-        while (curr) {
+        HashMapEntry *curr = &ir_struct_field_dims.entries[b];
+        if (curr->key && curr->key != TOMBSTONE) {
             LongArray *arr = (LongArray *)curr->val_ptr;
             long_array_free(arr);
             free(arr);
-            curr = curr->next;
         }
     }
     hashmap_free(&ir_struct_field_dims);
@@ -869,10 +867,174 @@ static int ir_expr_has_address(const Node *n) {
     return n->op_enum == OP_VAR || n->op_enum == OP_INDEX || n->op_enum == OP_UNARY_DEREF;
 }
 
+static const struct { const char *str; IrOp op; } ir_op_table[] = {
+    {"!", IR_NOT},
+    {"!=", IR_NOTEQ},
+    {"!=64", IR_NOTEQ64},
+    {"%", IR_MOD},
+    {"%64", IR_MOD64},
+    {"&", IR_AND},
+    {"&64", IR_AND64},
+    {"*", IR_MUL},
+    {"*64", IR_MUL64},
+    {"+", IR_ADD},
+    {"+64", IR_ADD64},
+    {"-", IR_SUB},
+    {"-64", IR_SUB64},
+    {"/", IR_DIV},
+    {"/64", IR_DIV64},
+    {"<", IR_LT},
+    {"<64", IR_LT64},
+    {"<<", IR_LTLT},
+    {"<<64", IR_LTLT64},
+    {"<=", IR_LTEQ},
+    {"<=64", IR_LTEQ64},
+    {"==", IR_EQEQ},
+    {"==64", IR_EQEQ64},
+    {">", IR_GT},
+    {">64", IR_GT64},
+    {">=", IR_GTEQ},
+    {">=64", IR_GTEQ64},
+    {">>", IR_GTGT},
+    {">>64", IR_GTGT64},
+    {"^", IR_XOR},
+    {"^64", IR_XOR64},
+    {"addr", IR_ADDR},
+    {"asm", IR_ASM},
+    {"call", IR_CALL},
+    {"cast", IR_CAST},
+    {"const", IR_CONST},
+    {"const64", IR_CONST64},
+    {"copy", IR_COPY},
+    {"d2f", IR_D2F},
+    {"dup", IR_DUP},
+    {"extract_bits", IR_EXTRACT_BITS},
+    {"f!=", IR_FNOTEQ},
+    {"f2i", IR_F2I},
+    {"f<", IR_FLT},
+    {"f<=", IR_FLTEQ},
+    {"f==", IR_FEQEQ},
+    {"f>", IR_FGT},
+    {"f>=", IR_FGTEQ},
+    {"fadd", IR_FADD},
+    {"fconst", IR_FCONST},
+    {"fdiv", IR_FDIV},
+    {"fgload", IR_FGLOAD},
+    {"fgstore", IR_FGSTORE},
+    {"fload4", IR_FLOAD4},
+    {"fload8", IR_FLOAD8},
+    {"fload_addr4", IR_FLOAD_ADDR4},
+    {"fload_addr8", IR_FLOAD_ADDR8},
+    {"fmul", IR_FMUL},
+    {"fneg", IR_FNEG},
+    {"fret", IR_FRET},
+    {"fstore4", IR_FSTORE4},
+    {"fstore8", IR_FSTORE8},
+    {"fstore_addr4", IR_FSTORE_ADDR4},
+    {"fstore_addr8", IR_FSTORE_ADDR8},
+    {"fsub", IR_FSUB},
+    {"gaddr", IR_GADDR},
+    {"gload", IR_GLOAD},
+    {"gload64", IR_GLOAD64},
+    {"gstore", IR_GSTORE},
+    {"gstore64", IR_GSTORE64},
+    {"i2f", IR_I2F},
+    {"icall", IR_ICALL},
+    {"index", IR_INDEX},
+    {"insert_bits", IR_INSERT_BITS},
+    {"jmp", IR_JMP},
+    {"jz", IR_JZ},
+    {"jz64", IR_JZ64},
+    {"label", IR_LABEL},
+    {"load", IR_LOAD},
+    {"load64", IR_LOAD64},
+    {"load_addr", IR_LOAD_ADDR},
+    {"neg", IR_NEG},
+    {"neg64", IR_NEG64},
+    {"pop", IR_POP},
+    {"pop64", IR_POP64},
+    {"ret", IR_RET},
+    {"ret64", IR_RET64},
+    {"ret_agg", IR_RET_AGG},
+    {"sext64", IR_SEXT64},
+    {"sext_bits", IR_SEXT_BITS},
+    {"store", IR_STORE},
+    {"store64", IR_STORE64},
+    {"store_agg", IR_STORE_AGG},
+    {"store_index", IR_STORE_INDEX},
+    {"store_index_keep", IR_STORE_INDEX_KEEP},
+    {"str", IR_STR},
+    {"trunc32", IR_TRUNC32},
+    {"u%", IR_UMOD},
+    {"u%64", IR_UMOD64},
+    {"u/", IR_UDIV},
+    {"u/64", IR_UDIV64},
+    {"u<", IR_ULT},
+    {"u<64", IR_ULT64},
+    {"u<=", IR_ULTEQ},
+    {"u<=64", IR_ULTEQ64},
+    {"u>", IR_UGT},
+    {"u>64", IR_UGT64},
+    {"u>=", IR_UGTEQ},
+    {"u>=64", IR_UGTEQ64},
+    {"u>>", IR_UGTGT},
+    {"u>>64", IR_UGTGT64},
+    {"ucast", IR_UCAST},
+    {"va_start", IR_VA_START},
+    {"vla_alloc", IR_VLA_ALLOC},
+    {"zext64", IR_ZEXT64},
+    {"|", IR_OR},
+    {"|64", IR_OR64},
+    {"~", IR_TILDE},
+    {"~64", IR_TILDE64},
+    {nullptr, IR_NOP}
+};
+
+const char *ir_op_to_string(IrOp op) {
+    for (int i = 0; ir_op_table[i].str; ++i) {
+        if (ir_op_table[i].op == op) return ir_op_table[i].str;
+    }
+    return "?";
+}
+
+IrOp ir_string_to_op(const char *op) {
+    for (int i = 0; ir_op_table[i].str; ++i) {
+        if (strcmp(op, ir_op_table[i].str) == 0) return ir_op_table[i].op;
+    }
+    return IR_NOP;
+}
+
+static void ir_arg_pool_reset(void) {
+    if (ir_arg_pool_ready) {
+        string_array_free(&ir_arg_pool);
+        hashmap_free(&ir_arg_index);
+    }
+    string_array_init(&ir_arg_pool);
+    hashmap_init(&ir_arg_index, 256);
+    ir_arg_pool_ready = 1;
+    string_array_push(&ir_arg_pool, "");   /* index 0 == empty operand */
+    hashmap_put(&ir_arg_index, "", nullptr, 0);
+}
+
+int ir_intern_arg(const char *s) {
+    if (!s) s = "";
+    if (!ir_arg_pool_ready) ir_arg_pool_reset();
+    HashMapEntry *e = hashmap_get(&ir_arg_index, s);
+    if (e) return (int)e->val_int;
+    int idx = ir_arg_pool.count;
+    string_array_push(&ir_arg_pool, s);
+    hashmap_put(&ir_arg_index, s, nullptr, idx);
+    return idx;
+}
+
+const char *ir_arg_str(int idx) {
+    return ir_arg_pool.data[idx];
+}
+
 static void ir_push(IrFunction *fn, const char *op, const char *arg, long value) {
     IrInst inst;
-    inst.op = op;
-    inst.arg = arg;
+    inst.op = ir_string_to_op(op);
+    inst.arg = ir_intern_arg(arg);
     inst.value = value;
     inst.line = ir_current_line;
     inst.col = ir_current_col;

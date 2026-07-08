@@ -402,10 +402,11 @@ Measured on arm64-darwin, 200 iterations each:
 
 ### Open Performance Work
 
-- [ ] Cache hash values in `HashMapEntry` (reverted — caused segfault, needs careful `calloc`-based approach).
-- [ ] Open-addressing HashMap with linear probing for better cache locality.
-- [ ] Parallel function emission in backends via pthreads.
-- [ ] String interning for frequently compared operator/keyword strings.
-- [ ] Compact IR representation (opcode as enum, operands as indices).
+- [x] Cache hash values in `HashMapEntry` for fast resizing. (Superseded by the open-addressing rewrite below, which stores entries inline and rehashes on resize.)
+- [x] Open-addressing HashMap with linear probing for better cache locality. `HashMap` is a flat `entries[]` array probed with `(h + i) % bucket_count` and `TOMBSTONE` deletion (`src/common.c`); all iteration sites use `.entries[b]` with a `key && key != TOMBSTONE` guard.
+- [x] Parallel function emission in backends via pthreads. `src/backend.c` emits each IR function on its own `pthread` with a private arena and concatenates results in program order. Host builds only — the self-host (`__b1cc__`) path stays serial.
+- [x] String interning for frequently compared operator/keyword strings.
+- [x] Compact IR representation: opcode as `IrOp` enum. `IrInst.op` is a 4-byte `IrOp` instead of an 8-byte `const char *`; `ir_push()` interns the op string to an enum once via `ir_string_to_op()`, and all three backends dispatch with integer `==` instead of `strcmp` (~450 sites). `ir_op_to_string()` backs the `-fdump-ir` output.
+- [x] Compact IR representation: operands as indices. `IrInst.arg` is a 4-byte pool index instead of an 8-byte `const char *`; operand strings are deduplicated into a global pool by `ir_intern_arg()` at lowering time and read back with `ir_arg_str()` at emit time (empty operand is always index 0). Combined with the opcode enum this shrinks `IrInst` from 32 to 24 bytes.
 - [x] `sb_append_n()` with known length to avoid `strlen` for string literals in backends.
-- [ ] Pool-allocate `HashMapEntry` instead of per-entry `malloc`.
+- [x] Pool-allocate `HashMapEntry` instead of per-entry `malloc`.
