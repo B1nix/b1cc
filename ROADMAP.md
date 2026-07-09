@@ -287,10 +287,13 @@
 - [x] Emit GOT-indirect addressing (`symbol@GOTPCREL(%rip)`) for external/global symbol access in PIC mode on x86_64.
 - [x] Emit PLT stubs via `R_X86_64_PLT32` relocations for external function calls (ELF writer already emits PLT32 for all direct calls).
 - [ ] Emit dynamic relocations (`.rela.dyn`, `.rela.plt`) in ELF object output — deferred: b1cc produces relocatable objects; the linker creates dynamic sections from GOTPCREL/PLT32 relocations.
+- [ ] Emit `.dynamic`, `.dynsym`, `.dynstr` sections in ELF objects for dynamic linker consumption.
+- [ ] Add `-shared` flag to produce shared libraries (`.so` / `.dylib`).
 - [ ] Mach-O stub/TLV sections for PIC on arm64-darwin — deferred (host `cc` already handles PIE by default).
 - [ ] Link against shared objects via b1nix-cc or direct ld.lld invocation — deferred; current driver links through b1nix-cc or host cc.
+- [ ] Integration: b1cc-compiled code replaces statically linked `b1nix-cc` path in B1NIX userspace — deferred; requires B1NIX tree.
+- [ ] i386 PIC support — deferred as lower priority; backend generates PIC code but full dynamic linking infrastructure is missing.
 - [x] Regression tests: PIC assembly verification (GOTPCREL pattern), PIC ELF object output, and PIC host-execution tests.
-- [ ] Integration: b1cc-compiled code replaces statically linked `b1nix-cc` path in B1NIX userspace — deferred; requires B1NIX tree. i386 PIC support also deferred as lower priority.
 
 ## M27: Csmith Coverage & Differential Testing
 
