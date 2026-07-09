@@ -37,10 +37,12 @@ typedef struct {
 } X86_64Target;
 
 static int agg_float_elem_size(int cls) {
+    if (cls & SYSV_MIXED_FLAG) return 0;   /* mixed sentinel is not a homogeneous float aggregate */
     return cls & 0xff;
 }
 
 static int agg_float_count(int cls) {
+    if (cls & SYSV_MIXED_FLAG) return 0;
     return (cls >> 8) & 0xff;
 }
 
@@ -48,6 +50,11 @@ static int x86_64_agg_sse_slots(int cls) {
     int bytes = agg_float_elem_size(cls) * agg_float_count(cls);
     return (bytes + 7) / 8;
 }
+
+/* True when cls is a System V mixed (INTEGER+SSE) two-eightbyte aggregate. */
+static int x86_64_is_mixed(int cls) { return (cls & SYSV_MIXED_FLAG) != 0; }
+/* Register kind of eightbyte e (0/1): 2 = SSE (XMM), else INTEGER (GPR). */
+static int x86_64_mixed_eb(int cls, int e) { return e == 0 ? SYSV_MIXED_EB0(cls) : SYSV_MIXED_EB1(cls); }
 
 static const char *x86_64_emit_globals(TargetBackend *self, const IrGlobalVarArray *globals, Arena *arena) {
     (void)self;
@@ -271,6 +278,19 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                 sse_word++;
                 continue;
             }
+            if (agg_size > 0 && x86_64_is_mixed(agg_float)) {
+                /* System V mixed aggregate: spill each eightbyte from its own
+                 * register class (SSE eightbyte from XMM, INTEGER from a GPR). */
+                int num_slots = (agg_size + 15) / 16;
+                int off = -((p_slot + num_slots) * 16);
+                for (int e = 0; e < 2; ++e) {
+                    if (x86_64_mixed_eb(agg_float, e) == 2)
+                        sb_appendf(&out, "    movq %%xmm%d, %d(%%rbp)\n", sse_word++, off + e * 8);
+                    else
+                        sb_appendf(&out, "    movq %s, %d(%%rbp)\n", regs[abi_word++], off + e * 8);
+                }
+                continue;
+            }
             if (agg_size > 0 && agg_float) {
                 int slots = x86_64_agg_sse_slots(agg_float);
                 int num_slots = (agg_size + 15) / 16;
@@ -360,6 +380,14 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                 int p_float = (prologue_floats && i < prologue_floats->count) ? prologue_floats->data[i] : 0;
                 if (p_float && sse_word < 8) {
                     sse_word++;
+                    continue;
+                }
+                if (agg_size > 0 && x86_64_is_mixed(agg_float)) {
+                    /* Mixed fixed param consumes one GPR + one XMM (per eightbyte). */
+                    for (int e = 0; e < 2; ++e) {
+                        if (x86_64_mixed_eb(agg_float, e) == 2) sse_word++;
+                        else abi_word++;
+                    }
                     continue;
                 }
                 if (agg_size > 0 && agg_float) {
@@ -662,6 +690,9 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
             int *arg_first_word = calloc(num_args + 1, sizeof(int));
             int *arg_first_sse = calloc(num_args + 1, sizeof(int));
             int *arg_stack_word = calloc(num_args + 1, sizeof(int));
+            int *arg_mixed = calloc(num_args + 1, sizeof(int));            /* System V mixed aggregate */
+            int *arg_eb_sse = calloc((num_args + 1) * 2, sizeof(int));     /* per eightbyte: 1=XMM, 0=GPR */
+            int *arg_eb_idx = calloc((num_args + 1) * 2, sizeof(int));     /* per eightbyte: register index */
 
             int ret_agg_size = 0;
             int ret_agg_float = 0;
@@ -698,6 +729,19 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                         arg_first_sse[i] = sse_words++;
                     } else {
                         arg_stack_word[i] = stack_words++;
+                    }
+                    continue;
+                } else if (agg_size > 0 && x86_64_is_mixed(agg_float)) {
+                    /* Mixed aggregate: assign each eightbyte to XMM or a GPR. */
+                    arg_mixed[i] = 1;
+                    for (int e = 0; e < 2; ++e) {
+                        if (x86_64_mixed_eb(agg_float, e) == 2) {
+                            arg_eb_sse[i * 2 + e] = 1;
+                            arg_eb_idx[i * 2 + e] = sse_words++;
+                        } else {
+                            arg_eb_sse[i * 2 + e] = 0;
+                            arg_eb_idx[i * 2 + e] = abi_words++;
+                        }
                     }
                     continue;
                 } else if (agg_size > 0 && agg_float && agg_size <= 16) {
@@ -739,7 +783,14 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                     int src_off = stack_bytes + (int)(num_args - 1 - i) * 8 + ret_val_bytes;
                     if (agg_size > 0) {
                         sb_appendf(&out, "    movq %d(%%rsp), %%r10\n", src_off);
-                        if (agg_float && agg_size <= 16 && arg_in_sse[i]) {
+                        if (arg_mixed[i]) {
+                            for (int e = 0; e < 2; ++e) {
+                                if (arg_eb_sse[i * 2 + e])
+                                    sb_appendf(&out, "    movq %d(%%r10), %%xmm%d\n", e * 8, arg_eb_idx[i * 2 + e]);
+                                else
+                                    sb_appendf(&out, "    movq %d(%%r10), %s\n", e * 8, regs[arg_eb_idx[i * 2 + e]]);
+                            }
+                        } else if (agg_float && agg_size <= 16 && arg_in_sse[i]) {
                             int sse_slots = x86_64_agg_sse_slots(agg_float);
                             for (int s = 0; s < sse_slots; ++s) {
                                 sb_appendf(&out, "    movq %d(%%r10), %%xmm%d\n", s * 8, arg_first_sse[i] + s);
@@ -843,6 +894,9 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
             free(arg_first_word);
             free(arg_first_sse);
             free(arg_stack_word);
+            free(arg_mixed);
+            free(arg_eb_sse);
+            free(arg_eb_idx);
 
             if (ret_float_for_agg) {
                 sb_append(&out, "    subq $8, %rsp\n");
@@ -851,7 +905,18 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                 }
                 sb_append(&out, "    movsd %xmm0, (%rsp)\n");
             } else if (ret_agg_size <= 16) {
-                if (ret_agg_float) {
+                if (x86_64_is_mixed(ret_agg_float)) {
+                    /* Capture mixed return: eb0 then eb1, each from its class's
+                     * return register (rax/rdx for INTEGER, xmm0/xmm1 for SSE). */
+                    int gpr = 0, sse = 0;
+                    for (int e = 0; e < 2; ++e) {
+                        sb_append(&out, "    subq $8, %rsp\n");
+                        if (x86_64_mixed_eb(ret_agg_float, e) == 2)
+                            sb_appendf(&out, "    movq %%xmm%d, (%%rsp)\n", sse++);
+                        else
+                            sb_appendf(&out, "    movq %s, (%%rsp)\n", gpr++ == 0 ? "%rax" : "%rdx");
+                    }
+                } else if (ret_agg_float) {
                     int sse_slots = x86_64_agg_sse_slots(ret_agg_float);
                     for (int s = 0; s < sse_slots; ++s) {
                         sb_append(&out, "    subq $8, %rsp\n");
@@ -1056,7 +1121,18 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
         } else if (inst->op == IR_RET_AGG) {
             int ret_size = inst->value;
             sb_append(&out, "    popq %r10\n"); // src_addr
-            if (fn->return_aggregate_float_class) {
+            if (x86_64_is_mixed(fn->return_aggregate_float_class)) {
+                /* Mixed aggregate return: INTEGER eightbytes in rax/rdx, SSE in xmm0/xmm1. */
+                int cls = fn->return_aggregate_float_class;
+                const char *iret[2] = {"%rax", "%rdx"};
+                int gpr = 0, sse = 0;
+                for (int e = 0; e < 2; ++e) {
+                    if (x86_64_mixed_eb(cls, e) == 2)
+                        sb_appendf(&out, "    movq %d(%%r10), %%xmm%d\n", e * 8, sse++);
+                    else
+                        sb_appendf(&out, "    movq %d(%%r10), %s\n", e * 8, iret[gpr++]);
+                }
+            } else if (fn->return_aggregate_float_class) {
                 int sse_slots = x86_64_agg_sse_slots(fn->return_aggregate_float_class);
                 for (int s = 0; s < sse_slots; ++s) {
                     sb_appendf(&out, "    movq %d(%%r10), %%xmm%d\n", s * 8, s);

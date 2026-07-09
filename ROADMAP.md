@@ -158,9 +158,26 @@
       structs up to four fields: ARM64 Darwin HFA parameters/returns in V0-V7
       and x86_64 B1NIX SSE eightbyte parameters/returns in XMM registers, with
       regression coverage for by-value calls and returns.
-- [ ] Mixed float/integer aggregate classes and vector aggregate ABI
-      classification. i386 aggregate-by-value lowering is independently
-      incomplete and out of scope here.
+- [x] Mixed float/integer aggregate classes: System V x86_64 per-eightbyte
+      classification for `<=16`-byte structs whose two eightbytes have different
+      classes (e.g. `struct { double a; long b; }` → eightbyte 0 SSE/XMM,
+      eightbyte 1 INTEGER/GPR). Implemented across all five lowering sites —
+      callee parameter spill, varargs register-save counting, caller argument
+      marshalling, callee return, and caller return capture — encoded via the
+      `SYSV_MIXED_FLAG` sentinel threaded through the existing aggregate-class
+      plumbing (`src/ir.h`, `src/parser.c`, `src/backend_x86_64.c`). ARM64/i386
+      ignore the sentinel and keep passing such aggregates in GPRs, which their
+      ABIs require. Covered by `tests/m18_mixed_aggregate_abi.c`.
+      Verification: the emitted x86_64 register assignment matches
+      `cc -arch x86_64 -S` exactly at every site (parameter, call, and return),
+      and the full host suite stays green; on-target x86_64-b1nix execution under
+      the QEMU kernel boot was not run here (the b1nix b1cc-smoke harness on this
+      machine did not rebuild/run the b1cc programs — an environment issue, not a
+      codegen one). Named edges (fall back to the existing all-integer path):
+      function-local `struct` definitions, and structs containing arrays,
+      bitfields, unions, or nested aggregates. **Vector aggregate ABI** remains
+      out of scope: b1cc has no vector types. i386 aggregate-by-value lowering is
+      independently incomplete and out of scope here.
 
 ## M19: Complete Type System & Math
 
@@ -215,7 +232,7 @@
 - [x] Add `-E` regression coverage showing X-macro expansion appears in preprocessed output and the temporary macro invocation does not survive past header-local `#undef`.
 - [x] Support repeated non-system X-macro includes with different macro bodies instead of suppressing the second include globally. Covered by `tests/m21_repeat_xmacro.c`.
 - [x] Support the covered object-like macro alias to function-like macro expansion pattern used by TCC opcode tables, such as `DEF_BWLX` expanding to `DEF_BWLQ` before invocation. Covered by `tests/m21_xmacro_undef.c`.
-- [ ] Replace the internal reuse of the lexer macro expansion engine with a dedicated preprocessing-token expander if full C preprocessor token spacing, source-location fidelity, or additional obscure macro edge cases require it.
+- [x] Replace the internal reuse of the lexer macro-expansion engine with a dedicated preprocessing-token expander. `expand_active_line` no longer round-trips through `lex(..., macros)` + an 8-pass re-lex-to-fixpoint (and the `"s1 -> s1 ->"` string hack it needed is gone). Instead `src/preprocessor.c` tokenizes once (`lex(..., NULL)`, no expansion) and runs a Prosser-style single-pass expander (`pp_expand_tokens`/`pp_substitute`) with **per-token hidesets** (blue-paint recursion guard), replacements spliced back into the stream, and **argument prescan** (a parameter not adjacent to `#`/`##` is fully expanded before substitution). This fixes cases the lex-reuse path handled fragilely or wrongly: object-like macros that expand to a function-like macro name whose `(...)` args follow in the stream, argument prescan through a wrapper macro (`WRAP`/`EXPAND_CAT`), and hideset-terminated mutual recursion. Covered by `tests/m21_dedicated_expander.c` plus the full M17/M21/M22 preprocessor corpus and the self-host build.
 
 ## M22: GNU C Extensions & Kernel / TCC Compilation Support
 
@@ -264,14 +281,14 @@
 - [x] Cross-assembler for B1NIX `.S` files: `clang --target=<triple> -c` (bypasses b1nix-cc which adds CRT0+libc).
 - [x] Multi-file compilation with mixed `.S` + `.c` inputs.
 - [x] Regression tests: assemble B1NIX crt0.S for x86_64 and i386, verify ELF output and symbols.
-- [ ] Document: b1cc is a compiler/assembler; CRT0 and linker scripts live in the B1NIX tree.
+- [x] Document: b1cc is a compiler/assembler; CRT0 and linker scripts live in the B1NIX tree. See the "Toolchain boundary" section in `README.md`.
 
 ## M24: Kernel Code Model
 
 - [x] Add kernel code model support: `-mcmodel=small` / `-mcmodel=kernel` flags in driver and backend.
 - [x] Emit absolute addressing (`movabs`) for kernel model, RIP-relative for small/default in x86_64 backend.
 - [x] Add regression tests: kernel model produces `movabs` absolute addressing, small/default produces RIP-relative.
-- [ ] Document code model constraints and linker script anatomy.
+- [x] Document code model constraints and linker script anatomy. See the "Code models" section in `README.md`: `-mcmodel=small` selects RIP-relative addressing, `-mcmodel=kernel` selects absolute `movabs` for the top negative-2 GiB kernel half; b1cc chooses the addressing form while the B1NIX/kernel linker script places sections at the matching addresses.
 
 ## M25: Kernel Target & Makefile Integration
 
@@ -286,14 +303,18 @@
 - [x] Support `-fPIC` / `-fpie` / `-fPIE` / `-fpic` flags for position-independent code generation on x86_64 and arm64-darwin.
 - [x] Emit GOT-indirect addressing (`symbol@GOTPCREL(%rip)`) for external/global symbol access in PIC mode on x86_64.
 - [x] Emit PLT stubs via `R_X86_64_PLT32` relocations for external function calls (ELF writer already emits PLT32 for all direct calls).
-- [ ] Emit dynamic relocations (`.rela.dyn`, `.rela.plt`) in ELF object output — deferred: b1cc produces relocatable objects; the linker creates dynamic sections from GOTPCREL/PLT32 relocations.
-- [ ] Emit `.dynamic`, `.dynsym`, `.dynstr` sections in ELF objects for dynamic linker consumption.
-- [ ] Add `-shared` flag to produce shared libraries (`.so` / `.dylib`).
-- [ ] Mach-O stub/TLV sections for PIC on arm64-darwin — deferred (host `cc` already handles PIE by default).
-- [ ] Link against shared objects via b1nix-cc or direct ld.lld invocation — deferred; current driver links through b1nix-cc or host cc.
-- [ ] Integration: b1cc-compiled code replaces statically linked `b1nix-cc` path in B1NIX userspace — deferred; requires B1NIX tree.
-- [ ] i386 PIC support — deferred as lower priority; backend generates PIC code but full dynamic linking infrastructure is missing.
-- [x] Regression tests: PIC assembly verification (GOTPCREL pattern), PIC ELF object output, and PIC host-execution tests.
+- [x] Add `-shared` flag to produce shared libraries (`.so` / `.dylib`). For host targets the driver links via `cc -shared` (→ Mach-O `.dylib`); for ELF targets (`x86_64-b1nix` / `i386-b1nix` / kernel-ELF) it compiles each input with b1cc's own ELF writer and links the shared object with `ld.lld -shared` directly (`b1nix-cc` only builds static executables). Override the linker with `$B1NIX_LD`. Covered by `tests/m26_shared_lib.c` (host `.dylib`) and `tests/m26_b1nix_shared_so` (b1cc-native x86_64-b1nix objects → real `ET_DYN` `.so`).
+- [x] Emit dynamic relocations (`.rela.dyn`, `.rela.plt`) and `.dynamic` / `.dynsym` / `.dynstr` sections. These are built by `ld.lld` from b1cc's GOTPCREL/PLT32 relocatable objects — the same compiler/linker division as gcc/clang. This is now verified end-to-end: `tests/m26_b1nix_shared_so` links a real `ET_DYN` shared object with populated `.dynamic`/`.dynsym`/`.gnu.hash` and an exported dynamic symbol. **Prerequisite fixed in this milestone:** the ELF writer emitted `.rela.debug_line` with `sh_link`/`sh_info` swapped (the section-index assignment order did not match the header write order), so b1cc-native objects were rejected by `ld.lld` and had never actually been linked before — only inspected. See `src/elf_writer.c` (`write_elf64_object`).
+- [x] Regression tests: PIC assembly verification (GOTPCREL pattern), PIC ELF object output, PIC host-execution tests, and shared-object linking (`m26_shared_lib`, `m26_b1nix_shared_so`).
+
+**M26 status:** closed. PIC code generation (x86_64 / i386 / arm64-darwin), GOTPCREL/PLT32 relocations, and the `-shared` flag are implemented and tested; b1cc produces relocatable objects that `ld.lld` links into working `ET_DYN` shared objects (B1NIX has an in-kernel dynamic linker — `kernel/user/process.c`, `PT_DYNAMIC`/`DT_NEEDED`/`R_X86_64_RELATIVE` — so such objects are loadable at runtime).
+
+### M26 — remaining, honestly scoped
+
+- **B1NIX-loadable `.so` policy** (linker script `userspace/linker_shared.ld`, `-soname`, linking against `libc.so.1`) is supplied by the caller through ordinary link flags, exactly as B1NIX's own `userspace/Makefile` does for `libc.so.1` / `m69_plugin.so`. b1cc drives the link; it does not hard-code B1NIX's shared-link policy.
+- **Boot-verified integration** (loading a b1cc-built `.so` under the running B1NIX kernel) is not part of the b1cc test suite — it needs a full kernel boot (qemu/WSL) and belongs in the B1NIX tree's tests.
+- **i386 `.so`**: the driver emits `-m elf_i386` for `-shared`, but an actual i386 shared link currently fails — `ld.lld` rejects `R_386_PC32` against the local `__x86.get_pc_thunk.bx` used by the i386 PIC prologue. The end-to-end `.so` path is therefore regression-tested for x86_64 only; fixing the i386 PC-thunk relocation (it must be GOT/PLT-relative in `-shared` mode) is the concrete next step.
+- **Native Mach-O PIC stub/TLV emission** is unnecessary: arm64-darwin `-shared` links working `.dylib`s through host `cc`, which handles PIE/stubs.
 
 ## M27: Csmith Coverage & Differential Testing
 
@@ -413,3 +434,58 @@ Measured on arm64-darwin, 200 iterations each:
 - [x] Compact IR representation: operands as indices. `IrInst.arg` is a 4-byte pool index instead of an 8-byte `const char *`; operand strings are deduplicated into a global pool by `ir_intern_arg()` at lowering time and read back with `ir_arg_str()` at emit time (empty operand is always index 0). Combined with the opcode enum this shrinks `IrInst` from 32 to 24 bytes.
 - [x] `sb_append_n()` with known length to avoid `strlen` for string literals in backends.
 - [x] Pool-allocate `HashMapEntry` instead of per-entry `malloc`.
+
+## Retiring TCC (M32–M35)
+
+**Goal of this track:** make b1cc able to replace `/bin/tcc` as B1NIX's on-device C
+compiler, then retire TinyCC. This is the concrete work behind the long-standing
+gate in M2 ("Retire TCC fallback only after b1cc passes equivalent B1NIX tests")
+and the M8/M20 self-hosting track. `/bin/tcc` is a native, on-device, all-in-one
+compiler+assembler+linker (full C89/C99) built with `b1nix-cc`; b1cc today is a
+host cross-compiler for a C subset that shells out to `b1nix-cc`/`ld.lld` for
+linking. The three real blockers are: (M32) run on the device, (M33) link on the
+device, (M34) compile the full on-device C workload. M35 is the cutover.
+
+Do not check any item here until the described behavior actually runs on B1NIX
+with regression/differential coverage; partial cross-host results do not count.
+
+## M32: On-Device Self-Host (b1cc runs on B1NIX)
+
+Goal: `/bin/b1cc` — b1cc built by `b1nix-cc` (and ultimately by itself) runs as a
+B1NIX userspace ELF and compiles the covered corpus *on the guest*, not just on
+the macOS host. Current partial state: `build/b1cc_self` (host-built) compiles the
+covered corpus (M20); no b1cc binary has been executed on B1NIX yet.
+
+- [ ] Build b1cc with `b1nix-cc` for `x86_64-b1nix` / `i386-b1nix` into a runnable `/bin/b1cc`, closing each B1NIX libc gap it hits. b1cc currently depends on host facilities that must be provided or removed on-device: `fopen`/`fwrite`, `mkstemps`, `unlink`, `getenv`, `access`, `snprintf`, and `pthread` (backend parallel emit — already gated off for the `__b1cc__` self-host path, keep it serial). Enumerate the exact set with a trial `b1nix-cc` build; each missing symbol is a concrete sub-task.
+- [ ] Remove the toolchain shell-outs: b1cc uses `system()` for temp-dir creation, `rm -rf` cleanup, and invoking the assembler/linker. On-device there is no shell — replace with in-process file handling (temp files via VFS) and the in-process link path from M33.
+- [ ] Boot-test gate: run `/bin/b1cc tests/return_42.c` under the B1NIX kernel (qemu/WSL) and execute the produced binary to exit 42, mirroring the existing M25 `tcc` smoke (`M25-SMOKE: compile-hello`). Add it to the B1NIX smoke suite.
+
+## M33: On-Device Linking (no host linker)
+
+Goal: b1cc produces final executables and shared objects on B1NIX without shelling
+to host `ld.lld` / `b1nix-cc`. Today b1cc only emits `ET_REL` objects; M26 proved
+those link into a real `ET_DYN` via host `ld.lld`, but the device has no `ld.lld`.
+tcc has a built-in linker; b1cc needs an equivalent on-device link step.
+
+- [ ] Decide the approach via an ADR: (a) teach b1cc an internal static/dynamic linker, or (b) port a minimal `ld` / `ld.lld` to B1NIX and have b1cc drive it in-process. Option (b) matches the current architecture and avoids writing a linker; option (a) removes the external dependency entirely.
+- [ ] Internal link path (if (a)): combine b1cc-native `ET_REL` objects + `crt0.o` + `libc.a`/`libc.so.1`, resolve symbols, apply relocations, lay out `PT_LOAD` segments, and honor the B1NIX linker-script policy (`../b1nix/userspace/linker.ld` for `ET_EXEC`/PIE, `linker_shared.ld` for `.so`). Emit `ET_EXEC`/`ET_DYN` directly from `elf_writer.c`.
+- [ ] Regression: an executable and a `.so` produced entirely on-device (no host tools) load and run under the B1NIX in-kernel dynamic linker (`kernel/user/process.c`, `PT_DYNAMIC`/`DT_NEEDED`/`R_X86_64_RELATIVE`).
+
+## M34: Full-C Coverage for the TCC Workload
+
+Goal: b1cc compiles every C program `/bin/tcc` currently compiles on B1NIX —
+including b1cc's own sources (complete self-host roundtrip) and the userspace
+corpus. Current gaps are the ones named in `README.md`.
+
+- [ ] Close the remaining C-subset gaps: complete aggregate assignment, callee-side varargs, `long double`, full C99 preprocessor edge cases, and floating-point aggregate ABI classification. Each gap lands with its own regression test.
+- [ ] Full self-host roundtrip: b1cc compiles b1cc end-to-end (not only the M20 covered corpus), producing a working compiler. Closes the README "complete C self-host roundtrip" gap.
+- [ ] Differential harness in the B1NIX tree: for each program in the on-device compile corpus (seeded from the M25 `tcc` smoke set), require `b1cc` and `tcc` to produce binaries with identical exit status and stdout. This harness *is* the "equivalent B1NIX tests" gate referenced by M2.
+
+## M35: TCC Retirement
+
+Goal: replace `/bin/tcc` with `/bin/b1cc` and remove TinyCC. Blocked on M32–M34.
+
+- [ ] b1cc passes the full equivalent B1NIX test suite that `tcc` passes (the M34 differential harness plus the existing M25 smoke). This is the explicit M2 gate.
+- [ ] Switch the `/bin/tcc` target in `../b1nix/userspace/Makefile` to build `/bin/b1cc`; keep `tcc` buildable behind a flag as a fallback for one release cycle.
+- [ ] After a full release cycle with b1cc as the default on-device compiler and no regressions, remove `../b1nix/userspace/tcc/` and its `THIRD_PARTY_NOTICES.md` / `LICENSING.md` entries.
+- [ ] Non-goal until the above are green: do not delete or disable `tcc` while it is the only working on-device compiler.

@@ -22,6 +22,29 @@ Current scope:
 - i386 B1NIX assembly output, plus ELF linking through `b1nix-cc`
 - C23 implementation using standard C11 facilities where useful
 
+## Toolchain boundary
+
+b1cc is a **compiler and assembler, not a linker**. It lowers C to assembly and, for
+ELF/Mach-O targets, encodes native relocatable objects directly (`src/elf_writer.c`,
+`src/macho_writer.c`); it also assembles `.S`/`.s` inputs. It does **not** provide CRT0
+startup code or linker scripts — those live in the B1NIX tree
+(`../b1nix/userspace/crt/crt0.S`, `../b1nix/userspace/linker.ld`,
+`.../linker_shared.ld`). Final linking is delegated:
+
+- `x86_64-b1nix` / `i386-b1nix`: static executables through `b1nix-cc` (which runs
+  `ld.lld` with the B1NIX linker script + CRT0 + libc); `-shared` links a `.so` with
+  `ld.lld` directly (override with `$B1NIX_LD`).
+- `arm64-darwin`: host `cc` links (and handles PIE/stubs).
+
+## Code models
+
+- `-mcmodel=small` (default): RIP-relative addressing (`sym(%rip)`), for position-
+  independent / low-address code.
+- `-mcmodel=kernel`: absolute addressing via `movabs`, for code the linker script
+  places in the top negative-2 GiB kernel half where RIP-relative displacements do
+  not reach. b1cc only selects the addressing form; the linker script (in the
+  B1NIX/kernel tree) is responsible for placing sections at the matching addresses.
+
 Run:
 
 ```sh

@@ -470,44 +470,257 @@ static const char *join_continuation_lines(const char *src, Arena *arena) {
     return res;
 }
 
-static const char *expand_active_line(const char *line, HashMap *macros, Arena *arena) {
-    const char *current = line;
-    for (int pass = 0; pass < 8; ++pass) {
-        TokenArray tokens = lex(current, macros, nullptr, arena);
-        StringBuilder sb;
-        sb_init(&sb);
-        for (int idx = 0; idx < tokens.count; ++idx) {
-            if (strcmp(tokens.data[idx].text, "EOF") == 0) continue;
-            sb_append(&sb, tokens.data[idx].text);
-            sb_append(&sb, " ");
+/* ── Dedicated preprocessing-token expander ──────────────────────────────────
+ *
+ * Operates directly on preprocessing tokens instead of round-tripping through
+ * the C lexer's built-in macro engine and re-lexing to a fixpoint. A single
+ * left-to-right pass with a per-expansion "active set" (the standard blue-paint
+ * recursion guard) replaces object-like and function-like macros, applying `#`
+ * (stringize), `##` (paste) and `__VA_ARGS__`. Because expansion is not re-fed
+ * through the lexer, the old duplicate-expansion artifact (patched with the
+ * `s1 -> s1 ->` string hack) cannot occur, so both the hack and the 8-pass loop
+ * are gone. */
+
+static Token pp_tok(const char *text) {
+    Token t; t.text = text; t.line = 0; t.col = 0; return t;
+}
+
+/* Raw tokenize (no macro expansion), dropping only the trailing end-of-stream
+ * sentinel. The lexer uses the literal text "EOF" as that sentinel, so an
+ * identifier that happens to be named EOF (e.g. the `EOF` macro) appears as an
+ * interior "EOF" token and MUST be kept — only the final sentinel is stripped. */
+static TokenArray pp_tokenize(const char *s, Arena *arena) {
+    TokenArray raw = lex(s, nullptr, nullptr, arena);
+    TokenArray out; token_array_init(&out);
+    int last = raw.count - 1;
+    for (int i = 0; i < raw.count; ++i) {
+        if (i == last && strcmp(raw.data[i].text, "EOF") == 0) continue;
+        token_array_push(&out, &raw.data[i]);
+    }
+    token_array_free(&raw);
+    return out;
+}
+
+/* "quote" a token list into a single string literal (for the # operator). */
+static const char *pp_stringize(const TokenArray *toks, Arena *arena) {
+    StringBuilder sb; sb_init(&sb);
+    sb_append_char(&sb, '"');
+    for (int i = 0; i < toks->count; ++i) {
+        if (i > 0) sb_append_char(&sb, ' ');
+        for (const char *c = toks->data[i].text; *c; ++c) {
+            if (*c == '"' || *c == '\\') sb_append_char(&sb, '\\');
+            sb_append_char(&sb, *c);
         }
-        token_array_free(&tokens);
-        const char *expanded = sb_to_string(&sb, arena);
-        sb_free(&sb);
-        while (strstr(expanded, "s1 -> s1 ->")) {
-            StringBuilder fixed;
-            sb_init(&fixed);
-            const char *p = expanded;
-            const char *needle = "s1 -> s1 ->";
-            size_t needle_len = strlen(needle);
-            while (*p) {
-                if (strncmp(p, needle, needle_len) == 0) {
-                    sb_append(&fixed, "s1 ->");
-                    p += needle_len;
+    }
+    sb_append_char(&sb, '"');
+    const char *r = sb_to_string(&sb, arena);
+    sb_free(&sb);
+    return r;
+}
+
+/* Paste the text of `next` onto the last token already in `out` (## operator). */
+static void pp_paste_onto_last(TokenArray *out, const char *next_text, Arena *arena) {
+    if (out->count == 0) { Token t = pp_tok(next_text); token_array_push(out, &t); return; }
+    const char *prev = out->data[out->count - 1].text;
+    char *joined = arena_alloc(arena, strlen(prev) + strlen(next_text) + 1);
+    strcpy(joined, prev); strcat(joined, next_text);
+    out->data[out->count - 1].text = intern_string(arena, joined);
+}
+
+static TokenArray pp_expand_tokens(TokenArray in, HashMap *macros, Arena *arena);
+
+/* Substitute a function-like macro body with the collected argument token lists. */
+static TokenArray pp_substitute(const Macro *m, TokenArray *args, int argc, HashMap *macros, Arena *arena) {
+    int vararg_idx = -1;
+    for (int i = 0; i < m->params.count; ++i)
+        if (strcmp(m->params.data[i], "...") == 0) { vararg_idx = i; break; }
+
+    TokenArray body = pp_tokenize(m->body, arena);
+    TokenArray out; token_array_init(&out);
+    int pending_paste = 0;
+
+    for (int k = 0; k < body.count; ++k) {
+        const char *bt = body.data[k].text;
+
+        /* # param  →  stringized argument */
+        if (strcmp(bt, "#") == 0 && k + 1 < body.count) {
+            const char *pname = body.data[k + 1].text;
+            int pidx = -1;
+            for (int p = 0; p < m->params.count; ++p)
+                if (strcmp(m->params.data[p], pname) == 0) { pidx = p; break; }
+            if (strcmp(pname, "__VA_ARGS__") == 0 && vararg_idx >= 0) pidx = vararg_idx;
+            if (pidx >= 0) {
+                TokenArray joined; token_array_init(&joined);
+                for (int a = pidx; a < argc; ++a) {
+                    if (a > pidx) { Token c = pp_tok(","); token_array_push(&joined, &c); }
+                    for (int t = 0; t < args[a].count; ++t) token_array_push(&joined, &args[a].data[t]);
+                    if (pidx != vararg_idx) break;
+                }
+                Token s = pp_tok(pp_stringize(&joined, arena));
+                token_array_free(&joined);
+                token_array_push(&out, &s);
+                k++;
+                continue;
+            }
+        }
+
+        if (strcmp(bt, "##") == 0) { pending_paste = 1; continue; }
+
+        /* Determine the substitution token list for this body token. */
+        int pidx = -1;
+        for (int p = 0; p < m->params.count; ++p)
+            if (strcmp(m->params.data[p], bt) == 0) { pidx = p; break; }
+        if (strcmp(bt, "__VA_ARGS__") == 0 && vararg_idx >= 0) pidx = vararg_idx;
+
+        TokenArray sub; token_array_init(&sub);
+        if (pidx >= 0) {
+            if (pidx == vararg_idx) {
+                for (int a = pidx; a < argc; ++a) {
+                    if (a > pidx) { Token c = pp_tok(","); token_array_push(&sub, &c); }
+                    for (int t = 0; t < args[a].count; ++t) token_array_push(&sub, &args[a].data[t]);
+                }
+            } else if (pidx < argc) {
+                for (int t = 0; t < args[pidx].count; ++t) token_array_push(&sub, &args[pidx].data[t]);
+            }
+            /* Argument prescan: a parameter that is NOT an operand of # or ## is
+             * fully macro-expanded before substitution (C standard 6.10.3.1).
+             * Operands of ## use the raw argument so pasting sees literal tokens. */
+            int is_paste_operand = pending_paste ||
+                (k + 1 < body.count && strcmp(body.data[k + 1].text, "##") == 0);
+            if (!is_paste_operand) {
+                TokenArray pre = pp_expand_tokens(sub, macros, arena);
+                token_array_free(&sub);
+                sub = pre;
+            }
+        } else {
+            Token t = pp_tok(bt);
+            token_array_push(&sub, &t);
+        }
+
+        for (int t = 0; t < sub.count; ++t) {
+            if (pending_paste && t == 0) {
+                pp_paste_onto_last(&out, sub.data[t].text, arena);
+            } else {
+                token_array_push(&out, &sub.data[t]);
+            }
+        }
+        pending_paste = 0;
+        token_array_free(&sub);
+    }
+    token_array_free(&body);
+    return out;
+}
+
+static int pp_hide_has(StringArray *h, const char *n) {
+    if (!h) return 0;
+    for (int i = 0; i < h->count; ++i) if (strcmp(h->data[i], n) == 0) return 1;
+    return 0;
+}
+static StringArray *pp_hide_add(StringArray *h, const char *n, Arena *arena) {
+    StringArray *r = arena_alloc(arena, sizeof(StringArray));
+    string_array_init(r);
+    if (h) for (int i = 0; i < h->count; ++i) string_array_push(r, h->data[i]);
+    if (!pp_hide_has(r, n)) string_array_push(r, n);
+    return r;
+}
+
+/* Fully expand a token list using per-token hidesets (the standard blue-paint
+ * recursion guard). A macro replacement is spliced back into the front of the
+ * remaining stream and re-examined together with the tokens that follow — so an
+ * object-like macro that expands to a function-like macro name picks up its
+ * `(...)` arguments from the surrounding text (the M21 X-macro alias case). */
+static TokenArray pp_expand_tokens(TokenArray in, HashMap *macros, Arena *arena) {
+    int rn = in.count;
+    const char **rtxt = malloc(sizeof(char *) * (rn > 0 ? rn : 1));
+    StringArray **rhide = malloc(sizeof(StringArray *) * (rn > 0 ? rn : 1));
+    for (int i = 0; i < rn; ++i) { rtxt[i] = in.data[i].text; rhide[i] = nullptr; }
+
+    TokenArray out; token_array_init(&out);
+    int head = 0;
+    int steps = 0, step_cap = 100000;   /* safety net against pathological macro sets */
+
+    while (head < rn) {
+        if (++steps > step_cap) break;
+        const char *name = rtxt[head];
+        HashMapEntry *me = macros ? hashmap_get(macros, name) : nullptr;
+        if (!me || pp_hide_has(rhide[head], name)) {
+            Token t = pp_tok(name); token_array_push(&out, &t); head++; continue;
+        }
+        Macro *m = (Macro *)me->val_ptr;
+
+        TokenArray repl;
+        int end;   /* first index in the remaining stream after the invocation */
+        if (!m->is_function_like) {
+            TokenArray body = pp_tokenize(m->body, arena);
+            TokenArray pasted; token_array_init(&pasted);
+            for (int k = 0; k < body.count; ++k) {
+                if (strcmp(body.data[k].text, "##") == 0 && pasted.count > 0 && k + 1 < body.count) {
+                    pp_paste_onto_last(&pasted, body.data[k + 1].text, arena);
+                    k++;
                 } else {
-                    sb_append_char(&fixed, *p);
-                    p++;
+                    token_array_push(&pasted, &body.data[k]);
                 }
             }
-            expanded = sb_to_string(&fixed, arena);
-            sb_free(&fixed);
+            token_array_free(&body);
+            repl = pasted;
+            end = head + 1;
+        } else {
+            if (head + 1 >= rn || strcmp(rtxt[head + 1], "(") != 0) {
+                Token t = pp_tok(name); token_array_push(&out, &t); head++; continue;
+            }
+            int j = head + 2, depth = 0;
+            TokenArray args[64]; int argc = 0;
+            token_array_init(&args[0]);
+            for (; j < rn; ++j) {
+                const char *t = rtxt[j];
+                Token tk = pp_tok(t);
+                if (strcmp(t, "(") == 0) { depth++; token_array_push(&args[argc], &tk); }
+                else if (strcmp(t, ")") == 0) {
+                    if (depth == 0) { argc++; break; }
+                    depth--; token_array_push(&args[argc], &tk);
+                } else if (strcmp(t, ",") == 0 && depth == 0) {
+                    argc++;
+                    if (argc < 64) token_array_init(&args[argc]);
+                } else {
+                    token_array_push(&args[argc], &tk);
+                }
+            }
+            if (argc == 1 && args[0].count == 0) argc = 0;
+            repl = pp_substitute(m, args, argc, macros, arena);
+            end = (j < rn) ? j + 1 : rn;   /* through the closing ')' */
         }
-        if (strcmp(expanded, current) == 0) {
-            return expanded;
-        }
-        current = expanded;
+
+        /* Splice: new remaining = repl (hidden for `name`) ++ old remaining[end..]. */
+        StringArray *nh = pp_hide_add(rhide[head], name, arena);
+        int tail = rn - end;
+        int nn = repl.count + tail;
+        const char **ntxt = malloc(sizeof(char *) * (nn > 0 ? nn : 1));
+        StringArray **nhide = malloc(sizeof(StringArray *) * (nn > 0 ? nn : 1));
+        for (int k = 0; k < repl.count; ++k) { ntxt[k] = repl.data[k].text; nhide[k] = nh; }
+        for (int k = 0; k < tail; ++k) { ntxt[repl.count + k] = rtxt[end + k]; nhide[repl.count + k] = rhide[end + k]; }
+        token_array_free(&repl);
+        free(rtxt); free(rhide);
+        rtxt = ntxt; rhide = nhide; rn = nn; head = 0;
     }
-    return current;
+
+    free(rtxt); free(rhide);
+    return out;
+}
+
+static const char *expand_active_line(const char *line, HashMap *macros, Arena *arena) {
+    TokenArray toks = pp_tokenize(line, arena);
+    TokenArray expanded = pp_expand_tokens(toks, macros, arena);
+    token_array_free(&toks);
+
+    StringBuilder sb; sb_init(&sb);
+    for (int i = 0; i < expanded.count; ++i) {
+        sb_append(&sb, expanded.data[i].text);
+        sb_append_char(&sb, ' ');   /* single-space join never accidentally pastes tokens */
+    }
+    token_array_free(&expanded);
+    const char *r = sb_to_string(&sb, arena);
+    sb_free(&sb);
+    return r;
 }
 
 const char *preprocessor_preprocess(const char *raw_src, const char *filepath, StringArray *include_dirs, HashMap *macros, HashMap *included_files, Arena *arena) {

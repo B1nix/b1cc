@@ -1918,10 +1918,15 @@ static void write_elf64_object(AsmModel *m, ByteBuf *out) {
     if (shidx_rodata >= 0) { shidx_rodata = next_shidx++; }
     if (shidx_bss    >= 0) { shidx_bss    = next_shidx++; }
 
+    /* NOTE: this order must match the section-header write order below
+     * (.rela.text, .symtab, .debug_line, .rela.debug_line, .strtab, .shstrtab).
+     * .symtab is written before the debug sections, so it must be indexed
+     * before them too — otherwise .rela.debug_line's sh_link/sh_info point at
+     * the wrong sections and ld.lld rejects the object. */
     int shidx_rela   = (m->text_relocs.count > 0) ? next_shidx++ : -1;
+    int shidx_symtab = next_shidx++;
     int shidx_debug_line = (m->loc_count > 0) ? next_shidx++ : -1;
     int shidx_rela_debug = (m->loc_count > 0) ? next_shidx++ : -1;
-    int shidx_symtab = next_shidx++;
     int shidx_strtab = next_shidx++;
     int shidx_shstr  = next_shidx++;
     int num_sections  = next_shidx;
