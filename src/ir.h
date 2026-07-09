@@ -292,6 +292,18 @@ extern HashMap ir_function_return_aggregate_sizes;
 extern HashMap ir_function_param_aggregate_sizes;
 extern HashMap ir_function_return_aggregate_float_classes;
 extern HashMap ir_function_param_aggregate_float_classes;
+/* Aggregate ABI class encoding (stored in the *aggregate_float_class* value):
+ *   0                          -> not a float aggregate (all-integer / GPR path)
+ *   (count<<8)|elem_size        -> homogeneous float aggregate (HFA / all-SSE)
+ *   SYSV_MIXED_FLAG|eb0|(eb1<<4)-> System V x86_64 mixed aggregate: eightbyte 0
+ *                                  and 1 have different classes (1=INTEGER/GPR,
+ *                                  2=SSE/XMM). Only for <=16-byte, non-union,
+ *                                  non-bitfield, non-nested structs. Other
+ *                                  targets (ARM64/i386) ignore this bit and pass
+ *                                  such aggregates in GPRs, which their ABI wants. */
+#define SYSV_MIXED_FLAG 0x10000
+#define SYSV_MIXED_EB0(c) ((c) & 0xF)
+#define SYSV_MIXED_EB1(c) (((c) >> 4) & 0xF)
 extern HashMap ir_function_vararg_fixed_counts;
 extern HashMap ir_function_param_floats;
 extern HashMap ir_function_return_floats;

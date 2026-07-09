@@ -454,6 +454,16 @@ set -e
 test "$rc" = 42
 echo "ok m21_repeat_xmacro"
 
+# Dedicated preprocessing-token expander: alias-to-function-like, argument
+# prescan, hideset-terminated mutual recursion, and stringize.
+./build/b1cc tests/m21_dedicated_expander.c -o "$tmp/m21_dedicated_expander"
+set +e
+"$tmp/m21_dedicated_expander"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok m21_dedicated_expander"
+
 ./build/b1cc tests/m18_aggregates.c -o "$tmp/m18_aggregates"
 set +e
 "$tmp/m18_aggregates"
@@ -485,6 +495,24 @@ rc=$?
 set -e
 test "$rc" = 0
 echo "ok m18_float_aggregate_abi"
+
+# M18 mixed integer/float aggregate ABI (System V per-eightbyte classification).
+# Host (arm64) execution: passes mixed <=16B aggregates in GPRs, which is the
+# AArch64 rule — so this checks the classification does not corrupt that path.
+./build/b1cc tests/m18_mixed_aggregate_abi.c -o "$tmp/m18_mixed_aggregate_abi"
+set +e
+"$tmp/m18_mixed_aggregate_abi"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok m18_mixed_aggregate_abi"
+
+# x86_64: mixed struct {double a; long b;} must spill eb0 from xmm0 (SSE) and
+# eb1 from rdi (INTEGER), matching the System V ABI (cc -arch x86_64).
+./build/b1cc --target=x86_64-b1nix -S tests/m18_mixed_aggregate_abi.c -o "$tmp/m18_mixed_x86_64.s"
+awk '/^sum_di:/{c=6} c-->0' "$tmp/m18_mixed_x86_64.s" | grep -q 'movq %xmm0, -16(%rbp)'
+awk '/^sum_di:/{c=6} c-->0' "$tmp/m18_mixed_x86_64.s" | grep -q 'movq %rdi, -8(%rbp)'
+echo "ok m18_mixed_aggregate_abi_x86_64_sysv"
 
 ./build/b1cc tests/m18_bitfields.c -o "$tmp/m18_bitfields"
 set +e
@@ -1342,6 +1370,22 @@ if grep -q 'GOTPCREL' "$tmp/m26_pic_nopic.s"; then
     exit 1
 fi
 echo "ok m26_nopic_no_gotpcrel"
+
+# Test: -shared produces a shared library (Mach-O dylib on host)
+./build/b1cc -shared tests/m26_shared_lib.c -o "$tmp/m26_shared.dylib"
+test -s "$tmp/m26_shared.dylib"
+file "$tmp/m26_shared.dylib" | grep -qi 'dynamically linked shared\|dylib'
+echo "ok m26_shared_lib"
+
+# Test: -shared for x86_64-b1nix links b1cc-native ELF objects into a real ELF
+# shared object (ET_DYN) via ld.lld — the b1nix dynamic linker's own linker.
+if command -v ld.lld >/dev/null 2>&1; then
+  ./build/b1cc --target=x86_64-b1nix -fPIC -shared tests/m26_shared_lib.c -o "$tmp/m26_b1nix.so"
+  test -s "$tmp/m26_b1nix.so"
+  od -A n -N 4 -t x1 "$tmp/m26_b1nix.so" | grep -q '7f .*45 .*4c .*46'   # ELF magic
+  od -A n -j 16 -N 2 -t x1 "$tmp/m26_b1nix.so" | grep -q '03 .*00'        # e_type = ET_DYN
+  echo "ok m26_b1nix_shared_so"
+fi
 
 # Test: -fPIC compiles correctly on host (arm64-darwin)
 ./build/b1cc -fPIC tests/m26_pic_basic.c -o "$tmp/m26_pic_basic_host"

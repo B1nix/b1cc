@@ -102,12 +102,18 @@ typedef struct {
 } Arm64Target;
 
 static int agg_float_elem_size(int cls) {
+    if (cls & SYSV_MIXED_FLAG) return 0;   /* x86_64 mixed sentinel: not an HFA on AArch64 */
     return cls & 0xff;
 }
 
 static int agg_float_count(int cls) {
+    if (cls & SYSV_MIXED_FLAG) return 0;   /* x86_64 mixed sentinel: not an HFA on AArch64 */
     return (cls >> 8) & 0xff;
 }
+
+/* The x86_64 mixed-aggregate sentinel means nothing on AArch64, where such
+ * aggregates are passed in GPRs like any non-HFA struct. Treat it as class 0. */
+static int arm64_hfa_class(int cls) { return (cls & SYSV_MIXED_FLAG) ? 0 : cls; }
 
 static int get_max_call_ret_size(const IrFunction *fn, int threshold) {
     int max_size = 0;
@@ -363,7 +369,7 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
         }
         for (int i = 0; i < fn->params.count; ++i) {
             int agg_size = (i < fn->param_aggregate_sizes.count) ? fn->param_aggregate_sizes.data[i] : 0;
-            int agg_float = (prologue_agg_floats && i < prologue_agg_floats->count) ? prologue_agg_floats->data[i] : 0;
+            int agg_float = arm64_hfa_class((prologue_agg_floats && i < prologue_agg_floats->count) ? prologue_agg_floats->data[i] : 0);
             int num_slots = (agg_size > 0) ? ((agg_size + 15) / 16) : 1;
 
             HashMapEntry *entry = hashmap_get((HashMap *)&fn->locals, fn->params.data[i]);
@@ -498,7 +504,7 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
             }
             for (int i = 0; i < num_fixed; ++i) {
                 int agg_size = (i < fn->param_aggregate_sizes.count) ? fn->param_aggregate_sizes.data[i] : 0;
-                int agg_float = (prologue_agg_floats && i < prologue_agg_floats->count) ? prologue_agg_floats->data[i] : 0;
+                int agg_float = arm64_hfa_class((prologue_agg_floats && i < prologue_agg_floats->count) ? prologue_agg_floats->data[i] : 0);
                 int p_float = (prologue_floats && i < prologue_floats->count) ? prologue_floats->data[i] : 0;
                 if (p_float && v_word < 8) {
                     v_word++;
@@ -804,7 +810,7 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                 HashMapEntry *entry = hashmap_get(&ir_function_return_aggregate_sizes, ir_arg_str(inst->arg));
                 if (entry) ret_agg_size = entry->val_int;
                 entry = hashmap_get(&ir_function_return_aggregate_float_classes, ir_arg_str(inst->arg));
-                if (entry) ret_agg_float = entry->val_int;
+                if (entry) ret_agg_float = arm64_hfa_class(entry->val_int);
                 entry = hashmap_get(&ir_function_return_floats, ir_arg_str(inst->arg));
                 if (entry) ret_float_for_agg = entry->val_int;
             }
@@ -820,7 +826,7 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
             int stack_words = 0;
             for (long i = 0; i < num_args; ++i) {
                 int agg_size = (agg_sizes && i < agg_sizes->count) ? agg_sizes->data[i] : 0;
-                int agg_float = (agg_float_classes && i < agg_float_classes->count) ? agg_float_classes->data[i] : 0;
+                int agg_float = arm64_hfa_class((agg_float_classes && i < agg_float_classes->count) ? agg_float_classes->data[i] : 0);
                 int p_float = (param_floats_for_agg && i < param_floats_for_agg->count) ? param_floats_for_agg->data[i] : 0;
                 int words = (agg_size > 16) ? 1 : ((agg_size > 0) ? ((agg_size + 7) / 8) : 1);
                 if (agg_size > 0) {
@@ -883,7 +889,7 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                 }
                 for (long i = 0; i < num_args; ++i) {
                     int agg_size = (agg_sizes && i < agg_sizes->count) ? agg_sizes->data[i] : 0;
-                    int agg_float = (agg_float_classes && i < agg_float_classes->count) ? agg_float_classes->data[i] : 0;
+                    int agg_float = arm64_hfa_class((agg_float_classes && i < agg_float_classes->count) ? agg_float_classes->data[i] : 0);
                     int p_float = (param_floats_for_agg && i < param_floats_for_agg->count) ? param_floats_for_agg->data[i] : 0;
                     int words = (agg_size > 16) ? 1 : ((agg_size > 0) ? ((agg_size + 7) / 8) : 1);
                     int src_off = stack_bytes + (int)(num_args - 1 - i) * 16;
@@ -1209,7 +1215,7 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
         } else if (inst->op == IR_RET_AGG) {
             int ret_size = inst->value;
             sb_append(&out, "    ldr x9, [sp], #16\n"); // src_addr
-            if (fn->return_aggregate_float_class) {
+            if (arm64_hfa_class(fn->return_aggregate_float_class)) {
                 int elem = agg_float_elem_size(fn->return_aggregate_float_class);
                 int count = agg_float_count(fn->return_aggregate_float_class);
                 for (int e = 0; e < count; ++e) {

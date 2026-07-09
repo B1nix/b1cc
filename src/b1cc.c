@@ -203,6 +203,7 @@ int main(int argc, char **argv) {
     bool pic_mode = false;
     bool freestanding = false;
     bool nostdlib = false;
+    bool shared = false;
 
     StringArray inputs;
     string_array_init(&inputs);
@@ -245,6 +246,8 @@ int main(int argc, char **argv) {
             freestanding = true;
         } else if (strcmp(arg, "-nostdlib") == 0) {
             nostdlib = true;
+        } else if (strcmp(arg, "-shared") == 0) {
+            shared = true;   /* emitted explicitly into the link command below */
         } else if (strcmp(arg, "-o") == 0) {
             if (++i == argc)
                 diagnostics_fatal("-o needs a path");
@@ -319,7 +322,7 @@ int main(int argc, char **argv) {
     if (strcmp(target, "x86_64-b1nix") == 0 || strcmp(target, "i386-b1nix") == 0 || strcmp(target, "x86-b1nix") == 0 || is_kernel_target) {
         const char *env_cc = getenv("B1NIX_CC");
         cc = env_cc ? env_cc : "../b1nix/tools/toolchain/bin/b1nix-cc";
-        if (!is_kernel_target && !preprocess_only && !emit_asm && !exists(cc))
+        if (!is_kernel_target && !preprocess_only && !emit_asm && !shared && !exists(cc))
             diagnostics_fatal("set B1NIX_CC or run from next to ../b1nix");
         
         /* Cross-assembler for .S files: use clang directly, not b1nix-cc
@@ -336,6 +339,12 @@ int main(int argc, char **argv) {
         snprintf(msg, sizeof(msg), "linking/assembling is not supported for target %s", target);
         diagnostics_fatal(msg);
     }
+
+    /* ELF targets whose shared libraries b1cc links with ld.lld directly. */
+    bool elf_target = (strcmp(target, "x86_64-b1nix") == 0 || strcmp(target, "i386-b1nix") == 0 ||
+                       strcmp(target, "x86-b1nix") == 0 || is_kernel_target);
+    bool ld_emu_x86_64 = (strcmp(target, "x86_64-b1nix") == 0 || strcmp(target, "x86_64-elf") == 0 ||
+                          strcmp(target, "x86_64-unknown-elf") == 0);
 
     if (preprocess_only) {
         StringBuilder prep_out;
@@ -596,7 +605,9 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    if (inputs.count == 1 && !compile_only && !emit_asm && !preprocess_only) {
+    /* -shared is handled by the general link loop below (host cc -shared, or
+     * ld.lld for ELF targets); keep it out of the single-input cc fast path. */
+    if (inputs.count == 1 && !compile_only && !emit_asm && !preprocess_only && !shared) {
         const char *inp = inputs.data[0];
         if (has_suffix(inp, ".o") || has_suffix(inp, ".a")) {
             const char *out_name = (!output || !output[0]) ? "a.out" : output;
@@ -801,6 +812,21 @@ int main(int argc, char **argv) {
         string_array_push(&temp_objects, arena_strdup(&arena, tmp_obj));
         string_array_push(&link_cmd_args, arena_strdup(&arena, tmp_obj));
 
+        /* For -shared on an ELF target we link with ld.lld directly (b1nix-cc
+         * only knows static executables), so produce the object with b1cc's own
+         * ELF writer — the shared library is built from b1cc-native objects. */
+        if (shared && elf_target) {
+            unlink(tmp_asm);
+            ElfObject obj = elf_write_object(asm_text, target, inp, &arena);
+            if (!obj.data || obj.size == 0)
+                diagnostics_fatal("elf_write_object: failed to produce ELF object");
+            FILE *of = fopen(tmp_obj, "wb");
+            if (!of) diagnostics_fatal("cannot write shared-object input");
+            fwrite(obj.data, 1, obj.size, of);
+            fclose(of);
+            continue;
+        }
+
         StringBuilder cmd;
         sb_init(&cmd);
         sb_append(&cmd, prefix);
@@ -831,8 +857,19 @@ int main(int argc, char **argv) {
         const char *out_name = (!output || !output[0]) ? "a.out" : output;
         StringBuilder link_cmd;
         sb_init(&link_cmd);
-        sb_append(&link_cmd, prefix);
-        sb_append(&link_cmd, shell_quote(cc, &arena));
+        if (shared && elf_target) {
+            /* b1nix-cc only produces static executables, so link the shared
+             * object with ld.lld directly (override with $B1NIX_LD). Pass the
+             * linker script / soname / imported libs via ordinary link flags. */
+            const char *ld = getenv("B1NIX_LD");
+            sb_append(&link_cmd, shell_quote(ld ? ld : "ld.lld", &arena));
+            sb_append(&link_cmd, ld_emu_x86_64 ? " -m elf_x86_64" : " -m elf_i386");
+            sb_append(&link_cmd, " -shared");
+        } else {
+            sb_append(&link_cmd, prefix);
+            sb_append(&link_cmd, shell_quote(cc, &arena));
+            if (shared) sb_append(&link_cmd, " -shared");
+        }
         for (int k = 0; k < link_cmd_args.count; ++k) {
             sb_append(&link_cmd, " ");
             sb_append(&link_cmd, shell_quote(link_cmd_args.data[k], &arena));

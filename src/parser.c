@@ -116,11 +116,33 @@ static Node *create_node(ParserState *p, const char *op, int line, int col) {
     return node;
 }
 
-static void parser_set_struct_float_aggregate_class(ParserState *p, const char *tag, int hfa_valid, int hfa_count, int hfa_elem_size) {
+static void parser_set_struct_float_aggregate_class(ParserState *p, const char *tag, int hfa_valid, int hfa_count, int hfa_elem_size, int sysv_mixed) {
     if (!tag || !tag[0]) return;
-    int hfa_class = (hfa_valid && hfa_count > 0) ? ((hfa_count << 8) | hfa_elem_size) : 0;
-    hashmap_put(&p->global_struct_float_aggregate_classes, tag, nullptr, hfa_class);
-    ir_set_struct_float_aggregate_class(tag, hfa_class);
+    int cls = (hfa_valid && hfa_count > 0) ? ((hfa_count << 8) | hfa_elem_size) : 0;
+    if (cls == 0 && sysv_mixed) cls = sysv_mixed;   /* System V mixed int/float aggregate */
+    hashmap_put(&p->global_struct_float_aggregate_classes, tag, nullptr, cls);
+    ir_set_struct_float_aggregate_class(tag, cls);
+}
+
+/* Fold one struct field (byte range [off, off+total)) into per-eightbyte System V
+ * class accumulators. is_float distinguishes SSE (float/double) from INTEGER. */
+static void sysv_fold_field(int *eb_int, int *eb_sse, int *sysv_ok, int off, int total, int is_float) {
+    if (total <= 0) return;
+    if (off + total > 16) { *sysv_ok = 0; return; }   /* >16 bytes -> MEMORY class */
+    for (int ebi = off / 8; ebi <= (off + total - 1) / 8; ebi++) {
+        if (ebi < 2) { if (is_float) eb_sse[ebi] = 1; else eb_int[ebi] = 1; }
+    }
+}
+
+/* Encode the mixed sentinel from accumulated eightbyte classes, or 0 if the
+ * struct is not a clean two-eightbyte int/float mix. */
+static int sysv_mixed_class(const int *eb_int, const int *eb_sse, int sysv_ok) {
+    if (!sysv_ok) return 0;
+    int c0 = eb_int[0] ? 1 : (eb_sse[0] ? 2 : 0);
+    int c1 = eb_int[1] ? 1 : (eb_sse[1] ? 2 : 0);
+    if ((c0 == 1 && c1 == 2) || (c0 == 2 && c1 == 1))
+        return SYSV_MIXED_FLAG | c0 | (c1 << 4);
+    return 0;
 }
 
 static const char *infer_struct_tag(const ParserState *p, const Node *node) {
@@ -787,6 +809,8 @@ static int parse_base_type(ParserState *p) {
             int hfa_valid = !is_union;
             int hfa_elem_size = 0;
             int hfa_count = 0;
+            int sysv_eb_int[2] = {0, 0}, sysv_eb_sse[2] = {0, 0};
+            int sysv_ok = !is_union;   /* per-eightbyte SysV class only for plain structs */
             int has_flexible_array = 0;
             HashMap *fields = malloc(sizeof(HashMap));
             hashmap_init(fields, 16);
@@ -938,6 +962,7 @@ static int parse_base_type(ParserState *p) {
                     long_array_init(field_dims);
                     if (!is_bitfield && strcmp(peek(p), "[") == 0) {
                         hfa_valid = 0;
+                        sysv_ok = 0;   /* array fields: use existing (integer) classification */
                         while (strcmp(peek(p), "[") == 0) {
                             take(p, "[");
                             long dim = 0;
@@ -957,6 +982,7 @@ static int parse_base_type(ParserState *p) {
                     if (align > 8) align = 8;
 
                     if (is_bitfield) {
+                        sysv_ok = 0;   /* bitfields: use existing classification */
                         long_array_free(field_dims);
                         free(field_dims);
                         int w = bit_width;
@@ -1000,6 +1026,7 @@ static int parse_base_type(ParserState *p) {
                         }
                         if (tag[0] && f_tag[0]) {
                             hfa_valid = 0;
+                            sysv_ok = 0;   /* nested aggregate field: bail to existing classification */
                             char key[256];
                             snprintf(key, sizeof(key), "%s.%s", tag, field_name);
                             hashmap_put(&p->global_struct_field_tags, arena_strdup(p->arena, key), (void *)f_tag, 0);
@@ -1021,6 +1048,8 @@ static int parse_base_type(ParserState *p) {
                         hashmap_put(&p->global_field_offsets, field_name, nullptr, offset);
                         hashmap_put(&p->global_field_sizes, field_name, nullptr, field_size);
                         int this_field_total = (int)(field_size * arr_count);
+                        sysv_fold_field(sysv_eb_int, sysv_eb_sse, &sysv_ok, offset, this_field_total,
+                                        (stars == 0 && field_base_is_float));
                         if (tag[0]) {
                             char key[256];
                             snprintf(key, sizeof(key), "%s.%s", tag, field_name);
@@ -1074,7 +1103,8 @@ static int parse_base_type(ParserState *p) {
                 hashmap_put(&p->global_structs, tag, fields, 0);
                 hashmap_put(&p->global_struct_sizes, tag, nullptr, base_size);
                 hashmap_put(&p->global_struct_alignments, tag, nullptr, struct_alignment);
-                parser_set_struct_float_aggregate_class(p, tag, hfa_valid, hfa_count, hfa_elem_size);
+                parser_set_struct_float_aggregate_class(p, tag, hfa_valid, hfa_count, hfa_elem_size,
+                                                        sysv_mixed_class(sysv_eb_int, sysv_eb_sse, sysv_ok));
             } else {
                 hashmap_free(fields);
                 free(fields);
@@ -3336,7 +3366,9 @@ static Node *stmt(ParserState *p) {
             fields_alloc->size = fields.size;
             hashmap_put(&p->global_structs, tag, fields_alloc, 0);
             hashmap_put(&p->global_struct_sizes, tag, nullptr, struct_byte_size);
-            parser_set_struct_float_aggregate_class(p, tag, hfa_valid, hfa_count, hfa_elem_size);
+            /* Function-local struct definitions don't get System V mixed
+             * classification yet (named edge); pass 0 for the mixed sentinel. */
+            parser_set_struct_float_aggregate_class(p, tag, hfa_valid, hfa_count, hfa_elem_size, 0);
         } else {
             hashmap_free(&fields);
         }
