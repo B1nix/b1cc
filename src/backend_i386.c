@@ -149,15 +149,21 @@ static const char *i386_emit_globals(TargetBackend *self, const IrGlobalVarArray
     return res;
 }
 
-static const char *get_operand_reg_i386(const char *constraint, int op_idx, const char **default_regs) {
+static const char *get_operand_reg_i386(const char *constraint, int op_idx, const char **default_regs, int num_regs) {
     if (strchr(constraint, 'a')) return "%eax";
     if (strchr(constraint, 'b')) return "%ebx";
     if (strchr(constraint, 'c')) return "%ecx";
     if (strchr(constraint, 'd')) return "%edx";
     if (strchr(constraint, 'S')) return "%esi";
     if (strchr(constraint, 'D')) return "%edi";
+    /* Clamp generic operands to the fixed scratch pool — see the x86_64 backend's
+     * get_operand_reg for the rationale (asm with more generic operands than
+     * pooled registers, e.g. the syscall wrapper, must not read past the pool). */
+    if (op_idx >= num_regs) op_idx = num_regs - 1;
+    if (op_idx < 0) op_idx = 0;
     return default_regs[op_idx];
 }
+#define I386_NUM_OP_REGS ((int)(sizeof(i386_op_regs) / sizeof(i386_op_regs[0])))
 
 static const char *substitute_asm_operands_i386(const char *temp, int num_operands, const char **operand_reprs, Arena *arena) {
     StringBuilder sb;
@@ -307,7 +313,7 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
                         for (int i = num_ops - 1; i >= 0; --i) {
                             const char *c = constraints[i];
                             if (c[0] != '=') {
-                                const char *op_reg = get_operand_reg_i386(c, i, i386_op_regs);
+                                const char *op_reg = get_operand_reg_i386(c, i, i386_op_regs, I386_NUM_OP_REGS);
                                 sb_appendf(&out, "    popl %s\n", op_reg);
                             }
                         }
@@ -316,7 +322,7 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
                             const char *c = constraints[i];
                             if (c[0] == '=' || c[0] == '+') {
                                 if (strchr(c, 'm')) {
-                                    const char *op_reg = get_operand_reg_i386(c, i, i386_op_regs);
+                                    const char *op_reg = get_operand_reg_i386(c, i, i386_op_regs, I386_NUM_OP_REGS);
                                     sb_appendf(&out, "    popl %s\n", op_reg);
                                 } else {
                                     sb_appendf(&out, "    popl %s\n", i386_dest_regs[out_idx]);
@@ -327,7 +333,7 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
                         const char *operand_reprs[32];
                         for (int i = 0; i < num_ops; ++i) {
                             const char *c = constraints[i];
-                            const char *op_reg = get_operand_reg_i386(c, i, i386_op_regs);
+                            const char *op_reg = get_operand_reg_i386(c, i, i386_op_regs, I386_NUM_OP_REGS);
                             if (strchr(c, 'm')) {
                                 char repr[64];
                                 snprintf(repr, sizeof(repr), "(%s)", op_reg);
@@ -343,7 +349,7 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
                             const char *c = constraints[i];
                             if (c[0] == '=' || c[0] == '+') {
                                 if (!strchr(c, 'm')) {
-                                    const char *op_reg = get_operand_reg_i386(c, i, i386_op_regs);
+                                    const char *op_reg = get_operand_reg_i386(c, i, i386_op_regs, I386_NUM_OP_REGS);
                                     sb_appendf(&out, "    movl %s, (%s)\n", op_reg, i386_dest_regs[out_count]);
                                     out_count++;
                                 }

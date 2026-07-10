@@ -12,11 +12,42 @@
 #include "backend.h"
 #include "elf_writer.h"
 #include "macho_writer.h"
+#include "linker.h"
 #include "builtin_headers.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <dirent.h>
+#include <sys/stat.h>
+
+/* In-process recursive remove, replacing `rm -rf <path>` shell-outs. On B1NIX
+ * there is no /bin/sh, so system("rm -rf ...") silently fails (returns 127) and
+ * leaks temp dirs; do it directly with libc so the self-host path is shell-free.
+ * Best-effort: ignores errors, mirroring `rm -rf`. */
+static void remove_tree(const char *path) {
+    if (!path || !path[0]) return;
+    DIR *d = opendir(path);
+    if (d) {
+        struct dirent *ent;
+        while ((ent = readdir(d)) != NULL) {
+            if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
+                continue;
+            char child[2048];
+            snprintf(child, sizeof(child), "%s/%s", path, ent->d_name);
+            struct stat st;
+            if (lstat(child, &st) == 0 && S_ISDIR(st.st_mode))
+                remove_tree(child);
+            else
+                unlink(child);
+        }
+        closedir(d);
+        rmdir(path);
+        return;
+    }
+    /* Not a directory (or unreadable): try removing it as a plain file. */
+    unlink(path);
+}
 
 static char *read_file(const char *path, Arena *arena) {
     FILE *f = fopen(path, "r");
@@ -119,10 +150,10 @@ static StringArray compile_freestanding_runtime(const char *target, const char *
 
         char tmp_obj[1024];
         snprintf(tmp_obj, sizeof(tmp_obj), "%s/%s.o", dir, runtime_files[i]);
-        /* mkdir -p for subdirs */
-        char mkdir_cmd[1024];
-        snprintf(mkdir_cmd, sizeof(mkdir_cmd), "mkdir -p %s/runtime", dir);
-        system(mkdir_cmd);
+        /* mkdir for the runtime/ subdir (shell-free; ignore EEXIST). */
+        char subdir[1024];
+        snprintf(subdir, sizeof(subdir), "%s/runtime", dir);
+        mkdir(subdir, 0700);
 
         bool is_kernel = (strstr(target, "elf") != NULL);
         bool use_native = (strstr(target, "b1nix") != NULL || is_kernel);
@@ -204,11 +235,28 @@ int main(int argc, char **argv) {
     bool freestanding = false;
     bool nostdlib = false;
     bool shared = false;
+    bool pie = false;
+    const char *soname = NULL;
+    /* M33: use b1cc's internal static linker instead of shelling out to
+     * b1nix-cc/ld.lld. Enabled by --internal-link or B1CC_INTERNAL_LD=1. On
+     * B1NIX itself (compiled with -Db1nix) there is no ld.lld / b1nix-cc, so the
+     * internal linker is the default; B1CC_INTERNAL_LD=0 can still force it off. */
+#ifdef b1nix
+    bool internal_link = true;
+    { const char *e = getenv("B1CC_INTERNAL_LD"); if (e && e[0] == '0') internal_link = false; }
+#else
+    bool internal_link = (getenv("B1CC_INTERNAL_LD") != NULL);
+#endif
 
     StringArray inputs;
     string_array_init(&inputs);
     StringArray link_flags;
     string_array_init(&link_flags);
+    /* extra DT_NEEDED sonames for the internal dynamic (PIE) link, from -l<name>
+     * (mapped to lib<name>.so.1) and --needed=<soname>. libc.so.1 is always added
+     * implicitly by the PIE path. */
+    StringArray extra_needed;
+    string_array_init(&extra_needed);
     const char *output = "";
     const char *target = "arm64-darwin";
 
@@ -246,8 +294,14 @@ int main(int argc, char **argv) {
             freestanding = true;
         } else if (strcmp(arg, "-nostdlib") == 0) {
             nostdlib = true;
+        } else if (strcmp(arg, "--internal-link") == 0) {
+            internal_link = true;
         } else if (strcmp(arg, "-shared") == 0) {
             shared = true;   /* emitted explicitly into the link command below */
+        } else if (strcmp(arg, "--pie") == 0 || strcmp(arg, "-pie") == 0) {
+            pie = true;
+        } else if (strncmp(arg, "--soname=", 9) == 0) {
+            soname = arg + 9;
         } else if (strcmp(arg, "-o") == 0) {
             if (++i == argc)
                 diagnostics_fatal("-o needs a path");
@@ -282,6 +336,24 @@ int main(int argc, char **argv) {
         } else if (strncmp(arg, "-isystem", 8) == 0) {
             /* silently ignore -isystem (b1cc uses its own preprocessor) */
             if (strcmp(arg, "-isystem") == 0) { ++i; } /* skip the path argument */
+        } else if (strncmp(arg, "--needed=", 9) == 0) {
+            /* explicit DT_NEEDED soname for the internal dynamic link */
+            string_array_push(&extra_needed, arg + 9);
+        } else if (strncmp(arg, "-l", 2) == 0) {
+            /* -lfoo / -l foo -> DT_NEEDED libfoo.so.1 (B1NIX soname convention).
+             * Symbols the library provides are already lowered as dynamic
+             * imports by the internal linker; this only records the dependency. */
+            const char *nm;
+            if (strcmp(arg, "-l") == 0) {
+                if (++i == argc) diagnostics_fatal("-l needs a library name");
+                nm = argv[i];
+            } else {
+                nm = arg + 2;
+            }
+            size_t nl = strlen(nm);
+            char *soname_dep = (char *)arena_alloc(&arena, nl + 12);
+            snprintf(soname_dep, nl + 12, "lib%s.so.1", nm);
+            string_array_push(&extra_needed, soname_dep);
         } else if (arg[0] == '-' && strcmp(arg, "-") != 0) {
             string_array_push(&link_flags, arg);
         } else {
@@ -330,7 +402,9 @@ int main(int argc, char **argv) {
     if (strcmp(target, "x86_64-b1nix") == 0 || strcmp(target, "i386-b1nix") == 0 || strcmp(target, "x86-b1nix") == 0 || is_kernel_target) {
         const char *env_cc = getenv("B1NIX_CC");
         cc = env_cc ? env_cc : "../b1nix/tools/toolchain/bin/b1nix-cc";
-        if (!is_kernel_target && !preprocess_only && !emit_asm && !shared && !exists(cc))
+        /* Internal linking never shells out to b1nix-cc, so don't require it —
+         * this is the on-device case where b1nix-cc/ld.lld don't exist. */
+        if (!internal_link && !is_kernel_target && !preprocess_only && !emit_asm && !shared && !exists(cc))
             diagnostics_fatal("set B1NIX_CC or run from next to ../b1nix");
         
         /* Cross-assembler for .S files: use clang directly, not b1nix-cc
@@ -405,9 +479,7 @@ int main(int argc, char **argv) {
         string_array_free(&link_flags);
         string_array_free(&preprocessor_driver_include_dirs);
         if (builtin_inc_dir) {
-            char rm_cmd[1024];
-            snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf '%s'", builtin_inc_dir);
-            system(rm_cmd);
+            remove_tree(builtin_inc_dir);
             free((void *)builtin_inc_dir);
         }
         // clean preprocessor macros params
@@ -448,9 +520,7 @@ int main(int argc, char **argv) {
         string_array_free(&link_flags);
         string_array_free(&preprocessor_driver_include_dirs);
         if (builtin_inc_dir) {
-            char rm_cmd[1024];
-            snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf '%s'", builtin_inc_dir);
-            system(rm_cmd);
+            remove_tree(builtin_inc_dir);
             free((void *)builtin_inc_dir);
         }
         for (int b = 0; b < preprocessor_driver_macros.bucket_count; ++b) {
@@ -596,9 +666,7 @@ int main(int argc, char **argv) {
         string_array_free(&link_flags);
         string_array_free(&preprocessor_driver_include_dirs);
         if (builtin_inc_dir) {
-            char rm_cmd[1024];
-            snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf '%s'", builtin_inc_dir);
-            system(rm_cmd);
+            remove_tree(builtin_inc_dir);
             free((void *)builtin_inc_dir);
         }
         for (int b = 0; b < preprocessor_driver_macros.bucket_count; ++b) {
@@ -613,9 +681,10 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    /* -shared is handled by the general link loop below (host cc -shared, or
-     * ld.lld for ELF targets); keep it out of the single-input cc fast path. */
-    if (inputs.count == 1 && !compile_only && !emit_asm && !preprocess_only && !shared) {
+    /* M33: -shared is handled by the internal linker in the single-input path
+     * below (for ELF targets). For non-ELF targets or multi-input, fall through
+     * to the general link loop (host cc -shared). */
+    if (inputs.count == 1 && !compile_only && !emit_asm && !preprocess_only) {
         const char *inp = inputs.data[0];
         if (has_suffix(inp, ".o") || has_suffix(inp, ".a")) {
             const char *out_name = (!output || !output[0]) ? "a.out" : output;
@@ -640,9 +709,7 @@ int main(int argc, char **argv) {
             string_array_free(&link_flags);
             string_array_free(&preprocessor_driver_include_dirs);
             if (builtin_inc_dir) {
-                char rm_cmd[1024];
-                snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf '%s'", builtin_inc_dir);
-                system(rm_cmd);
+                remove_tree(builtin_inc_dir);
                 free((void *)builtin_inc_dir);
             }
             for (int b = 0; b < preprocessor_driver_macros.bucket_count; ++b) {
@@ -681,9 +748,7 @@ int main(int argc, char **argv) {
             string_array_free(&link_flags);
             string_array_free(&preprocessor_driver_include_dirs);
             if (builtin_inc_dir) {
-                char rm_cmd[1024];
-                snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf '%s'", builtin_inc_dir);
-                system(rm_cmd);
+                remove_tree(builtin_inc_dir);
                 free((void *)builtin_inc_dir);
             }
             for (int b = 0; b < preprocessor_driver_macros.bucket_count; ++b) {
@@ -700,7 +765,82 @@ int main(int argc, char **argv) {
 
         diagnostics_filepath = inp;
         const char *asm_text = backend_compile_asm(read_file(inp, &arena), target, mcmodel, dump_ast, dump_ir, &arena);
-        
+
+        /* M33: internal linker path (x86_64-b1nix). Produce a native ELF object
+         * in-process, then link it with b1cc's own linker — no b1nix-cc/ld.lld
+         * shell-out. Handles static, PIE, and shared modes. */
+        if (internal_link && strcmp(target, "x86_64-b1nix") == 0 && !freestanding) {
+            const char *out_name = (!output || !output[0]) ? "a.out" : output;
+            ElfObject obj = elf_write_object(asm_text, target, inp, &arena);
+            if (!obj.data || obj.size == 0)
+                diagnostics_fatal("elf_write_object: failed to produce ELF object");
+            char tmp_obj[] = "/tmp/b1cc-XXXXXX.o";
+            int ofd = mkstemps(tmp_obj, 2);
+            if (ofd < 0) diagnostics_fatal("cannot create temporary object");
+            close(ofd);
+            FILE *tf = fopen(tmp_obj, "wb");
+            if (!tf) diagnostics_fatal("cannot write temporary object");
+            fwrite(obj.data, 1, obj.size, tf);
+            fclose(tf);
+
+            LinkMode mode = shared ? LINK_SHARED : (pic_mode || pie ? LINK_PIE : LINK_STATIC_EXE);
+            int lrc;
+            if (mode == LINK_STATIC_EXE) {
+                const char *env_crt0 = getenv("B1CC_CRT0");
+                const char *env_libc = getenv("B1CC_LIBC");
+#ifdef b1nix
+                const char *crt0 = env_crt0 ? env_crt0 : "/lib/b1cc/crt0.o";
+                const char *libc = env_libc ? env_libc : "/lib/b1cc/libb1nix.a";
+#else
+                const char *crt0 = env_crt0 ? env_crt0 : "../b1nix/userspace/build/x86_64/crt/crt0.o";
+                const char *libc = env_libc ? env_libc : "../b1nix/userspace/build/x86_64/libb1nix.a";
+#endif
+                const char *inputs_arr[2] = { crt0, tmp_obj };
+                const char *arch_arr[1] = { libc };
+                LinkRequest lr = {
+                    .inputs = inputs_arr, .n_inputs = 2,
+                    .archives = arch_arr, .n_archives = 1,
+                    .out_path = out_name, .base_va = 0x2000000, .entry = "_start",
+                };
+                lrc = elf_link_static(&lr, &arena);
+            } else if (mode == LINK_PIE) {
+                const char *env_crt0dyn = getenv("B1CC_CRT0_DYNAMIC");
+#ifdef b1nix
+                const char *crt0dyn = env_crt0dyn ? env_crt0dyn : "/lib/b1cc/crt0-dynamic.o";
+#else
+                const char *crt0dyn = env_crt0dyn ? env_crt0dyn : "../b1nix/userspace/build/x86_64/crt/crt0-dynamic.o";
+#endif
+                /* DT_NEEDED = libc.so.1 (implicit) + any -l/--needed sonames */
+                int n_needed = 1 + (int)extra_needed.count;
+                const char **needed_arr = (const char **)arena_alloc(&arena, sizeof(char *) * n_needed);
+                needed_arr[0] = "libc.so.1";
+                for (int k = 0; k < (int)extra_needed.count; k++)
+                    needed_arr[1 + k] = extra_needed.data[k];
+                const char *inputs_arr[2] = { crt0dyn, tmp_obj };
+                LinkRequest lr = {
+                    .inputs = inputs_arr, .n_inputs = 2,
+                    .out_path = out_name, .base_va = 0, .entry = "_start",
+                    .mode = LINK_PIE,
+                    .needed = needed_arr, .n_needed = n_needed,
+                };
+                lrc = elf_link(&lr, &arena);
+            } else {
+                /* LINK_SHARED */
+                const char *inputs_arr[1] = { tmp_obj };
+                LinkRequest lr = {
+                    .inputs = inputs_arr, .n_inputs = 1,
+                    .out_path = out_name, .base_va = 0,
+                    .mode = LINK_SHARED,
+                    .soname = soname,
+                };
+                lrc = elf_link(&lr, &arena);
+            }
+            unlink(tmp_obj);
+            if (builtin_inc_dir) { remove_tree(builtin_inc_dir); free((void *)builtin_inc_dir); }
+            arena_free(&arena);
+            return lrc == 0 ? 0 : 1;
+        }
+
         char tmp_asm[] = "/tmp/b1cc-XXXXXX.s";
         int fd = mkstemps(tmp_asm, 2);
         if (fd < 0) diagnostics_fatal("cannot create temporary file");
@@ -746,6 +886,10 @@ int main(int argc, char **argv) {
         string_array_free(&inputs);
         string_array_free(&link_flags);
         string_array_free(&preprocessor_driver_include_dirs);
+        if (builtin_inc_dir) {
+            remove_tree(builtin_inc_dir);
+            free((void *)builtin_inc_dir);
+        }
         for (int b = 0; b < preprocessor_driver_macros.bucket_count; ++b) {
             HashMapEntry *curr = &preprocessor_driver_macros.entries[b];
             if (curr->key && curr->key != TOMBSTONE) {
@@ -923,9 +1067,7 @@ int main(int argc, char **argv) {
     string_array_free(&preprocessor_driver_include_dirs);
     /* Clean up bundled freestanding headers temp dir */
     if (builtin_inc_dir) {
-        char rm_cmd[1024];
-        snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf '%s'", builtin_inc_dir);
-        system(rm_cmd);
+        remove_tree(builtin_inc_dir);
         free((void *)builtin_inc_dir);
     }
     for (int b = 0; b < preprocessor_driver_macros.bucket_count; ++b) {

@@ -325,6 +325,16 @@ static const char *substitute_asm_operands_arm64(const char *temp, int num_opera
 static const char *arm64_op_regs[] = {"x9", "x10", "x11", "x12", "x13", "x14", "x15"};
 static const char *arm64_dest_regs[] = {"x13", "x14", "x15"};
 
+/* Bounded access to the fixed scratch pool: an asm with more generic operands
+ * than pooled registers (e.g. the syscall wrapper) must not index past the
+ * array — see the x86_64 backend's get_operand_reg for the rationale. */
+static const char *arm64_op_reg(int i) {
+    int n = (int)(sizeof(arm64_op_regs) / sizeof(arm64_op_regs[0]));
+    if (i >= n) i = n - 1;
+    if (i < 0) i = 0;
+    return arm64_op_regs[i];
+}
+
 static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn, Arena *arena) {
     (void)self;
     StringBuilder out;
@@ -524,7 +534,7 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                         for (int i = num_ops - 1; i >= 0; --i) {
                             const char *c = constraints[i];
                             if (c[0] != '=') {
-                                sb_appendf(&out, "    ldr %s, [sp], #16\n", arm64_op_regs[i]);
+                                sb_appendf(&out, "    ldr %s, [sp], #16\n", arm64_op_reg(i));
                             }
                         }
                         int out_idx = num_outs - 1;
@@ -532,7 +542,7 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                             const char *c = constraints[i];
                             if (c[0] == '=' || c[0] == '+') {
                                 if (strchr(c, 'm')) {
-                                    sb_appendf(&out, "    ldr %s, [sp], #16\n", arm64_op_regs[i]);
+                                    sb_appendf(&out, "    ldr %s, [sp], #16\n", arm64_op_reg(i));
                                 } else {
                                     sb_appendf(&out, "    ldr %s, [sp], #16\n", arm64_dest_regs[out_idx]);
                                     out_idx--;
@@ -544,10 +554,10 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                             const char *c = constraints[i];
                             if (strchr(c, 'm')) {
                                 char repr[64];
-                                snprintf(repr, sizeof(repr), "[%s]", arm64_op_regs[i]);
+                                snprintf(repr, sizeof(repr), "[%s]", arm64_op_reg(i));
                                 operand_reprs[i] = arena_strdup(arena, repr);
                             } else {
-                                operand_reprs[i] = arm64_op_regs[i];
+                                operand_reprs[i] = arm64_op_reg(i);
                             }
                         }
                         const char *substituted = substitute_asm_operands_arm64(template, num_ops, operand_reprs, arena);
@@ -557,7 +567,7 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                             const char *c = constraints[i];
                             if (c[0] == '=' || c[0] == '+') {
                                 if (!strchr(c, 'm')) {
-                                    sb_appendf(&out, "    str %s, [%s]\n", arm64_op_regs[i], arm64_dest_regs[out_count]);
+                                    sb_appendf(&out, "    str %s, [%s]\n", arm64_op_reg(i), arm64_dest_regs[out_count]);
                                     out_count++;
                                 }
                             }

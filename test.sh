@@ -1918,3 +1918,8 @@ rc=$?
 set -e
 test "$rc" = 0
 echo "ok m29_atomic_ops"
+
+# M33: internal static-linker differential (x86_64-b1nix). Self-skips when the
+# B1NIX build tree / clang / ld.lld are unavailable, so it is a no-op on hosts
+# without the toolchain.
+sh tests/internal_link_diff.sh

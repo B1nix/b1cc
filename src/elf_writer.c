@@ -375,6 +375,21 @@ static uint8_t sib_byte(int scale_log2, int idx, int base) {
     return (uint8_t)((scale_log2 << 6) | ((idx & 7) << 3) | (base & 7));
 }
 
+/* Encode `op reg, (base,idx,scale)` (an MR/RM instruction with a SIB byte).
+ * `w` selects REX.W (64-bit). `reg` is the register operand (dest for a load
+ * opcode like 0x8B, source for a store opcode like 0x89). Handles extended
+ * registers (r8–r15) and the base==rbp/r13 case (which forces a disp8). */
+static void enc_mem_idx(ByteBuf *text, uint8_t op, int w, int reg, int base, int idx, int scale) {
+    int scale_log2 = (scale == 2) ? 1 : (scale == 4) ? 2 : (scale == 8) ? 3 : 0;
+    if (w || reg >= 8 || base >= 8 || idx >= 8)
+        bb_write8(text, (uint8_t)(0x40 | (w ? 8 : 0) | ((reg >= 8) ? 4 : 0) | ((idx >= 8) ? 2 : 0) | ((base >= 8) ? 1 : 0)));
+    bb_write8(text, op);
+    int use_disp8 = ((base & 7) == 5); /* mod=00 + base=rbp/r13 means no-base; use disp8=0 */
+    bb_write8(text, (uint8_t)((use_disp8 ? 0x40 : 0x00) | ((reg & 7) << 3) | 0x04));
+    bb_write8(text, sib_byte(scale_log2, idx, base));
+    if (use_disp8) bb_write8(text, 0);
+}
+
 /*
  * Operand types for the encoder
  */
@@ -409,13 +424,58 @@ typedef struct {
 static OpType reg_optype(const char *s) {
     if (s[1] == 'r') return OT_REG64;          /* %rax, %r8.. */
     if (s[1] == 'e') return OT_REG32;
+    /* 8-bit low byte regs (%al %cl %dl %bl) end in 'l' — MUST be tested before
+     * the 16-bit case below, which would otherwise claim them (they are 3 chars
+     * ending in the alpha 'l'), misclassifying %cl and silently dropping every
+     * variable shift `shl %cl, ...` and byte move through %al/%dl. */
+    if (strlen(s) == 3 && s[2] == 'l') return OT_REG8; /* %al %cl %dl %bl */
     if (strlen(s) == 3 && isalpha((unsigned char)s[2])) {
         /* %ax, %bx .. */
         return OT_REG16;
     }
-    if (strlen(s) == 3 && s[2] == 'l') return OT_REG8; /* %al %cl %dl %bl */
     if (strlen(s) == 4 && (s[3] == 'b' || s[3] == 'w')) return OT_REG8;
     return OT_REG64; /* fallback */
+}
+
+/* Infer the AT&T size suffix ('q'/'l'/'w'/'b') for a suffixless GP mnemonic from
+ * its operands. GNU inline asm (and hand-written asm) commonly omit the suffix,
+ * letting the assembler derive the size from a register operand — e.g. the M22
+ * asm template `mov %2, %0` becomes `mov %rax, %r8`. We pick the width of the
+ * LAST direct (non-addressing) register operand, which in AT&T order is the
+ * destination and never the shift-count %cl, so `shl %cl, %rax` sizes as 'q'.
+ * Registers inside parentheses are addressing operands (always 64-bit) and do
+ * not determine the operation size, so they are skipped. Defaults to 'q'. */
+static char infer_gp_suffix(const char *ops) {
+    char suf = 'q';
+    int seen = 0;
+    for (const char *q = ops; *q; q++) {
+        if (*q != '%') continue;
+        const char *b = q;
+        while (b > ops && (b[-1] == ' ' || b[-1] == '\t')) b--;
+        if (b > ops && b[-1] == '(') continue; /* base/index reg — skip */
+        switch (reg_optype(q)) {
+            case OT_REG64: suf = 'q'; seen = 1; break;
+            case OT_REG32: suf = 'l'; seen = 1; break;
+            case OT_REG16: suf = 'w'; seen = 1; break;
+            case OT_REG8:  suf = 'b'; seen = 1; break;
+            default: break;
+        }
+    }
+    (void)seen;
+    return suf;
+}
+
+/* Is `m` a suffixless GP mnemonic whose size we can derive from its operands?
+ * These are the two-operand ALU/move ops that inline asm emits without a suffix;
+ * suffixed forms (movq/addl/…) don't match and keep their existing handling. */
+static int is_suffixless_gp(const char *m) {
+    static const char *ops[] = {
+        "mov", "add", "sub", "and", "or", "xor", "cmp", "test",
+        "adc", "sbb", "shl", "shr", "sar", "sal", "imul", "xchg", "lea",
+    };
+    for (size_t i = 0; i < sizeof(ops) / sizeof(ops[0]); i++)
+        if (strcmp(m, ops[i]) == 0) return 1;
+    return 0;
 }
 
 /*
@@ -687,6 +747,17 @@ static int x64_encode_line(const char *line, ByteBuf *text, EncCtx *ctx,
 
     p = skip_ws(p);
 
+    /* Normalize suffixless GP mnemonics (inline-asm style, e.g. `mov %rax, %r8`)
+     * to their sized form so the size-specific handlers below encode them
+     * instead of falling through to the nop catch-all. */
+    if (is_suffixless_gp(mnem)) {
+        size_t mlen = strlen(mnem);
+        if (mlen < sizeof(mnem) - 1) {
+            mnem[mlen] = infer_gp_suffix(p);
+            mnem[mlen + 1] = 0;
+        }
+    }
+
     /* ---- pushq ---- */
     if (strcmp(mnem, "pushq") == 0) {
         Operand op = parse_operand_x64(&p);
@@ -834,6 +905,16 @@ static int x64_encode_line(const char *line, ByteBuf *text, EncCtx *ctx,
             return 1;
         }
 
+        /* movq %reg, (%base,%idx,scale) and the load direction — array/word indexing */
+        if (src.type == OT_REG64 && dst.type == OT_MEM_IDX) {
+            enc_mem_idx(text, 0x89, 1, src.reg, dst.base, dst.idx, dst.scale);
+            return 1;
+        }
+        if (src.type == OT_MEM_IDX && dst.type == OT_REG64) {
+            enc_mem_idx(text, 0x8B, 1, dst.reg, src.base, src.idx, src.scale);
+            return 1;
+        }
+
         /* Fallthrough: unexpected operand combo — emit nop and warn */
         bb_write8(text, 0x90);
         return 1;
@@ -872,6 +953,15 @@ static int x64_encode_line(const char *line, ByteBuf *text, EncCtx *ctx,
             bb_write32le(text, 0);
             return 1;
         }
+        /* movl %reg, (%base,%idx,scale) and the load direction — array indexing */
+        if (src.type == OT_REG32 && dst.type == OT_MEM_IDX) {
+            enc_mem_idx(text, 0x89, 0, src.reg, dst.base, dst.idx, dst.scale);
+            return 1;
+        }
+        if (src.type == OT_MEM_IDX && dst.type == OT_REG32) {
+            enc_mem_idx(text, 0x8B, 0, dst.reg, src.base, src.idx, src.scale);
+            return 1;
+        }
         bb_write8(text, 0x90);
         return 1;
     }
@@ -908,10 +998,12 @@ static int x64_encode_line(const char *line, ByteBuf *text, EncCtx *ctx,
         }
         if (src.type == OT_MEM_IDX && dst.type == OT_REG8) {
             /* movb (%rax,%rcx,1), %dl */
-            bb_write8(text, 0x8A);
-            int scale_log2 = (src.scale == 2) ? 1 : (src.scale == 4) ? 2 : (src.scale == 8) ? 3 : 0;
-            bb_write8(text, (uint8_t)(0x00 | ((dst.reg & 7) << 3) | 0x04)); /* SIB follows */
-            bb_write8(text, sib_byte(scale_log2, src.idx, src.base));
+            enc_mem_idx(text, 0x8A, 0, dst.reg, src.base, src.idx, src.scale);
+            return 1;
+        }
+        if (src.type == OT_REG8 && dst.type == OT_MEM_IDX) {
+            /* movb %dl, (%rax,%rcx,1) */
+            enc_mem_idx(text, 0x88, 0, src.reg, dst.base, dst.idx, dst.scale);
             return 1;
         }
         bb_write8(text, 0x90);
@@ -1137,7 +1229,10 @@ static int x64_encode_line(const char *line, ByteBuf *text, EncCtx *ctx,
             return 1;
         }
         if (src.type == OT_REG64 && dst.type == OT_REG64) {
-            enc_rr64(text, 0x3B, dst.reg, src.reg);
+            /* AT&T `cmpq %src,%dst` computes dst-src. enc_rr64 emits the MR form
+             * (r/m=dst, reg=src), so use CMP r/m64,r64 (0x39 → r/m-reg = dst-src),
+             * NOT 0x3B (RM form, reg-r/m = src-dst) which swaps the comparison. */
+            enc_rr64(text, 0x39, dst.reg, src.reg);
             return 1;
         }
         bb_write8(text, 0x90);
@@ -1184,8 +1279,11 @@ static int x64_encode_line(const char *line, ByteBuf *text, EncCtx *ctx,
         Operand src = parse_operand_x64(&p);
         if (*p == ',') p++;
         Operand dst = parse_operand_x64(&p);
-        /* Check for mem[base+off], dst */
-        if (src.type == OT_MEM_BASE) {
+        /* Check for mem[base+off], dst — OT_MEM_INDIR is (%base) with imm==0, so
+         * it shares the OT_MEM_BASE encoding (the imm==0 path below). Without
+         * this, `movsbq (%rax), %rax` (a byte load through a pointer) fell to the
+         * register-form fallthrough and was mis-encoded as `movsbq %al, %rax`. */
+        if (src.type == OT_MEM_BASE || src.type == OT_MEM_INDIR) {
             bb_write8(text, rex(1, dst.reg, src.base));
             bb_write8(text, 0x0F);
             bb_write8(text, 0xBE); /* MOVSX r64, r/m8 */
@@ -1244,6 +1342,27 @@ static int x64_encode_line(const char *line, ByteBuf *text, EncCtx *ctx,
             bb_write32le(text, 0);
             return 1;
         }
+        /* movswq (%base[+off]), dst — word load through a pointer (mirrors the
+         * movsbq memory form; OT_MEM_INDIR is base with imm==0). */
+        if (src.type == OT_MEM_BASE || src.type == OT_MEM_INDIR) {
+            bb_write8(text, rex(1, dst.reg, src.base));
+            bb_write8(text, 0x0F);
+            bb_write8(text, 0xBF); /* MOVSX r64, r/m16 */
+            int rb = src.base & 7, rg = dst.reg & 7;
+            if (src.imm == 0 && rb != 5) {
+                bb_write8(text, modrm_r0(rg, rb));
+                if (rb == 4) bb_write8(text, 0x24);
+            } else if (src.imm >= -128 && src.imm <= 127) {
+                bb_write8(text, modrm_r8(rg, rb));
+                if (rb == 4) bb_write8(text, 0x24);
+                bb_write8(text, (uint8_t)(int8_t)src.imm);
+            } else {
+                bb_write8(text, modrm_r32(rg, rb));
+                if (rb == 4) bb_write8(text, 0x24);
+                bb_write32le(text, (uint32_t)(int32_t)src.imm);
+            }
+            return 1;
+        }
         bb_write8(text, rex(1, dst.reg, src.reg));
         bb_write8(text, 0x0F);
         bb_write8(text, 0xBF); /* MOVSX r64, r/m16 */
@@ -1267,6 +1386,19 @@ static int x64_encode_line(const char *line, ByteBuf *text, EncCtx *ctx,
             rel.type   = src.is_gotpcrel ? R_X86_64_GOTPCREL : R_X86_64_PC32;
             relocarr_push(relocs, &rel);
             bb_write32le(text, 0);
+            return 1;
+        }
+        /* movslq (%base,%idx,scale), %r64 — sign-extend a dword array element */
+        if (src.type == OT_MEM_IDX) {
+            enc_mem_idx(text, 0x63, 1, dst.reg, src.base, src.idx, src.scale);
+            return 1;
+        }
+        if (src.type == OT_MEM_INDIR) {
+            enc_mem_base(text, 0x63, dst.reg, src.base, 0, 1);
+            return 1;
+        }
+        if (src.type == OT_MEM_BASE) {
+            enc_mem_base(text, 0x63, dst.reg, src.base, (int32_t)src.imm, 1);
             return 1;
         }
         bb_write8(text, rex(1, dst.reg, src.reg));
@@ -1683,11 +1815,12 @@ static void parse_asm_x64(const char *asm_text, const char *src_path, AsmModel *
                     sym.shndx   = 0; /* will be filled as .text idx */
                     sym.value   = (uint64_t)m->text.size;
                     sym.size    = 0; /* filled later */
-                    sym.bind    = (strcmp(lname, pending_globl) == 0 ||
-                                   strcmp(lname, pending_type_func) == 0) ? STB_GLOBAL : STB_LOCAL;
-                    /* Check pending_globl */
-                    if (strlen(pending_globl) > 0 && strcmp(lname, pending_globl) == 0)
-                        sym.bind = STB_GLOBAL;
+                    /* Binding follows .globl only. .type @function is emitted for
+                     * BOTH exported and `static` functions (it declares the symbol
+                     * type, not its linkage), so it must NOT force STB_GLOBAL —
+                     * otherwise a static function is wrongly exported (e.g. into a
+                     * shared object's .dynsym). */
+                    sym.bind    = (strcmp(lname, pending_globl) == 0) ? STB_GLOBAL : STB_LOCAL;
                     sym.type    = STT_FUNC;
                     sym.defined = 1;
                     symarr_push(&m->syms, &sym);

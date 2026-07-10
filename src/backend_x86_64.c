@@ -179,15 +179,25 @@ static const char *x86_64_emit_globals(TargetBackend *self, const IrGlobalVarArr
     return res;
 }
 
-static const char *get_operand_reg(const char *constraint, int op_idx, const char **default_regs) {
+static const char *get_operand_reg(const char *constraint, int op_idx, const char **default_regs, int num_regs) {
     if (strchr(constraint, 'a')) return "%rax";
     if (strchr(constraint, 'b')) return "%rbx";
     if (strchr(constraint, 'c')) return "%rcx";
     if (strchr(constraint, 'd')) return "%rdx";
     if (strchr(constraint, 'S')) return "%rsi";
     if (strchr(constraint, 'D')) return "%rdi";
+    /* Generic "r"/"g" operand: assign from the fixed scratch pool. b1cc's
+     * inline-asm lowering is a fixed-pool stack machine, not a real register
+     * allocator, so an asm with more generic operands than pooled registers
+     * (e.g. the 8-operand x86_64 syscall wrapper in <syscall.h>: one output plus
+     * seven "r" inputs) would read past the pool. Clamp to the last slot so the
+     * output stays assemblable; such over-large asm is only correct when the
+     * pool is not exceeded (documented limitation of the M22 asm feature). */
+    if (op_idx >= num_regs) op_idx = num_regs - 1;
+    if (op_idx < 0) op_idx = 0;
     return default_regs[op_idx];
 }
+#define X86_64_NUM_OP_REGS ((int)(sizeof(x86_64_op_regs) / sizeof(x86_64_op_regs[0])))
 
 static const char *substitute_asm_operands(const char *temp, int num_operands, const char **operand_reprs, Arena *arena) {
     StringBuilder sb;
@@ -416,7 +426,7 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                         for (int i = num_ops - 1; i >= 0; --i) {
                             const char *c = constraints[i];
                             if (c[0] != '=') {
-                                const char *op_reg = get_operand_reg(c, i, x86_64_op_regs);
+                                const char *op_reg = get_operand_reg(c, i, x86_64_op_regs, X86_64_NUM_OP_REGS);
                                 sb_appendf(&out, "    popq %s\n", op_reg);
                             }
                         }
@@ -425,7 +435,7 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                             const char *c = constraints[i];
                             if (c[0] == '=' || c[0] == '+') {
                                 if (strchr(c, 'm')) {
-                                    const char *op_reg = get_operand_reg(c, i, x86_64_op_regs);
+                                    const char *op_reg = get_operand_reg(c, i, x86_64_op_regs, X86_64_NUM_OP_REGS);
                                     sb_appendf(&out, "    popq %s\n", op_reg);
                                 } else {
                                     sb_appendf(&out, "    popq %s\n", x86_64_dest_regs[out_idx]);
@@ -436,7 +446,7 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                         const char *operand_reprs[32];
                         for (int i = 0; i < num_ops; ++i) {
                             const char *c = constraints[i];
-                            const char *op_reg = get_operand_reg(c, i, x86_64_op_regs);
+                            const char *op_reg = get_operand_reg(c, i, x86_64_op_regs, X86_64_NUM_OP_REGS);
                             if (strchr(c, 'm')) {
                                 char repr[64];
                                 snprintf(repr, sizeof(repr), "(%s)", op_reg);
@@ -452,7 +462,7 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
                             const char *c = constraints[i];
                             if (c[0] == '=' || c[0] == '+') {
                                 if (!strchr(c, 'm')) {
-                                    const char *op_reg = get_operand_reg(c, i, x86_64_op_regs);
+                                    const char *op_reg = get_operand_reg(c, i, x86_64_op_regs, X86_64_NUM_OP_REGS);
                                     sb_appendf(&out, "    movq %s, (%s)\n", op_reg, x86_64_dest_regs[out_count]);
                                     out_count++;
                                 }
