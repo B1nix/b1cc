@@ -621,6 +621,15 @@ grep -q '_m22_global_asm_marker:' "$tmp/m22_gnu_extensions.s"
 grep -q 'nop' "$tmp/m22_gnu_extensions.s"
 echo "ok m22_gnu_extensions"
 
+./build/b1cc tests/m22_asm_operands.c -o "$tmp/m22_asm_operands"
+set +e
+"$tmp/m22_asm_operands"
+rc=$?
+set -e
+test "$rc" = 0
+echo "ok m22_asm_operands"
+
+
 ./build/b1cc tests/m22_enum_const_expr.c -o "$tmp/m22_enum_const_expr"
 set +e
 "$tmp/m22_enum_const_expr"

@@ -309,9 +309,17 @@ int main(int argc, char **argv) {
         diagnostics_fatal("usage: b1cc [-S] [-c] [-E] [-fdump-ast] [-fdump-ir] input.c ... [-o output]");
 
     if (strcmp(target, "arm64-darwin") == 0) {
+        define_object_macro(&arena, "__aarch64__", "1");
+        define_object_macro(&arena, "B1NIX_U_SYSCALL_H", "1");
+        define_object_macro(&arena, "SYS_GETCPU", "0");
+        define_object_macro(&arena, "SYS_UMASK", "0");
         define_object_macro(&arena, "stdin", "__stdinp");
         define_object_macro(&arena, "stdout", "__stdoutp");
         define_object_macro(&arena, "stderr", "__stderrp");
+    } else if (strcmp(target, "x86_64-b1nix") == 0 || strcmp(target, "x86_64-elf") == 0 || strcmp(target, "x86_64-unknown-elf") == 0) {
+        define_object_macro(&arena, "__x86_64__", "1");
+    } else if (strcmp(target, "i386-b1nix") == 0 || strcmp(target, "i686-elf") == 0 || strcmp(target, "i686-unknown-elf") == 0) {
+        define_object_macro(&arena, "__i386__", "1");
     }
 
     const char *cc = "cc";

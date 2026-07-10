@@ -566,7 +566,7 @@ static void append_string_literal_bytes(ParserState *p, LongArray *out, const ch
     (void)p;
 }
 
-static const char *parse_gnu_asm(ParserState *p, int require_semicolon) {
+static const char *parse_gnu_asm(ParserState *p, Node *asm_node, int require_semicolon) {
     take(p, nullptr);
     if (strcmp(peek(p), "volatile") == 0 || strcmp(peek(p), "__volatile__") == 0) {
         take(p, nullptr);
@@ -582,18 +582,81 @@ static const char *parse_gnu_asm(ParserState *p, int require_semicolon) {
         sb_append(&asm_text, decode_asm_string(p, take(p, nullptr)));
         saw_template = 1;
     }
-    int parens = 1;
-    int has_operands = 0;
-    while (parens > 0 && strcmp(peek(p), "EOF") != 0) {
-        const char *t = take(p, nullptr);
-        if (strcmp(t, "(") == 0) parens++;
-        if (parens == 1 && strcmp(t, ":") == 0) has_operands = 1;
-        if (strcmp(t, ")") == 0) parens--;
+
+    if (strcmp(peek(p), ":") == 0) {
+        take(p, ":");
+        // Outputs
+        while (strcmp(peek(p), ":") != 0 && strcmp(peek(p), ")") != 0 && strcmp(peek(p), "EOF") != 0) {
+            if (strcmp(peek(p), "[") == 0) {
+                take(p, "[");
+                (void)take(p, nullptr); // symbolic name
+                take(p, "]");
+            }
+            const char *constraint = take(p, nullptr); // string literal
+            take(p, "(");
+            Node *expr_val = expr(p);
+            take(p, ")");
+            if (asm_node) {
+                Node *op_node = create_node(p, "init_item", expr_val->line, expr_val->col);
+                op_node->lhs = expr_val;
+                op_node->name = constraint;
+                op_node->value = 0; // output
+                node_array_push(&asm_node->body, op_node);
+            }
+            if (strcmp(peek(p), ",") == 0) {
+                take(p, ",");
+            } else {
+                break;
+            }
+        }
     }
+
+    if (strcmp(peek(p), ":") == 0) {
+        take(p, ":");
+        // Inputs
+        while (strcmp(peek(p), ":") != 0 && strcmp(peek(p), ")") != 0 && strcmp(peek(p), "EOF") != 0) {
+            if (strcmp(peek(p), "[") == 0) {
+                take(p, "[");
+                (void)take(p, nullptr); // symbolic name
+                take(p, "]");
+            }
+            const char *constraint = take(p, nullptr); // string literal
+            take(p, "(");
+            Node *expr_val = expr(p);
+            take(p, ")");
+            if (asm_node) {
+                Node *op_node = create_node(p, "init_item", expr_val->line, expr_val->col);
+                op_node->lhs = expr_val;
+                op_node->name = constraint;
+                op_node->value = 1; // input
+                node_array_push(&asm_node->body, op_node);
+            }
+            if (strcmp(peek(p), ",") == 0) {
+                take(p, ",");
+            } else {
+                break;
+            }
+        }
+    }
+
+    if (strcmp(peek(p), ":") == 0) {
+        take(p, ":");
+        // Clobbers
+        while (strcmp(peek(p), ")") != 0 && strcmp(peek(p), "EOF") != 0) {
+            (void)take(p, nullptr); // clobber string
+            if (strcmp(peek(p), ",") == 0) {
+                take(p, ",");
+            } else {
+                break;
+            }
+        }
+    }
+
+    take(p, ")");
     if (require_semicolon) {
         take(p, ";");
     }
-    const char *res = has_operands ? "" : sb_to_string(&asm_text, p->arena);
+    const char *res = sb_to_string(&asm_text, p->arena);
     sb_free(&asm_text);
     return res;
 }
@@ -602,7 +665,7 @@ static void skip_attribute_and_asm(ParserState *p) {
     skip_attribute(p);
     skip_calling_convention_qualifiers(p);
     if (strcmp(peek(p), "__asm__") == 0 || strcmp(peek(p), "__asm") == 0 || strcmp(peek(p), "asm") == 0) {
-        (void)parse_gnu_asm(p, 0);
+        (void)parse_gnu_asm(p, nullptr, 0);
     }
 }
 
@@ -3116,7 +3179,7 @@ static Node *stmt(ParserState *p) {
     }
     if (strcmp(peek(p), "__asm__") == 0 || strcmp(peek(p), "__asm") == 0 || strcmp(peek(p), "asm") == 0) {
         Node *n = create_node(p, "asm", tok_line, tok_col);
-        n->name = parse_gnu_asm(p, 1);
+        n->name = parse_gnu_asm(p, n, 1);
         return n;
     }
     
@@ -5313,7 +5376,7 @@ NodeArray parser_parse(const TokenArray *tokens, int target_scale, Arena *arena)
         state.last_type_alignment = 0;
         state.last_type_thread_local = 0;
         if (strcmp(peek(&state), "__asm__") == 0 || strcmp(peek(&state), "__asm") == 0 || strcmp(peek(&state), "asm") == 0) {
-            ir_add_global_asm(parse_gnu_asm(&state, 1));
+            ir_add_global_asm(parse_gnu_asm(&state, nullptr, 1));
             continue;
         }
         int is_static = 0;
