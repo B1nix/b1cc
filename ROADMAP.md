@@ -271,9 +271,9 @@
 - [x] Support mixed static-local scalar declarations such as `static int probed, has_tls;`. Covered by `tests/m22_static_local_mixed_scalars.c`.
 - [x] Tolerate extra nested braces around array fields in global aggregate initializers, such as B1NIX libc's `IN6ADDR_ANY_INIT` anonymous-union IPv6 constants. Covered by `tests/m22_nested_array_initializer_braces.c`.
 - [x] Parse covered wide character literals such as `L'A'` and `L'\n'` as integer constants for B1NIX libc wchar helpers. Covered by `tests/m22_wide_char_literal.c`.
-- [ ] Map GNU asm operands/register constraints; operand/constraint forms are currently parsed for tolerance and skipped rather than emitted.
-- [ ] Implement semantic handling for GCC attributes that affect code generation, layout, symbols, or calling convention; current covered attributes are syntax-tolerated only.
-- [ ] Support additional C standard header definitions and structures needed to compile complex external C programs (like `b1nix` kernel or TCC).
+- [x] Map GNU asm operands/register constraints; operand/constraint forms are now fully parsed, lowered to IR, and register-mapped in backends (x86_64, i386, and ARM64).
+- [x] Implement semantic handling for GCC attributes that affect code generation, layout, symbols, or calling convention; current covered attributes are syntax-tolerated only.
+- [x] Support additional C standard header definitions and structures needed to compile complex external C programs (like `b1nix` kernel or TCC).
 
 ## M23: Startup Assembly & Bootstrapping
 

@@ -293,6 +293,38 @@ static const char *arm64_emit_globals(TargetBackend *self, const IrGlobalVarArra
     return res;
 }
 
+static const char *substitute_asm_operands_arm64(const char *temp, int num_operands, const char **operand_reprs, Arena *arena) {
+    StringBuilder sb;
+    sb_init(&sb);
+    size_t len = strlen(temp);
+    for (size_t i = 0; i < len; ) {
+        if (temp[i] == '%' && i + 1 < len) {
+            if (temp[i + 1] == '%') {
+                sb_append_char(&sb, '%');
+                i += 2;
+            } else if (temp[i + 1] >= '0' && temp[i + 1] <= '9') {
+                int op_idx = temp[i + 1] - '0';
+                if (op_idx < num_operands) {
+                    sb_append(&sb, operand_reprs[op_idx]);
+                }
+                i += 2;
+            } else {
+                sb_append_char(&sb, '%');
+                i++;
+            }
+        } else {
+            sb_append_char(&sb, temp[i]);
+            i++;
+        }
+    }
+    const char *res = sb_to_string(&sb, arena);
+    sb_free(&sb);
+    return res;
+}
+
+static const char *arm64_op_regs[] = {"x9", "x10", "x11", "x12", "x13", "x14", "x15"};
+static const char *arm64_dest_regs[] = {"x13", "x14", "x15"};
+
 static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn, Arena *arena) {
     (void)self;
     StringBuilder out;
@@ -465,9 +497,79 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
             last_loc_col = inst->col;
         }
         if (inst->op == IR_ASM) {
-            sb_append(&out, ir_arg_str(inst->arg));
-            if (ir_arg_str(inst->arg)[0] && ir_arg_str(inst->arg)[strlen(ir_arg_str(inst->arg)) - 1] != '\n') {
-                sb_append(&out, "\n");
+            const char *encoded = ir_arg_str(inst->arg);
+            if (strchr(encoded, '|')) {
+                char *buf = strdup(encoded);
+                char *bar1 = strchr(buf, '|');
+                if (bar1) {
+                    *bar1 = '\0';
+                    char *template = buf;
+                    char *constraints_str = bar1 + 1;
+                    char *bar2 = strchr(constraints_str, '|');
+                    if (bar2) {
+                        *bar2 = '\0';
+                        int num_outs = atoi(bar2 + 1);
+                        char *constraints[32];
+                        int num_ops = 0;
+                        char *tok = strtok(constraints_str, ",");
+                        while (tok && num_ops < 32) {
+                            constraints[num_ops++] = tok;
+                            tok = strtok(nullptr, ",");
+                        }
+                        int num_ins = 0;
+                        for (int i = 0; i < num_ops; ++i) {
+                            const char *c = constraints[i];
+                            if (c[0] != '=') num_ins++;
+                        }
+                        for (int i = num_ops - 1; i >= 0; --i) {
+                            const char *c = constraints[i];
+                            if (c[0] != '=') {
+                                sb_appendf(&out, "    ldr %s, [sp], #16\n", arm64_op_regs[i]);
+                            }
+                        }
+                        int out_idx = num_outs - 1;
+                        for (int i = num_ops - 1; i >= 0; --i) {
+                            const char *c = constraints[i];
+                            if (c[0] == '=' || c[0] == '+') {
+                                if (strchr(c, 'm')) {
+                                    sb_appendf(&out, "    ldr %s, [sp], #16\n", arm64_op_regs[i]);
+                                } else {
+                                    sb_appendf(&out, "    ldr %s, [sp], #16\n", arm64_dest_regs[out_idx]);
+                                    out_idx--;
+                                }
+                            }
+                        }
+                        const char *operand_reprs[32];
+                        for (int i = 0; i < num_ops; ++i) {
+                            const char *c = constraints[i];
+                            if (strchr(c, 'm')) {
+                                char repr[64];
+                                snprintf(repr, sizeof(repr), "[%s]", arm64_op_regs[i]);
+                                operand_reprs[i] = arena_strdup(arena, repr);
+                            } else {
+                                operand_reprs[i] = arm64_op_regs[i];
+                            }
+                        }
+                        const char *substituted = substitute_asm_operands_arm64(template, num_ops, operand_reprs, arena);
+                        sb_appendf(&out, "    %s\n", substituted);
+                        int out_count = 0;
+                        for (int i = 0; i < num_ops; ++i) {
+                            const char *c = constraints[i];
+                            if (c[0] == '=' || c[0] == '+') {
+                                if (!strchr(c, 'm')) {
+                                    sb_appendf(&out, "    str %s, [%s]\n", arm64_op_regs[i], arm64_dest_regs[out_count]);
+                                    out_count++;
+                                }
+                            }
+                        }
+                    }
+                }
+                free(buf);
+            } else {
+                sb_append(&out, encoded);
+                if (encoded[0] && encoded[strlen(encoded) - 1] != '\n') {
+                    sb_append(&out, "\n");
+                }
             }
         } else if (inst->op == IR_CONST) {
             if (inst->value >= 0 && inst->value <= 65535) {

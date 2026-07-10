@@ -2131,6 +2131,7 @@ static void lower_block(const Node *block, IrFunction *fn, TargetBackend *backen
     }
 }
 
+
 static void lower_addr(const Node *node, IrFunction *fn, TargetBackend *backend, Arena *arena) {
     if (!node) return;
     if (node->line > 0) {
@@ -2282,6 +2283,40 @@ static void lower_addr(const Node *node, IrFunction *fn, TargetBackend *backend,
         }
         diagnostics_error(node->line, node->col, "lvalue required");
     }
+}
+
+static const char *clean_constraint(const char *c, Arena *arena) {
+    if (c && c[0] == '"') {
+        size_t len = strlen(c);
+        if (len > 2 && c[len - 1] == '"') {
+            return arena_strndup(arena, c + 1, len - 2);
+        }
+    }
+    return c;
+}
+
+static const char *resolve_constraint(const char *c, Arena *arena) {
+    if (c && strchr(c, 'm')) {
+        size_t len = strlen(c);
+        int other_chars = 0;
+        for (size_t i = 0; i < len; ++i) {
+            if (c[i] != '=' && c[i] != '+' && c[i] != 'm' && c[i] != '&') {
+                other_chars++;
+            }
+        }
+        if (other_chars > 0) {
+            char *buf = arena_alloc(arena, len + 1);
+            size_t dst = 0;
+            for (size_t i = 0; i < len; ++i) {
+                if (c[i] != 'm') {
+                    buf[dst++] = c[i];
+                }
+            }
+            buf[dst] = '\0';
+            return buf;
+        }
+    }
+    return c;
 }
 
 static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend, Arena *arena) {
@@ -2784,7 +2819,49 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
     } else if (stmt->op_enum == OP_EMPTY) {
         // Empty statement: do nothing
     } else if (stmt->op_enum == OP_ASM) {
-        ir_push(fn, "asm", stmt->name, 0);
+        int num_ops = stmt->body.count;
+        for (int i = 0; i < num_ops; ++i) {
+            Node *op_node = stmt->body.data[i];
+            const char *constraint = clean_constraint(op_node->name, arena);
+            constraint = resolve_constraint(constraint, arena);
+            op_node->name = constraint; // Store cleaned and resolved constraint back
+            int is_out = (constraint[0] == '=' || constraint[0] == '+');
+            if (is_out) {
+                lower_addr(op_node->lhs, fn, backend, arena);
+            }
+        }
+        for (int i = 0; i < num_ops; ++i) {
+            Node *op_node = stmt->body.data[i];
+            const char *constraint = op_node->name;
+            int is_in = (constraint[0] != '=');
+            if (is_in) {
+                if (strchr(constraint, 'm')) {
+                    lower_addr(op_node->lhs, fn, backend, arena);
+                } else {
+                    lower_expr(op_node->lhs, fn, backend, arena);
+                }
+            }
+        }
+        StringBuilder arg_sb;
+        sb_init(&arg_sb);
+        sb_append(&arg_sb, stmt->name);
+        sb_append_char(&arg_sb, '|');
+        for (int i = 0; i < num_ops; ++i) {
+            if (i > 0) sb_append_char(&arg_sb, ',');
+            sb_append(&arg_sb, stmt->body.data[i]->name);
+        }
+        sb_append_char(&arg_sb, '|');
+        int num_outs = 0;
+        for (int i = 0; i < num_ops; ++i) {
+            const char *constraint = stmt->body.data[i]->name;
+            if (constraint[0] == '=' || constraint[0] == '+') {
+                num_outs++;
+            }
+        }
+        sb_appendf(&arg_sb, "%d", num_outs);
+        const char *encoded = sb_to_string(&arg_sb, arena);
+        sb_free(&arg_sb);
+        ir_push(fn, "asm", encoded, 0);
     } else {
         char msg[256];
         snprintf(msg, sizeof(msg), "unknown AST statement %s", stmt->op);
