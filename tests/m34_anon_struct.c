@@ -1,4 +1,4 @@
-/* tests/c11_anon_struct.c — Test C11 anonymous structures and unions */
+/* tests/m34_anon_struct.c — Test M34 anonymous structures and unions */
 struct Container {
     int a;
     union {

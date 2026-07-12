@@ -31,6 +31,8 @@ typedef struct {
     int elem_size;
     int align;
     int is_thread_local;
+    int is_long_double;   /* M34: scalar 80-bit x87 global; initializer is a double-bits seed */
+    const char *section_name;
 } IrGlobalVar;
 
 typedef struct {
@@ -45,6 +47,14 @@ void ir_global_var_array_free(IrGlobalVarArray *arr);
 
 typedef enum {
     IR_NOP = 0,
+    IR_TRAP,
+    IR_ATOMIC_LOAD,
+    IR_ATOMIC_STORE,
+    IR_ATOMIC_ADD,
+    IR_ATOMIC_FETCH_ADD,
+    IR_ATOMIC_EXCHANGE,
+    IR_ATOMIC_CAS,
+    IR_FRAME_ADDR,
     IR_NOT,
     IR_NOTEQ,
     IR_NOTEQ64,
@@ -110,6 +120,16 @@ typedef enum {
     IR_FSTORE_ADDR4,
     IR_FSTORE_ADDR8,
     IR_FSUB,
+    /* M34 long double (80-bit x87). Distinct additive ops so the existing
+     * SSE/double path (x86_64) and 8-byte x87 path (i386) stay untouched.
+     * Eval values occupy 16 bytes on the eval stack; x87 fldt/fstpt move them. */
+    IR_LDCONST,     /* value = double-bits seed; widened to 80-bit via x87 at runtime */
+    IR_LDADD, IR_LDSUB, IR_LDMUL, IR_LDDIV, IR_LDNEG,
+    IR_LDLT, IR_LDGT, IR_LDLTEQ, IR_LDGTEQ, IR_LDEQEQ, IR_LDNOTEQ,
+    IR_LDLOAD, IR_LDSTORE,          /* local slot in value */
+    IR_LDGLOAD, IR_LDGSTORE,        /* global name in arg */
+    IR_I2LD, IR_LD2I, IR_D2LD, IR_LD2D,
+    IR_LDRET,
     IR_GADDR,
     IR_GLOAD,
     IR_GLOAD64,
@@ -203,6 +223,8 @@ typedef struct {
     int has_call;
     int label_id;
     int is_static;
+    int is_weak;
+    const char *section_name;
     int return_aggregate_size;
     int return_aggregate_float_class;
     int max_align;
@@ -225,6 +247,7 @@ typedef struct {
 
 void ir_reset_state(void);
 void ir_declare_global(const char *name, int is_array, long size, int is_static, int is_extern, int elem_size, int target_scale);
+void ir_set_global_section(const char *name, const char *section_name);
 void ir_mark_global_struct(const char *name);
 void ir_set_global_align(const char *name, int align);
 void ir_set_global_array_dims(const char *name, LongArray dims);
@@ -243,6 +266,7 @@ int ir_get_global_var_elem_scale(const char *name);
 void ir_set_global_var_is_pointer(const char *name, int val);
 void ir_set_global_var_elem_scale(const char *name, int val);
 void ir_set_global_thread_local(const char *name, int val);
+void ir_set_global_long_double(const char *name);
 int ir_is_global_var_thread_local(const char *name);
 
 

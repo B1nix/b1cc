@@ -114,15 +114,6 @@ static const char *peephole_optimize(const char *asm_text, const char *target, A
                         optimized = true;
                     }
                 }
-            } else if (strcmp(target, "i386-b1nix") == 0 || strcmp(target, "x86-b1nix") == 0 || strcmp(target, "i686-elf") == 0 || strcmp(target, "i686-unknown-elf") == 0) {
-                if (strncmp(cur_trim, "pushl ", 6) == 0 && strncmp(next_trim, "popl ", 5) == 0) {
-                    const char *cur_reg = cur_trim + 6;
-                    const char *next_reg = next_trim + 5;
-                    if (strcmp(cur_reg, next_reg) == 0) {
-                        idx++;
-                        optimized = true;
-                    }
-                }
             }
         }
 
@@ -159,7 +150,11 @@ static void *emit_function_thread(void *arg) {
 const char *backend_compile_asm(const char *src, const char *target, const char *mcmodel, bool dump_ast_flag, bool dump_ir_flag, Arena *arena) {
     ir_reset_state();
 
-    int target_scale = (strcmp(target, "i386-b1nix") == 0 || strcmp(target, "x86-b1nix") == 0 || strcmp(target, "i686-elf") == 0 || strcmp(target, "i686-unknown-elf") == 0) ? 4 : 8;
+    int target_scale = 8;
+    /* sizeof(long double): 80-bit x87 on x86_64 (16 bytes); on arm64-darwin
+     * long double == double (8), which is the Apple ABI. */
+    int is_x86_64 = (strcmp(target, "x86_64-b1nix") == 0 || strcmp(target, "x86_64-elf") == 0 || strcmp(target, "x86_64-unknown-elf") == 0);
+    int ld_size = is_x86_64 ? 16 : 8;
 
     /* Set code model: 0=small (default), 1=kernel */
     ir_code_model = (mcmodel && strcmp(mcmodel, "kernel") == 0) ? 1 : 0;
@@ -183,7 +178,7 @@ const char *backend_compile_asm(const char *src, const char *target, const char 
     TokenArray tokens = lex(preprocessed_src, nullptr, nullptr, arena);
     hashmap_free(&macros);
 
-    NodeArray ast = parser_parse(&tokens, target_scale, arena);
+    NodeArray ast = parser_parse(&tokens, target_scale, ld_size, arena);
     token_array_free(&tokens);
 
     if (dump_ast_flag) {
@@ -203,8 +198,6 @@ const char *backend_compile_asm(const char *src, const char *target, const char 
         backend = backend_create_arm64();
     } else if (strcmp(target, "x86_64-b1nix") == 0 || strcmp(target, "x86_64-elf") == 0 || strcmp(target, "x86_64-unknown-elf") == 0) {
         backend = backend_create_x86_64();
-    } else if (strcmp(target, "i386-b1nix") == 0 || strcmp(target, "x86-b1nix") == 0 || strcmp(target, "i686-elf") == 0 || strcmp(target, "i686-unknown-elf") == 0) {
-        backend = backend_create_i386();
     } else {
         char msg[128];
         snprintf(msg, sizeof(msg), "unknown target %s", target);
@@ -255,6 +248,11 @@ const char *backend_compile_asm(const char *src, const char *target, const char 
     }
 #endif
 
+    int has_weak_definition = 0;
+    for (int k = 0; k < ir_functions.count; ++k) {
+        if (ir_functions.data[k].is_weak) { has_weak_definition = 1; break; }
+    }
+
     // Free ir functions
     for (int k = 0; k < ir_functions.count; ++k) {
         string_array_free(&ir_functions.data[k].params);
@@ -266,7 +264,17 @@ const char *backend_compile_asm(const char *src, const char *target, const char 
     }
     ir_function_array_free(&ir_functions);
 
-    const char *final_asm = peephole_optimize(sb_to_string(&out, arena), target, arena);
+    const char *optimized_asm = peephole_optimize(sb_to_string(&out, arena), target, arena);
+    StringBuilder final_out;
+    sb_init(&final_out);
+    sb_append(&final_out, optimized_asm);
+    /* Darwin's linker needs the subsection marker to honor weak definitions
+     * when multiple translation units define the same symbol. */
+    if (strcmp(target, "arm64-darwin") == 0 && has_weak_definition) {
+        sb_append(&final_out, ".subsections_via_symbols\n");
+    }
+    const char *final_asm = sb_to_string(&final_out, arena);
+    sb_free(&final_out);
     sb_free(&out);
 
     backend->free(backend);

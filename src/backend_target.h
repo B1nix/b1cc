@@ -99,6 +99,5 @@ struct TargetBackend {
 
 TargetBackend* backend_create_arm64(void);
 TargetBackend* backend_create_x86_64(void);
-TargetBackend* backend_create_i386(void);
 
 #endif // BACKEND_TARGET_H

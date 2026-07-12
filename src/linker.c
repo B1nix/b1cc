@@ -711,13 +711,14 @@ int elf_link(const LinkRequest *req, Arena *arena) {
     #define PUSH(arr, n, cap, val) do { if ((n) == (cap)) { (cap) = (cap) ? (cap)*2 : 16; (arr) = realloc((arr), sizeof(*(arr))*(cap)); } (arr)[(n)++] = (val); } while (0)
 
     /* get-or-add a dynamic symbol (import), returns dynidx */
-    #define GET_DYNIDX(nm, bnd, ty) ({ \
+    #define GET_DYNIDX_INTO(out, nm, bnd, ty) do { \
         HashMapEntry *_e = hashmap_get(&dynidx, (nm)); int _idx; \
         if (_e) _idx = (int)_e->val_int - 1; else { \
             DynSym _d; _d.name = (nm); _d.bind = (bnd); _d.type = (ty); _d.value = 0; _d.size = 0; _d.shndx = SHN_UNDEF; \
             PUSH(dsyms, ndsym, dcap, _d); _idx = ndsym - 1; \
             hashmap_put(&dynidx, (nm), NULL, _idx + 1); } \
-        _idx; })
+        (out) = _idx; \
+    } while (0)
 
     for (int oi = 0; oi < lk.nobj; oi++) {
         Obj *o = lk.objs[oi];
@@ -748,25 +749,25 @@ int elf_link(const LinkRequest *req, Arena *arena) {
                         HashMapEntry *e = hashmap_get(&pltmap, y->name);
                         int pi;
                         if (e) pi = (int)e->val_int - 1;
-                        else { int di = GET_DYNIDX(y->name, bnd, ty ? ty : STT_FUNC); PUSH(plts, nplt, pcap, di); pi = nplt - 1; hashmap_put(&pltmap, y->name, NULL, pi + 1); }
-                        Fixup fx = { loc, P, FIX_PLT, pi, A }; PUSH(fixups, nfix, fxcap, fx);
+                        else { int di; GET_DYNIDX_INTO(di, y->name, bnd, ty ? ty : STT_FUNC); PUSH(plts, nplt, pcap, di); pi = nplt - 1; hashmap_put(&pltmap, y->name, NULL, pi + 1); }
+                        Fixup fx; fx.loc = loc; fx.P = P; fx.kind = FIX_PLT; fx.slot = pi; fx.add = A; PUSH(fixups, nfix, fxcap, fx);
                     }
                     break; }
                 case R_X86_64_GOTPCREL:
                 case R_X86_64_GOTPCRELX:
                 case R_X86_64_REX_GOTPCRELX: {
                     int gi;
-                    if (internal) { GotSlot g = { 0, 0, S }; PUSH(gots, ngot, gcap, g); gi = ngot - 1; }
+                    if (internal) { GotSlot g; g.is_import = 0; g.dynidx = 0; g.target = S; PUSH(gots, ngot, gcap, g); gi = ngot - 1; }
                     else {
                         HashMapEntry *e = hashmap_get(&gotimp, y->name);
                         if (e) gi = (int)e->val_int - 1;
-                        else { int di = GET_DYNIDX(y->name, bnd, ty ? ty : STT_OBJECT); GotSlot g = { 1, di, 0 }; PUSH(gots, ngot, gcap, g); gi = ngot - 1; hashmap_put(&gotimp, y->name, NULL, gi + 1); }
+                    else { int di; GET_DYNIDX_INTO(di, y->name, bnd, ty ? ty : STT_OBJECT); GotSlot g; g.is_import = 1; g.dynidx = di; g.target = 0; PUSH(gots, ngot, gcap, g); gi = ngot - 1; hashmap_put(&gotimp, y->name, NULL, gi + 1); }
                     }
-                    Fixup fx = { loc, P, FIX_GOT, gi, A }; PUSH(fixups, nfix, fxcap, fx);
+                    Fixup fx; fx.loc = loc; fx.P = P; fx.kind = FIX_GOT; fx.slot = gi; fx.add = A; PUSH(fixups, nfix, fxcap, fx);
                     break; }
                 case R_X86_64_64: {
-                    if (internal) { DynRela dr = { P, R_X86_64_RELATIVE, 0, (int64_t)(S + A) }; PUSH(rdyn, nrdyn, rdcap, dr); uint64_t z = 0; memcpy(loc, &z, 8); }
-                    else { int di = GET_DYNIDX(y->name, bnd, ty); DynRela dr = { P, R_X86_64_64, (uint32_t)di, A }; PUSH(rdyn, nrdyn, rdcap, dr); uint64_t z = 0; memcpy(loc, &z, 8); }
+                    if (internal) { DynRela dr; dr.off = P; dr.type = R_X86_64_RELATIVE; dr.sym = 0; dr.add = (int64_t)(S + A); PUSH(rdyn, nrdyn, rdcap, dr); uint64_t z = 0; memcpy(loc, &z, 8); }
+                    else { int di; GET_DYNIDX_INTO(di, y->name, bnd, ty); DynRela dr; dr.off = P; dr.type = R_X86_64_64; dr.sym = (uint32_t)di; dr.add = A; PUSH(rdyn, nrdyn, rdcap, dr); uint64_t z = 0; memcpy(loc, &z, 8); }
                     break; }
                 default:
                     fprintf(stderr, "b1cc linker (dynamic): unsupported relocation %u for %s\n", rl->type, y->name);
@@ -803,7 +804,7 @@ int elf_link(const LinkRequest *req, Arena *arena) {
                 d.value = 0; d.size = y->size; d.shndx = 1; /* defined; value filled in 5b */
                 PUSH(dsyms, ndsym, dcap, d);
                 hashmap_put(&dynidx, y->name, NULL, ndsym); /* dynidx+1 */
-                ExportSrc es = { ndsym - 1, o, i }; PUSH(exps, nexp, ecap, es);
+                ExportSrc es; es.dynidx = ndsym - 1; es.obj = o; es.sym = i; PUSH(exps, nexp, ecap, es);
             }
         }
     }

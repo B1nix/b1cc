@@ -32,6 +32,7 @@ static const OpMapping op_table[] = {
     {"expr", OP_EXPR}, {"block", OP_BLOCK}, {"empty", OP_EMPTY},
     {"index", OP_INDEX}, {"member", OP_MEMBER}, {"member_ptr", OP_MEMBER_PTR},
     {"asm", OP_ASM},
+    {"complex_real", OP_COMPLEX_REAL}, {"complex_imag", OP_COMPLEX_IMAG},
     {"compound_literal", OP_COMPOUND_LITERAL}, {"init_item", OP_INIT_ITEM},
     {"sizeof", OP_SIZEOF},
     {"va_start", OP_VA_START}, {"va_arg", OP_VA_ARG}, {"va_copy", OP_VA_COPY},

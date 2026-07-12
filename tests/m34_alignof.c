@@ -1,4 +1,4 @@
-/* tests/c11_alignof.c — Test C11 _Alignof and alignof operators */
+/* tests/m34_alignof.c — Test M34 _Alignof and alignof operators */
 struct S {
     char a;
     int b;

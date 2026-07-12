@@ -16,8 +16,21 @@
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+B1CC_ROOT="$ROOT"
 B1CC="$ROOT/build/b1cc"
-USR="${B1NIX_USR:-$ROOT/../b1nix/userspace}"
+if [ -n "${B1NIX_USR:-}" ]; then
+	USR="$B1NIX_USR"
+else
+	USR="$ROOT/../../userspace"
+fi
+B1NIX_CC_BIN="${B1NIX_CC:-}"
+if [ -z "$B1NIX_CC_BIN" ]; then
+	if [ -x "$ROOT/../../tools/toolchain/bin/b1nix-cc" ]; then
+		B1NIX_CC_BIN="$ROOT/../../tools/toolchain/bin/b1nix-cc"
+	elif [ -x "$ROOT/../b1nix/tools/toolchain/bin/b1nix-cc" ]; then
+		B1NIX_CC_BIN="$ROOT/../b1nix/tools/toolchain/bin/b1nix-cc"
+	fi
+fi
 CRT0="$USR/build/x86_64/crt/crt0.o"
 LIBC="$USR/build/x86_64/libb1nix.a"
 TMP="$(mktemp -d)"
@@ -26,8 +39,9 @@ trap 'rm -rf "$TMP"' EXIT
 if [ ! -x "$B1CC" ]; then echo "SKIP: build/b1cc missing (run make)"; exit 0; fi
 if [ ! -f "$CRT0" ] || [ ! -f "$LIBC" ]; then echo "SKIP: B1NIX x86_64 build tree not found at $USR"; exit 0; fi
 if ! command -v clang >/dev/null 2>&1 || ! command -v ld.lld >/dev/null 2>&1; then echo "SKIP: clang/ld.lld unavailable"; exit 0; fi
+[ -n "$B1NIX_CC_BIN" ] || { echo "SKIP: b1nix-cc unavailable"; exit 0; }
 
-export B1CC_CRT0="$CRT0" B1CC_LIBC="$LIBC"
+export B1CC_CRT0="$CRT0" B1CC_LIBC="$LIBC" B1NIX_CC="$B1NIX_CC_BIN"
 
 # programs to check (repo tests + any b1nix b1cc smoke sources present)
 PROGS="tests/return_42.c tests/precedence.c tests/local.c tests/if_else.c \
@@ -40,6 +54,16 @@ for extra in b1cc_hello b1cc_better_c b1cc_argv b1cc_file_write b1cc_stderr_exit
 done
 
 pass=0; fail=0
+RUNNER=""
+case "$(uname -m)" in
+	x86_64|amd64) ;;
+	*)
+		if command -v qemu-x86_64 >/dev/null 2>&1; then RUNNER="qemu-x86_64"; fi
+		;;
+esac
+if [ -z "$RUNNER" ] && [ "$(uname -m)" != "x86_64" ] && [ "$(uname -m)" != "amd64" ]; then
+	echo "SKIP runtime differential: x86_64 ELF runner unavailable on $(uname -m)"
+fi
 for src in $PROGS; do
 	[ -f "$ROOT/$src" ] && src="$ROOT/$src"
 	[ -f "$src" ] || continue
@@ -48,8 +72,9 @@ for src in $PROGS; do
 		echo "FAIL $b (internal link error)"; fail=$((fail+1)); continue
 	fi
 	"$B1CC" "$src" --target=x86_64-b1nix -o "$TMP/r_$b" 2>/dev/null || { echo "FAIL $b (ref link error)"; fail=$((fail+1)); continue; }
-	io="$("$TMP/i_$b" a b 2>&1)"; ie=$?
-	ro="$("$TMP/r_$b" a b 2>&1)"; re=$?
+	[ -n "$RUNNER" ] || continue
+	io="$($RUNNER "$TMP/i_$b" a b 2>&1)"; ie=$?
+	ro="$($RUNNER "$TMP/r_$b" a b 2>&1)"; re=$?
 	if [ "$io" = "$ro" ] && [ "$ie" = "$re" ]; then
 		echo "ok   $b (exit=$ie)"; pass=$((pass+1))
 	else
@@ -66,6 +91,7 @@ CRT0DYN="$USR/build/x86_64/crt/crt0-dynamic.o"
 LIBCSO="$USR/build/x86_64/libc.so.1"
 PIELD="$USR/linker_pie.ld"
 DI="$ROOT/tests/elf_dyninfo.py"
+export B1CC_CRT0_DYNAMIC="$CRT0DYN"
 getf() { printf '%s\n' "$1" | sed -n "s/^$2=//p"; }
 
 if command -v python3 >/dev/null 2>&1 && [ -f "$CRT0DYN" ] && [ -f "$LIBCSO" ] && [ -f "$PIELD" ]; then

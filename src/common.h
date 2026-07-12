@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <string.h>
+#include <stdint.h>
 
 #ifdef __b1cc__
 #define B1CC_THREAD_LOCAL
@@ -12,6 +13,11 @@
 #else
 #define B1CC_THREAD_LOCAL _Thread_local
 #endif
+
+/* M34: encode a double as the x87 80-bit extended-precision byte pattern
+ * (10 little-endian bytes: 64-bit mantissa incl. explicit integer bit, then
+ * sign+15-bit exponent). Used to emit long double static initializers. */
+void f64_to_x87_extended(double d, unsigned char out[10]);
 
 static_assert(sizeof(long) >= 8, "b1cc assumes a 64-bit or wider host long");
 static_assert(sizeof(void *) <= sizeof(long), "b1cc stores pointer-sized values in long slots");
@@ -54,6 +60,7 @@ void sb_appendf(StringBuilder *sb, const char *fmt, ...);
 char *sb_to_string(StringBuilder *sb, Arena *a);
 void sb_free(StringBuilder *sb);
 const char *escape_asm_string(const char *s, Arena *arena);
+const char *wide_string_longs(const char *s, Arena *arena);
 
 // --- Hash Map ---
 #define TOMBSTONE ((const char *)-1)

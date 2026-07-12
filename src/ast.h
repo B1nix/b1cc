@@ -22,6 +22,7 @@ typedef enum OpKind {
     OP_DECL, OP_ARRAY_DECL, OP_EXPR, OP_BLOCK, OP_EMPTY,
     OP_INDEX, OP_MEMBER, OP_MEMBER_PTR,
     OP_ASM,
+    OP_COMPLEX_REAL, OP_COMPLEX_IMAG,
     OP_COMPOUND_LITERAL, OP_INIT_ITEM,
     OP_SIZEOF,
     OP_VA_START, OP_VA_ARG, OP_VA_COPY,
@@ -65,6 +66,7 @@ struct Node {
     const char *name;
     long value;
     int is_static;
+    int is_weak;
     Node *lhs;
     Node *rhs;
     NodeArray body;
@@ -74,17 +76,24 @@ struct Node {
     IntArray param_floats;
     int aggregate_size;
     int aggregate_float_class;
+    int is_imaginary;
     const char *type_tag;
     LongArray array_dims;
     int elem_size;
     int pointee_size;
     int pointee_unsigned;
     int pointee_unsigned_known;
+    int pointee_const;
     int is_unsigned;
+    int is_const;
     int compare_unsigned;
     int type_size;
     int is_bool;
     int is_float;     /* node yields a floating-point (float/double) value */
+    int is_complex;   /* node yields a C _Complex value */
+    int is_void;      /* function return type is void */
+    const char *section_name; /* optional __attribute__((section("..."))) */
+    int is_wide;      /* string literal is wide (L"...": wchar_t/4-byte elements) */
     double fvalue;    /* literal value when op == "fnum" */
     int bit_offset;
     int bit_width;

@@ -103,6 +103,15 @@ static const char *i386_emit_globals(TargetBackend *self, const IrGlobalVarArray
             if (remaining > 0) {
                 sb_appendf(&out, "    .zero %ld\n", remaining * g->elem_size);
             }
+        } else if (g->is_long_double) {
+            /* 80-bit x87 initializer from the double-bits seed, padded to size. */
+            long val = (g->initializers.count == 0) ? 0 : g->initializers.data[0];
+            double d;
+            memcpy(&d, &val, 8);
+            unsigned char ext[10];
+            f64_to_x87_extended(d, ext);
+            for (int b = 0; b < 10; b++) sb_appendf(&out, "    .byte %d\n", ext[b]);
+            if (g->elem_size > 10) sb_appendf(&out, "    .zero %d\n", g->elem_size - 10);
         } else {
             if (g->initializer_is_string.count > 0 && g->initializer_is_string.data[0]) {
                 int str_idx = (int)g->initializers.data[0];
@@ -254,7 +263,14 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
             int pf = (prologue_floats && i < prologue_floats->count) ? prologue_floats->data[i] : 0;
             int isz = (prologue_int_sizes && i < prologue_int_sizes->count) ? prologue_int_sizes->data[i] : 4;
             int slot = -((i + 1) * 16);
-            if (pf == 8) {
+            if (pf >= 12) {
+                /* i386 passes long double by value on the stack (12 bytes). */
+                for (int w = 0; w < pf; w += 4) {
+                    sb_appendf(&out, "    movl %d(%%ebp), %%eax\n", in_off + w);
+                    sb_appendf(&out, "    movl %%eax, %d(%%ebp)\n", slot + w);
+                }
+                in_off += pf;
+            } else if (pf == 8) {
                 /* double parameter: copy 8 bytes from the incoming stack */
                 sb_appendf(&out, "    movl %d(%%ebp), %%eax\n", in_off);
                 sb_appendf(&out, "    movl %%eax, %d(%%ebp)\n", slot);
@@ -738,8 +754,8 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
                     int total_abi = 0, total_ev = 0;
                     for (long i = 0; i < num_args; ++i) {
                         int f = (pf && i < pf->count) ? pf->data[i] : 0;
-                        evsz[i] = f ? 8 : 4;          /* float/double eval value is 8 bytes */
-                        abisz[i] = (f == 8) ? 8 : 4;  /* double 8, float 4, int 4 */
+                        evsz[i] = f >= 12 ? 16 : (f ? 8 : 4);
+                        abisz[i] = f >= 12 ? f : ((f == 8) ? 8 : 4);
                         abioff[i] = total_abi;
                         total_abi += abisz[i];
                         total_ev += evsz[i];
@@ -750,7 +766,12 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
                         int ev_above = 0;
                         for (long j = i + 1; j < num_args; ++j) ev_above += evsz[j];
                         int ev_src = total_abi + ev_above;  /* offset from current esp */
-                        if (f == 8) {
+                        if (f >= 12) {
+                            for (int w = 0; w < f; w += 4) {
+                                sb_appendf(&out, "    movl %d(%%esp), %%eax\n", ev_src + w);
+                                sb_appendf(&out, "    movl %%eax, %d(%%esp)\n", abioff[i] + w);
+                            }
+                        } else if (f == 8) {
                             sb_appendf(&out, "    movl %d(%%esp), %%eax\n", ev_src);
                             sb_appendf(&out, "    movl %%eax, %d(%%esp)\n", abioff[i]);
                             sb_appendf(&out, "    movl %d(%%esp), %%eax\n", ev_src + 4);
@@ -771,8 +792,9 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
                     }
                     sb_appendf(&out, "    addl $%d, %%esp\n", total_abi + total_ev + (inst->op == IR_ICALL ? 4 : 0));
                     if (retf) {
-                        sb_append(&out, "    subl $8, %esp\n");
-                        sb_append(&out, "    fstpl (%esp)\n");
+                        sb_appendf(&out, "    subl $%d, %%esp\n", retf >= 12 ? 16 : 8);
+                        if (retf >= 12) sb_append(&out, "    fstpt (%esp)\n");
+                        else sb_append(&out, "    fstpl (%esp)\n");
                     } else {
                         sb_append(&out, "    pushl %eax\n");
                     }
@@ -1026,6 +1048,100 @@ static const char *i386_emit_function(TargetBackend *self, const IrFunction *fn,
             sb_appendf(&out, "    andl $%ld, %%ecx\n", (long)(int)(~(unsigned int)(mask << bf_offset)));
             sb_append(&out, "    orl %eax, %ecx\n");
             sb_append(&out, "    movl %ecx, (%edi)\n");
+        } else if (inst->op == IR_LDCONST) {
+            /* long double literal: seed st0 from the double bits (fldl widens
+             * exactly to 80-bit), store into a 16-byte eval slot. */
+            unsigned long long bits = (unsigned long long)inst->value;
+            sb_append(&out, "    subl $16, %esp\n");
+            sb_appendf(&out, "    movl $%u, %%eax\n", (unsigned)(bits & 0xffffffffU));
+            sb_append(&out, "    movl %eax, (%esp)\n");
+            sb_appendf(&out, "    movl $%u, %%eax\n", (unsigned)(bits >> 32));
+            sb_append(&out, "    movl %eax, 4(%esp)\n");
+            sb_append(&out, "    fldl (%esp)\n");
+            sb_append(&out, "    fstpt (%esp)\n");
+        } else if (inst->op == IR_LDADD || inst->op == IR_LDSUB ||
+                   inst->op == IR_LDMUL || inst->op == IR_LDDIV) {
+            const char *fop = inst->op == IR_LDADD ? "faddp" :
+                              inst->op == IR_LDSUB ? "fsubrp" :
+                              inst->op == IR_LDMUL ? "fmulp" : "fdivrp";
+            sb_append(&out, "    fldt 16(%esp)\n");  /* lhs -> st0 */
+            sb_append(&out, "    fldt (%esp)\n");    /* rhs -> st0, lhs -> st1 */
+            sb_appendf(&out, "    %s %%st, %%st(1)\n", fop);
+            sb_append(&out, "    addl $16, %esp\n");
+            sb_append(&out, "    fstpt (%esp)\n");
+        } else if (inst->op == IR_LDNEG) {
+            sb_append(&out, "    fldt (%esp)\n");
+            sb_append(&out, "    fchs\n");
+            sb_append(&out, "    fstpt (%esp)\n");
+        } else if (inst->op == IR_LDLT || inst->op == IR_LDGT ||
+                   inst->op == IR_LDLTEQ || inst->op == IR_LDGTEQ ||
+                   inst->op == IR_LDEQEQ || inst->op == IR_LDNOTEQ) {
+            sb_append(&out, "    fldt (%esp)\n");     /* rhs -> st0 */
+            sb_append(&out, "    fldt 16(%esp)\n");   /* lhs -> st0, rhs -> st1 */
+            sb_append(&out, "    addl $32, %esp\n");
+            sb_append(&out, "    fucomip %st(1), %st\n"); /* cmp lhs vs rhs, pop lhs */
+            sb_append(&out, "    fstp %st(0)\n");          /* pop rhs */
+            const char *cc = inst->op == IR_LDLT ? "setb" :
+                             inst->op == IR_LDLTEQ ? "setbe" :
+                             inst->op == IR_LDGT ? "seta" :
+                             inst->op == IR_LDGTEQ ? "setae" :
+                             inst->op == IR_LDEQEQ ? "sete" : "setne";
+            sb_appendf(&out, "    %s %%al\n", cc);
+            sb_append(&out, "    movzbl %al, %eax\n");
+            sb_append(&out, "    pushl %eax\n");
+        } else if (inst->op == IR_I2LD) {
+            sb_append(&out, "    fildl (%esp)\n");    /* 32-bit int -> st0 */
+            sb_append(&out, "    subl $12, %esp\n");  /* grow 4 -> 16 */
+            sb_append(&out, "    fstpt (%esp)\n");
+        } else if (inst->op == IR_LD2I) {
+            sb_append(&out, "    fldt (%esp)\n");
+            sb_append(&out, "    addl $12, %esp\n");  /* shrink 16 -> 4 */
+            sb_append(&out, "    fisttpl (%esp)\n");
+        } else if (inst->op == IR_D2LD) {
+            sb_append(&out, "    fldl (%esp)\n");
+            sb_append(&out, "    subl $8, %esp\n");   /* grow 8 -> 16 */
+            sb_append(&out, "    fstpt (%esp)\n");
+        } else if (inst->op == IR_LD2D) {
+            sb_append(&out, "    fldt (%esp)\n");
+            sb_append(&out, "    addl $8, %esp\n");   /* shrink 16 -> 8 */
+            sb_append(&out, "    fstpl (%esp)\n");
+        } else if (inst->op == IR_LDLOAD) {
+            sb_appendf(&out, "    fldt -%ld(%%ebp)\n", (inst->value + 1) * 16);
+            sb_append(&out, "    subl $16, %esp\n");
+            sb_append(&out, "    fstpt (%esp)\n");
+        } else if (inst->op == IR_LDSTORE) {
+            sb_append(&out, "    fldt (%esp)\n");
+            sb_append(&out, "    addl $16, %esp\n");
+            sb_appendf(&out, "    fstpt -%ld(%%ebp)\n", (inst->value + 1) * 16);
+        } else if (inst->op == IR_LDGLOAD) {
+            const char *g = ir_arg_str(inst->arg);
+            if (ir_pic_mode) {
+                sb_appendf(&out, "    movl %s@GOT(%%ebx), %%eax\n", g);
+                sb_append(&out, "    fldt (%eax)\n");
+            } else {
+                sb_appendf(&out, "    fldt %s\n", g);
+            }
+            sb_append(&out, "    subl $16, %esp\n");
+            sb_append(&out, "    fstpt (%esp)\n");
+        } else if (inst->op == IR_LDGSTORE) {
+            const char *g = ir_arg_str(inst->arg);
+            sb_append(&out, "    fldt (%esp)\n");
+            sb_append(&out, "    addl $16, %esp\n");
+            if (ir_pic_mode) {
+                sb_appendf(&out, "    movl %s@GOT(%%ebx), %%eax\n", g);
+                sb_append(&out, "    fstpt (%eax)\n");
+            } else {
+                sb_appendf(&out, "    fstpt %s\n", g);
+            }
+        } else if (inst->op == IR_LDRET) {
+            sb_append(&out, "    fldt (%esp)\n");
+            sb_append(&out, "    addl $16, %esp\n");
+            if (frame) {
+                if (ir_pic_mode)
+                    sb_append(&out, "    popl %ebx\n");
+                sb_append(&out, "    leave\n");
+            }
+            sb_append(&out, "    ret\n");
         } else if (inst->op == IR_FCONST) {
             /* push the 8-byte double bit pattern: high word first so the low
                word ends up at the lower (top-of-stack) address. */

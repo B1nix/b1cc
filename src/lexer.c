@@ -86,8 +86,18 @@ TokenArray lex(const char *src, HashMap *macros, StringArray *active_macros, Are
                 check_i++;
             }
             if (check_i < src_len && is_digit(src[check_i])) {
+                long marker_line = 0;
+                size_t marker_i = check_i;
+                while (marker_i < src_len && is_digit(src[marker_i])) {
+                    marker_line = marker_line * 10 + (src[marker_i] - '0');
+                    marker_i++;
+                }
                 while (i < src_len && src[i] != '\n') {
                     CONSUME(1);
+                }
+                if (marker_line > 0) {
+                    current_line = (int)marker_line;
+                    current_col = 1;
                 }
             } else {
                 if (i + 1 < src_len && src[i + 1] == '#') {
@@ -169,6 +179,9 @@ TokenArray lex(const char *src, HashMap *macros, StringArray *active_macros, Are
                 while (i < src_len && (src[i] == 'f' || src[i] == 'F' || src[i] == 'l' || src[i] == 'L')) {
                     CONSUME(1);
                 }
+                if (i < src_len && (src[i] == 'i' || src[i] == 'I')) {
+                    CONSUME(1);
+                }
             } else {
                 while (i < src_len && (src[i] == 'u' || src[i] == 'U' || src[i] == 'l' || src[i] == 'L')) {
                     CONSUME(1);
@@ -187,10 +200,11 @@ TokenArray lex(const char *src, HashMap *macros, StringArray *active_macros, Are
                 CONSUME(1);
             }
             const char *ident = intern_string_n(arena, src + start, i - start);
-            if (strcmp(ident, "L") == 0 && i < src_len && src[i] == '\'') {
-                size_t char_start = i;
+            if (strcmp(ident, "L") == 0 && i < src_len && (src[i] == '\'' || src[i] == '"')) {
+                char quote = src[i];
+                size_t lit_start = i;   /* position of the opening quote */
                 CONSUME(1);
-                while (i < src_len && src[i] != '\'') {
+                while (i < src_len && src[i] != quote) {
                     if (src[i] == '\\' && i + 1 < src_len) {
                         CONSUME(2);
                     } else {
@@ -198,10 +212,19 @@ TokenArray lex(const char *src, HashMap *macros, StringArray *active_macros, Are
                     }
                 }
                 if (i == src_len) {
-                    diagnostics_error(tok_line, tok_col, "unterminated wide character literal");
+                    diagnostics_error(tok_line, tok_col,
+                        quote == '"' ? "unterminated wide string literal"
+                                     : "unterminated wide character literal");
                 }
                 CONSUME(1);
-                push_token(&out, intern_string_n(arena, src + char_start, i - char_start), tok_line, tok_col);
+                if (quote == '"') {
+                    /* Wide string: keep the L prefix so the parser emits a
+                     * wchar_t (4-byte element) array rather than a byte string. */
+                    push_token(&out, intern_string_n(arena, src + start, i - start), tok_line, tok_col);
+                } else {
+                    /* Wide char: strip the L; the value fits an int constant. */
+                    push_token(&out, intern_string_n(arena, src + lit_start, i - lit_start), tok_line, tok_col);
+                }
                 continue;
             }
             if (strcmp(ident, "__LINE__") == 0) {

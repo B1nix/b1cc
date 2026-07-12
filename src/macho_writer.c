@@ -1147,17 +1147,22 @@ static int arm64_encode_line(const char *line, ByteBuf *text, EncCtx *ctx,
         if (is_unscaled) {
             int opc = is_load ? 1 : 0;
             int32_t imm9 = (int32_t)mem.offset_imm;
-            uint32_t val = (scale << 30) | 0x38000000 | (opc << 22) | ((imm9 & 0x1ff) << 12) | (mem.base.num << 5) | rt.num;
+            uint32_t op_prefix = is_fp ? 0x3c000000 : 0x38000000;
+            uint32_t val = (scale << 30) | op_prefix | (opc << 22) | ((imm9 & 0x1ff) << 12) | (mem.base.num << 5) | rt.num;
             bb_write32le(text, val);
         } else if (mem.is_pre_index) {
             // str x0, [sp, #-16]!
+            int opc = is_load ? 1 : 0;
             int32_t imm9 = (int32_t)mem.offset_imm;
-            uint32_t val = (scale << 30) | 0x38000c00 | ((imm9 & 0x1ff) << 12) | (mem.base.num << 5) | rt.num;
+            uint32_t op_prefix = is_fp ? 0x3c000c00 : 0x38000c00;
+            uint32_t val = (scale << 30) | op_prefix | (opc << 22) | ((imm9 & 0x1ff) << 12) | (mem.base.num << 5) | rt.num;
             bb_write32le(text, val);
         } else if (mem.is_post_index) {
             // ldr x1, [sp], #16
+            int opc = is_load ? 1 : 0;
             int32_t imm9 = (int32_t)mem.offset_imm;
-            uint32_t val = (scale << 30) | 0x38400400 | ((imm9 & 0x1ff) << 12) | (mem.base.num << 5) | rt.num;
+            uint32_t op_prefix = is_fp ? 0x3c000400 : 0x38000400;
+            uint32_t val = (scale << 30) | op_prefix | (opc << 22) | ((imm9 & 0x1ff) << 12) | (mem.base.num << 5) | rt.num;
             bb_write32le(text, val);
         } else if (mem.offset_reg.type != REG_NONE) {
             // Register offset: ldr x0, [x1, x2]
@@ -1171,7 +1176,8 @@ static int arm64_encode_line(const char *line, ByteBuf *text, EncCtx *ctx,
             }
             int option = 3; // LSL
             int S = (mem.shift > 0) ? 1 : 0;
-            uint32_t val = (scale << 30) | 0x38200800 | (opc << 22) | (mem.offset_reg.num << 16) | (option << 13) | (S << 12) | (mem.base.num << 5) | rt.num;
+            uint32_t op_prefix = is_fp ? 0x3c200800 : 0x38200800;
+            uint32_t val = (scale << 30) | op_prefix | (opc << 22) | (mem.offset_reg.num << 16) | (option << 13) | (S << 12) | (mem.base.num << 5) | rt.num;
             bb_write32le(text, val);
         } else {
             // Unsigned immediate offset

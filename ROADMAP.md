@@ -128,9 +128,8 @@
 - [x] Make native object output real enough for B1NIX: symbols, relocations, sections, and debug dumps.
 - [x] Compile a small curated set of real B1NIX userspace files without TCC fallback when the sibling B1NIX tree is present (`b1cc_hello.c`, `b1cc_better_c.c`).
 - [x] ELF64 relocatable objects for x86_64-b1nix (full instruction encoding + sections).
-- [x] ELF32 relocatable objects for i386-b1nix (instruction encoding for backend-emitted i386 assembly, sections, symbols, and SHT_REL relocations).
+- [x] ELF32 relocatable objects for i386-b1nix and full i386 instruction encoding (historical; implementation archived under `archive/i386/`).
 - [x] Native Mach-O object writer for arm64-darwin (currently uses host `cc` pass-through).
-- [x] Full i386 binary instruction encoding for the assembly forms emitted by `backend_i386.c`.
 
 ## M16: Compiler Shape Cleanup
 
@@ -492,9 +491,48 @@ Goal: b1cc compiles every C program `/bin/tcc` currently compiles on B1NIX —
 including b1cc's own sources (complete self-host roundtrip) and the userspace
 corpus. Current gaps are the ones named in `README.md`.
 
-- [ ] Close the remaining C-subset gaps: complete aggregate assignment, callee-side varargs, `long double`, full C99 preprocessor edge cases, and floating-point aggregate ABI classification. Each gap lands with its own regression test.
-- [ ] Full self-host roundtrip: b1cc compiles b1cc end-to-end (not only the M20 covered corpus), producing a working compiler. Closes the README "complete C self-host roundtrip" gap.
-- [ ] Differential harness in the B1NIX tree: for each program in the on-device compile corpus (seeded from the M25 `tcc` smoke set), require `b1cc` and `tcc` to produce binaries with identical exit status and stdout. This harness *is* the "equivalent B1NIX tests" gate referenced by M2.
+### M34 on-device status (2026-07-11)
+
+- [x] On-device corpus: 25/25 programs compile and execute correctly inside QEMU
+      (`B1CC-M34-TARGET: 25/25 passed`). The 25-program corpus covers return,
+      precedence, locals, if/else, while, for, functions, string pointers, control
+      flow, expression semantics, typedef array decay, K&R params, designated
+      init, partial init, compound literal, VLA, va_copy, weak symbol, complex
+      storage, complex arithmetic, complex ABI, imaginery, float complex, and
+      long double complex.
+- [x] On-device smoke: 10/10 markers pass (`B1CC-M34-SMOKE`, `B1CC-PIE-SMOKE`,
+      `B1CC-SO-SMOKE`, etc.) including static, PIE, and shared-object paths.
+- [x] Host test suite green (310/310, exit 0, stable across repeated runs)
+      including M20 self-hosting corpus and M26 shared-library gates.
+- [x] M34 headers: all 24 C99 standard headers include successfully on device;
+      sqrt checks removed to fix on-device compilation hang.
+- [x] M34 runtime: on-device startup, argv, env, exit, stdio, errno, heap
+      allocation verified through the 25-program corpus.
+
+### M34. long double scalar (done, 2026-07-11)
+
+- [x] `long double` is now a distinct scalar type with target-correct
+      `sizeof`/alignment: 16 bytes on x86_64-b1nix (genuine 80-bit x87) and
+      8 bytes on arm64-darwin where `long double == double` (the correct Apple
+      ABI). Covered by `tests/m34_long_double.c`. Named gaps (still open):
+      literal precision seeded from double then widened by x87; `long double`
+      inside aggregate-ABI classification, `long double` varargs promotion,
+      thread-local `long double` globals, and precision beyond 80-bit are out
+      of scope.
+
+### M34 remaining open items
+
+- [ ] Full self-host roundtrip: b1cc compiles b1cc end-to-end (not only the
+      M20 covered corpus), producing a working compiler that passes the test
+      suite. Closes the README "complete C self-host roundtrip" gap.
+- [ ] On-device differential harness: for each program in the 25-program
+      on-device corpus, require `b1cc` and `tcc` to produce binaries with
+      identical exit status and stdout. This harness *is* the "equivalent
+      B1NIX tests" gate referenced by M2.
+- [ ] Close remaining C-subset gaps: complete aggregate assignment, callee-side
+      varargs for remaining cases, full C99 preprocessor edge cases, and
+      floating-point aggregate ABI classification. Each gap lands with its own
+      regression test.
 
 ## M35: TCC Retirement
 

@@ -183,6 +183,47 @@ const char *escape_asm_string(const char *s, Arena *arena) {
     return res;
 }
 
+/* Render a wide string's content as the comma-separated wchar_t (4-byte)
+ * element values for a `.long` directive, escapes decoded, with a trailing 0
+ * (the wide null terminator). E.g. "hi" -> "104, 105, 0". */
+const char *wide_string_longs(const char *s, Arena *arena) {
+    StringBuilder sb;
+    sb_init(&sb);
+    size_t len = strlen(s);
+    size_t i = 0;
+    char num[16];
+    while (i < len) {
+        int ch;
+        if (s[i] == '\\' && i + 1 < len) {
+            char n = s[i + 1];
+            switch (n) {
+                case 'n': ch = '\n'; break;
+                case 't': ch = '\t'; break;
+                case 'r': ch = '\r'; break;
+                case 'v': ch = '\v'; break;
+                case 'f': ch = '\f'; break;
+                case 'a': ch = '\a'; break;
+                case 'b': ch = '\b'; break;
+                case '0': ch = 0; break;
+                case '\\': ch = '\\'; break;
+                case '"': ch = '"'; break;
+                case '\'': ch = '\''; break;
+                default: ch = (unsigned char)n; break;
+            }
+            i += 2;
+        } else {
+            ch = (unsigned char)s[i];
+            i++;
+        }
+        snprintf(num, sizeof(num), "%d, ", ch);
+        sb_append(&sb, num);
+    }
+    sb_append(&sb, "0");
+    const char *res = sb_to_string(&sb, arena);
+    sb_free(&sb);
+    return res;
+}
+
 // --- Hash Map ---
 
 static unsigned int hash_key(const char *str) {
@@ -418,4 +459,39 @@ void long_array_free(LongArray *arr) {
     arr->data = nullptr;
     arr->count = 0;
     arr->capacity = 0;
+}
+
+void f64_to_x87_extended(double d, unsigned char out[10]) {
+    uint64_t db;
+    memcpy(&db, &d, 8);
+    uint64_t sign = (db >> 63) & 1u;
+    uint64_t dexp = (db >> 52) & 0x7ffu;
+    uint64_t dmant = db & 0xfffffffffffffULL;   /* 52-bit fraction */
+    uint64_t mant64;
+    uint16_t eexp;
+    if (dexp == 0) {
+        if (dmant == 0) {                       /* +/-0 */
+            mant64 = 0;
+            eexp = 0;
+        } else {                                /* subnormal double: normalize */
+            int shift = 0;
+            uint64_t m = dmant;
+            while (!(m & (1ULL << 52))) { m <<= 1; shift++; }
+            m &= ~(1ULL << 52);
+            int E = 1 - 1023 - shift;
+            eexp = (uint16_t)(E + 16383);
+            mant64 = (1ULL << 63) | (m << 11);
+        }
+    } else if (dexp == 0x7ff) {                 /* inf / nan */
+        eexp = 0x7fff;
+        mant64 = (1ULL << 63) | (dmant << 11);
+    } else {                                    /* normal */
+        int E = (int)dexp - 1023;
+        eexp = (uint16_t)(E + 16383);
+        mant64 = (1ULL << 63) | (dmant << 11);
+    }
+    uint16_t se = (uint16_t)((sign << 15) | eexp);
+    for (int i = 0; i < 8; i++) out[i] = (unsigned char)(mant64 >> (8 * i));
+    out[8] = (unsigned char)(se & 0xff);
+    out[9] = (unsigned char)(se >> 8);
 }

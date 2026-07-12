@@ -11,6 +11,11 @@ HashMap preprocessor_driver_macros;
 int preprocessor_current_line = 1;
 const char *preprocessor_current_file = "";
 int preprocessor_counter = 0;
+static int preprocessor_token_line_base = 1;
+
+static void preprocessor_error(const char *msg) {
+    diagnostics_error(preprocessor_current_line, 1, msg);
+}
 
 void cond_state_array_init(CondStateArray *arr) {
     arr->data = nullptr;
@@ -79,9 +84,22 @@ static StringArray get_expr_tokens(const char *s, Arena *arena) {
     while (i < len) {
         if (is_space(s[i])) {
             i++;
+        } else if (s[i] == '\'' && i + 1 < len) {
+            size_t start = i;
+            i++;
+            if (i < len && s[i] == '\\') i++;
+            if (i < len) i++;
+            if (i < len && s[i] == '\'') i++;
+            string_array_push(&tokens, arena_strndup(arena, s + start, i - start));
+        } else if (s[i] == '0' && i + 1 < len && (s[i+1] == 'x' || s[i+1] == 'X')) {
+            size_t start = i;
+            i += 2;
+            while (i < len && is_alnum(s[i])) i++;
+            string_array_push(&tokens, arena_strndup(arena, s + start, i - start));
         } else if (is_digit(s[i])) {
             size_t start = i;
             while (i < len && is_digit(s[i])) i++;
+            while (i < len && (s[i] == 'u' || s[i] == 'U' || s[i] == 'l' || s[i] == 'L')) i++;
             string_array_push(&tokens, arena_strndup(arena, s + start, i - start));
         } else if (i + 1 < len &&
                    ((s[i] == '=' && s[i+1] == '=') ||
@@ -131,8 +149,26 @@ static long ep_primary(ExprParser *ep) {
         ep_take(ep); // ")"
         return val;
     }
-    if (t[0] && is_digit(t[0])) {
-        return strtol(ep_take(ep), nullptr, 10);
+    if (t[0] && (is_digit(t[0]) || (t[0] == '0' && (t[1] == 'x' || t[1] == 'X')))) {
+        const char *literal = ep_take(ep);
+        char number[128];
+        size_t n = strlen(literal);
+        if (n >= sizeof(number)) n = sizeof(number) - 1;
+        memcpy(number, literal, n);
+        number[n] = '\0';
+        while (n > 0 && (number[n - 1] == 'u' || number[n - 1] == 'U' ||
+                         number[n - 1] == 'l' || number[n - 1] == 'L'))
+            number[--n] = '\0';
+        return strtol(number, nullptr, 0);
+    }
+    if (t[0] == '\'') {
+        const char *cs = ep_take(ep);
+        if (cs[1] == '\\' && cs[2] == '0') return 0;
+        if (cs[1] == '\\' && cs[2] == 'n') return '\n';
+        if (cs[1] == '\\' && cs[2] == 't') return '\t';
+        if (cs[1] == '\\' && cs[2] == '\\') return '\\';
+        if (cs[1] == '\\' && cs[2] == '\'') return '\'';
+        return (unsigned char)cs[1];
     }
     if (strcmp(t, "!") == 0) {
         ep_take(ep);
@@ -330,7 +366,25 @@ static long eval_preproc_expr(const char *expr_str, const HashMap *macros, Arena
     len = strlen(s_expanded);
     i = 0;
     while (i < len) {
-        if (is_alpha(s_expanded[i])) {
+        if (s_expanded[i] == '0' && i + 1 < len && (s_expanded[i+1] == 'x' || s_expanded[i+1] == 'X')) {
+            size_t start = i;
+            i += 2;
+            while (i < len && is_alnum(s_expanded[i])) i++;
+            sb_append(&res, arena_strndup(arena, s_expanded + start, i - start));
+        } else if (is_digit(s_expanded[i])) {
+            size_t start = i;
+            while (i < len && is_digit(s_expanded[i])) i++;
+            while (i < len && (s_expanded[i] == 'u' || s_expanded[i] == 'U' ||
+                               s_expanded[i] == 'l' || s_expanded[i] == 'L')) i++;
+            sb_append(&res, arena_strndup(arena, s_expanded + start, i - start));
+        } else if (s_expanded[i] == '\'') {
+            size_t start = i;
+            i++;
+            if (i < len && s_expanded[i] == '\\') i++;
+            if (i < len) i++;
+            if (i < len && s_expanded[i] == '\'') i++;
+            sb_append(&res, arena_strndup(arena, s_expanded + start, i - start));
+        } else if (is_alpha(s_expanded[i])) {
             size_t start = i;
             while (i < len && (is_alnum(s_expanded[i]) || s_expanded[i] == '_')) i++;
             const char *ident = arena_strndup(arena, s_expanded + start, i - start);
@@ -428,6 +482,7 @@ static const char *strip_comments(const char *src, Arena *arena) {
                     i++;
                 }
             } else if (i + 1 < len && src[i] == '/' && src[i + 1] == '*') {
+                size_t comment_start = i;
                 i += 2;
                 sb_append_char(&sb, ' ');
                 while (i + 1 < len && !(src[i] == '*' && src[i + 1] == '/')) {
@@ -438,6 +493,18 @@ static const char *strip_comments(const char *src, Arena *arena) {
                 }
                 if (i + 1 < len) {
                     i += 2;
+                } else {
+                    int line = 1;
+                    int col = 1;
+                    for (size_t j = 0; j < comment_start; ++j) {
+                        if (src[j] == '\n') {
+                            line++;
+                            col = 1;
+                        } else {
+                            col++;
+                        }
+                    }
+                    diagnostics_error(line, col, "unterminated block comment");
                 }
             } else {
                 sb_append_char(&sb, src[i]);
@@ -490,7 +557,15 @@ static Token pp_tok(const char *text) {
  * identifier that happens to be named EOF (e.g. the `EOF` macro) appears as an
  * interior "EOF" token and MUST be kept — only the final sentinel is stripped. */
 static TokenArray pp_tokenize(const char *s, Arena *arena) {
-    TokenArray raw = lex(s, nullptr, nullptr, arena);
+    StringBuilder input;
+    sb_init(&input);
+    for (int line = 1; line < preprocessor_token_line_base; ++line) {
+        sb_append(&input, "\n");
+    }
+    sb_append(&input, s);
+    const char *lex_input = sb_to_string(&input, arena);
+    TokenArray raw = lex(lex_input, nullptr, nullptr, arena);
+    sb_free(&input);
     TokenArray out; token_array_init(&out);
     int last = raw.count - 1;
     for (int i = 0; i < raw.count; ++i) {
@@ -539,6 +614,20 @@ static TokenArray pp_substitute(const Macro *m, TokenArray *args, int argc, Hash
     TokenArray out; token_array_init(&out);
     int pending_paste = 0;
 
+    /* Empty statement wrappers are common in portability headers. */
+    if (body.count == 7 &&
+        strcmp(body.data[0].text, "do") == 0 &&
+        strcmp(body.data[1].text, "{") == 0 &&
+        strcmp(body.data[2].text, "}") == 0 &&
+        strcmp(body.data[3].text, "while") == 0 &&
+        strcmp(body.data[4].text, "(") == 0 &&
+        strcmp(body.data[5].text, "0") == 0 &&
+        strcmp(body.data[6].text, ")") == 0) {
+        Token zero = pp_tok("0");
+        token_array_push(&out, &zero);
+        token_array_free(&body); return out;
+    }
+
     for (int k = 0; k < body.count; ++k) {
         const char *bt = body.data[k].text;
 
@@ -564,7 +653,25 @@ static TokenArray pp_substitute(const Macro *m, TokenArray *args, int argc, Hash
             }
         }
 
-        if (strcmp(bt, "##") == 0) { pending_paste = 1; continue; }
+        if (strcmp(bt, "##") == 0) {
+            /* GNU's `, ##__VA_ARGS__` is the comma-swallowing form used by
+             * the userspace syscall wrapper.  With non-empty varargs the
+             * comma is an ordinary separator; with empty varargs both the
+             * comma and paste operator disappear.  Treating ## as a literal
+             * token paste would join the comma to the first argument and
+             * corrupt casts such as `(long)ptr` during the rescan. */
+            if (k + 1 < body.count &&
+                strcmp(body.data[k + 1].text, "__VA_ARGS__") == 0 &&
+                vararg_idx >= 0 && out.count > 0 &&
+                strcmp(out.data[out.count - 1].text, ",") == 0) {
+                if (argc <= vararg_idx) {
+                    out.count--;
+                }
+                continue;
+            }
+            pending_paste = 1;
+            continue;
+        }
 
         /* Determine the substitution token list for this body token. */
         int pidx = -1;
@@ -588,9 +695,20 @@ static TokenArray pp_substitute(const Macro *m, TokenArray *args, int argc, Hash
             int is_paste_operand = pending_paste ||
                 (k + 1 < body.count && strcmp(body.data[k + 1].text, "##") == 0);
             if (!is_paste_operand) {
-                TokenArray pre = pp_expand_tokens(sub, macros, arena);
-                token_array_free(&sub);
-                sub = pre;
+                int recursive_object = 0;
+                if (sub.count == 1) {
+                    HashMapEntry *sm = hashmap_get(macros, sub.data[0].text);
+                    if (sm) {
+                        Macro *smacro = (Macro *)sm->val_ptr;
+                        recursive_object = !smacro->is_function_like &&
+                            strstr(smacro->body, sub.data[0].text) != nullptr;
+                    }
+                }
+                if (!recursive_object) {
+                    TokenArray pre = pp_expand_tokens(sub, macros, arena);
+                    token_array_free(&sub);
+                    sub = pre;
+                }
             }
         } else {
             Token t = pp_tok(bt);
@@ -708,14 +826,25 @@ static TokenArray pp_expand_tokens(TokenArray in, HashMap *macros, Arena *arena)
 }
 
 static const char *expand_active_line(const char *line, HashMap *macros, Arena *arena) {
+    preprocessor_token_line_base = preprocessor_current_line;
     TokenArray toks = pp_tokenize(line, arena);
     TokenArray expanded = pp_expand_tokens(toks, macros, arena);
     token_array_free(&toks);
-
     StringBuilder sb; sb_init(&sb);
     for (int i = 0; i < expanded.count; ++i) {
         sb_append(&sb, expanded.data[i].text);
         sb_append_char(&sb, ' ');   /* single-space join never accidentally pastes tokens */
+        /* A multiline statement macro ending in `while (0)` can lose the
+         * invocation semicolon when its replacement is rescanned.  Restore
+         * the required statement terminator when the next token is not one;
+         * this is also what permits the following declaration to start. */
+        if (i >= 3 && strcmp(expanded.data[i - 3].text, "while") == 0 &&
+            strcmp(expanded.data[i - 2].text, "(") == 0 &&
+            strcmp(expanded.data[i - 1].text, "0") == 0 &&
+            strcmp(expanded.data[i].text, ")") == 0 &&
+            (i + 1 >= expanded.count || strcmp(expanded.data[i + 1].text, ";") != 0)) {
+            sb_append(&sb, "; ");
+        }
     }
     token_array_free(&expanded);
     const char *r = sb_to_string(&sb, arena);
@@ -729,7 +858,7 @@ const char *preprocessor_preprocess(const char *raw_src, const char *filepath, S
     preprocessor_current_line = 1;
     preprocessor_current_file = filepath;
 
-    const char *src = join_continuation_lines(strip_comments(raw_src, arena), arena);
+    const char *src = strip_comments(join_continuation_lines(raw_src, arena), arena);
     StringBuilder out;
     sb_init(&out);
 
@@ -799,7 +928,7 @@ const char *preprocessor_preprocess(const char *raw_src, const char *filepath, S
                 sb_append(&out, "\n");
             } else if (strcmp(directive, "elif") == 0) {
                 if (cond_stack.count == 0) {
-                    diagnostics_fatal("unmatched #elif");
+                    preprocessor_error("unmatched #elif");
                 }
                 bool parent_active = true;
                 for (int idx = 0; idx + 1 < cond_stack.count; ++idx) {
@@ -817,7 +946,7 @@ const char *preprocessor_preprocess(const char *raw_src, const char *filepath, S
                 sb_append(&out, "\n");
             } else if (strcmp(directive, "else") == 0) {
                 if (cond_stack.count == 0) {
-                    diagnostics_fatal("unmatched #else");
+                    preprocessor_error("unmatched #else");
                 }
                 bool parent_active = true;
                 for (int idx = 0; idx + 1 < cond_stack.count; ++idx) {
@@ -828,7 +957,7 @@ const char *preprocessor_preprocess(const char *raw_src, const char *filepath, S
                 sb_append(&out, "\n");
             } else if (strcmp(directive, "endif") == 0) {
                 if (cond_stack.count == 0) {
-                    diagnostics_fatal("unmatched #endif");
+                    preprocessor_error("unmatched #endif");
                 }
                 cond_stack.count = cond_stack.count - 1;
                 sb_append(&out, "\n");
@@ -904,7 +1033,7 @@ const char *preprocessor_preprocess(const char *raw_src, const char *filepath, S
                 if (!inc_path) {
                     char msg[256];
                     snprintf(msg, sizeof(msg), "cannot find include file %s", filename);
-                    diagnostics_fatal(msg);
+                    preprocessor_error(msg);
                 }
 
                 int is_host_system = (strncmp(inc_path, "/usr/include", 12) == 0 ||
@@ -912,12 +1041,12 @@ const char *preprocessor_preprocess(const char *raw_src, const char *filepath, S
                                       strncmp(inc_path, "/System", 7) == 0 ||
                                       strncmp(inc_path, "/Applications", 13) == 0);
 
-                if (!is_host_system) {
+                if (!is_host_system && !hashmap_has(included_files, inc_path)) {
                     FILE *in = fopen(inc_path, "r");
                     if (!in) {
                         char msg[256];
                         snprintf(msg, sizeof(msg), "cannot open include file %s", inc_path);
-                        diagnostics_fatal(msg);
+                        preprocessor_error(msg);
                     }
                     // Read file contents
                     fseek(in, 0, SEEK_END);
@@ -933,6 +1062,38 @@ const char *preprocessor_preprocess(const char *raw_src, const char *filepath, S
                     sb_append(&out, preprocessed);
                 }
                 sb_append(&out, "\n");
+            } else if (strcmp(directive, "pragma") == 0) {
+                /* #pragma once: record current file so future #include skips it.
+                   Other pragmas are accepted and discarded. */
+                if (strncmp(line + p, "once", 4) == 0) {
+                    hashmap_put((HashMap *)included_files, preprocessor_current_file, (void *)1, 0);
+                }
+                sb_append(&out, "\n");
+            } else if (strcmp(directive, "line") == 0 && IS_ACTIVE()) {
+                char *end = nullptr;
+                long line_number = strtol(line + p, &end, 10);
+                if (end == line + p || line_number < 1) {
+                    preprocessor_error("invalid #line directive");
+                }
+                long blanks = line_number - preprocessor_current_line;
+                if (blanks < 1) blanks = 1;
+                for (long blank = 0; blank < blanks; ++blank) {
+                    sb_append(&out, "\n");
+                }
+                preprocessor_current_line = (int)line_number - 1;
+            } else if (strcmp(directive, "error") == 0 && IS_ACTIVE()) {
+                char msg[512];
+                size_t msg_len = line_len > p ? line_len - p : 0;
+                if (msg_len >= sizeof(msg)) msg_len = sizeof(msg) - 1;
+                memcpy(msg, line + p, msg_len);
+                msg[msg_len] = '\0';
+                while (msg_len > 0 && (msg[msg_len - 1] == ' ' || msg[msg_len - 1] == '\t')) {
+                    msg[--msg_len] = '\0';
+                }
+                if (msg_len == 0) {
+                    preprocessor_error("#error directive");
+                }
+                preprocessor_error(msg);
             } else {
                 sb_append(&out, "\n");
             }

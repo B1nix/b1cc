@@ -50,6 +50,7 @@ static B1CC_THREAD_LOCAL LoopContextArray loop_contexts;
 static B1CC_THREAD_LOCAL int current_func_ret_size = 0;
 static B1CC_THREAD_LOCAL int current_func_ret_aggregate_size = 0;
 static B1CC_THREAD_LOCAL int current_func_ret_is_float = 0;
+static B1CC_THREAD_LOCAL int current_func_ret_is_void = 0;
 static B1CC_THREAD_LOCAL int current_func_ret_is_unsigned = 0;
 
 static HashMap ir_var_unsigned;
@@ -98,6 +99,8 @@ void ir_global_var_array_push(IrGlobalVarArray *arr, const IrGlobalVar *val) {
     arr->data[arr->count].elem_size = val->elem_size;
     arr->data[arr->count].align = val->align;
     arr->data[arr->count].is_thread_local = val->is_thread_local;
+    arr->data[arr->count].is_long_double = val->is_long_double;
+    arr->data[arr->count].section_name = val->section_name;
     arr->count = arr->count + 1;
 }
 void ir_global_var_array_free(IrGlobalVarArray *arr) {
@@ -173,6 +176,8 @@ void ir_function_array_push(IrFunctionArray *arr, const IrFunction *val) {
     arr->data[arr->count].has_call = val->has_call;
     arr->data[arr->count].label_id = val->label_id;
     arr->data[arr->count].is_static = val->is_static;
+    arr->data[arr->count].is_weak = val->is_weak;
+    arr->data[arr->count].section_name = val->section_name;
     arr->data[arr->count].return_aggregate_size = val->return_aggregate_size;
     arr->data[arr->count].return_aggregate_float_class = val->return_aggregate_float_class;
     arr->data[arr->count].max_align = val->max_align;
@@ -459,12 +464,23 @@ void ir_declare_global(const char *name, int is_array, long size, int is_static,
     v.elem_size = elem_size;
     v.align = 0;
     v.is_thread_local = 0;
+    v.is_long_double = 0;
+    v.section_name = "";
     ir_global_var_array_push(&ir_global_decls, &v);
 
     hashmap_put(&ir_global_vars, name, nullptr, 1);
     hashmap_put(&ir_global_var_elem_scales, name, nullptr, elem_size);
     if (is_array) {
         hashmap_put(&ir_global_arrays, name, nullptr, 1);
+    }
+}
+
+void ir_set_global_section(const char *name, const char *section_name) {
+    for (int i = 0; i < ir_global_decls.count; ++i) {
+        if (strcmp(ir_global_decls.data[i].name, name) == 0) {
+            ir_global_decls.data[i].section_name = section_name ? section_name : "";
+            return;
+        }
     }
 }
 
@@ -584,6 +600,15 @@ void ir_set_global_thread_local(const char *name, int val) {
 int ir_is_global_var_thread_local(const char *name) {
     HashMapEntry *entry = hashmap_get(&ir_global_vars_thread_local, name);
     return entry ? entry->val_int : 0;
+}
+
+void ir_set_global_long_double(const char *name) {
+    for (int i = 0; i < ir_global_decls.count; ++i) {
+        if (strcmp(ir_global_decls.data[i].name, name) == 0) {
+            ir_global_decls.data[i].is_long_double = 1;
+            break;
+        }
+    }
 }
 
 int ir_get_local_var_elem_scale(const char *name) {
@@ -711,6 +736,7 @@ int ir_get_struct_field_bit_width(const char *key) {
 
 static void lower_addr(const Node *node, IrFunction *fn, TargetBackend *backend, Arena *arena);
 static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend, Arena *arena);
+static void lower_complex_addr(const Node *node, IrFunction *fn, TargetBackend *backend, Arena *arena);
 
 static int is_relational_op(const char *op) {
     return strcmp(op, "<") == 0 || strcmp(op, ">") == 0 ||
@@ -835,9 +861,12 @@ static LongArray get_node_dims(const Node *node, const IrFunction *fn) {
    The eval stack carries floating values as their 8-byte double bit pattern;
    backends move them into FP registers for arithmetic. */
 static long ir_double_to_bits(double d) {
-    long v;
-    memcpy(&v, &d, sizeof(v));
-    return v;
+    union {
+        double d;
+        unsigned long long u;
+    } bits;
+    bits.d = d;
+    return (long)bits.u;
 }
 
 /* True when an expression node yields a floating-point value. */
@@ -862,12 +891,42 @@ static int ir_expr_is_i64(const Node *n, int target_scale) {
     return target_scale == 4 && n && !ir_expr_is_float(n) && n->type_size == 8;
 }
 
+/* M34: true when a float expression is a long double (80-bit). On arm64-darwin
+ * long double == double (float sizes never exceed 8), so this is always 0 there
+ * and the normal double path is used. On x86 a long double float has type_size
+ * 16 on x86_64; arithmetic results inherit long-double-ness from any
+ * long-double operand. */
+static int ir_expr_is_ld(const Node *n) {
+    if (!n || !ir_expr_is_float(n)) return 0;
+    if (n->is_complex || n->op_enum == OP_COMPLEX_REAL || n->op_enum == OP_COMPLEX_IMAG) return 0;
+    if (n->type_size >= 12) return 1;
+    return ir_expr_is_ld(n->lhs) || ir_expr_is_ld(n->rhs);
+}
+
+static void ir_push(IrFunction *fn, const char *op, const char *arg, long value);
+
+/* Promote the just-lowered operand on the eval stack to long double.  `src` is
+ * the operand node (already lowered). Emits i2ld for an int operand, d2ld for a
+ * double/float operand, nothing when it is already long double. */
+static void ir_promote_to_ld(IrFunction *fn, const Node *src) {
+    if (!ir_expr_is_float(src)) ir_push(fn, "i2ld", "", 0);
+    else if (!ir_expr_is_ld(src)) ir_push(fn, "d2ld", "", 0);
+}
+
 static int ir_expr_has_address(const Node *n) {
     if (!n) return 0;
     return n->op_enum == OP_VAR || n->op_enum == OP_INDEX || n->op_enum == OP_UNARY_DEREF;
 }
 
 static const struct { const char *str; IrOp op; } ir_op_table[] = {
+    {"trap", IR_TRAP},
+    {"atomic_load", IR_ATOMIC_LOAD},
+    {"atomic_store", IR_ATOMIC_STORE},
+    {"atomic_add", IR_ATOMIC_ADD},
+    {"atomic_fetch_add", IR_ATOMIC_FETCH_ADD},
+    {"atomic_exchange", IR_ATOMIC_EXCHANGE},
+    {"atomic_cas", IR_ATOMIC_CAS},
+    {"frame_addr", IR_FRAME_ADDR},
     {"!", IR_NOT},
     {"!=", IR_NOTEQ},
     {"!=64", IR_NOTEQ64},
@@ -933,6 +992,27 @@ static const struct { const char *str; IrOp op; } ir_op_table[] = {
     {"fstore_addr4", IR_FSTORE_ADDR4},
     {"fstore_addr8", IR_FSTORE_ADDR8},
     {"fsub", IR_FSUB},
+    {"ldconst", IR_LDCONST},
+    {"ldadd", IR_LDADD},
+    {"ldsub", IR_LDSUB},
+    {"ldmul", IR_LDMUL},
+    {"lddiv", IR_LDDIV},
+    {"ldneg", IR_LDNEG},
+    {"ld<", IR_LDLT},
+    {"ld>", IR_LDGT},
+    {"ld<=", IR_LDLTEQ},
+    {"ld>=", IR_LDGTEQ},
+    {"ld==", IR_LDEQEQ},
+    {"ld!=", IR_LDNOTEQ},
+    {"ldload", IR_LDLOAD},
+    {"ldstore", IR_LDSTORE},
+    {"ldgload", IR_LDGLOAD},
+    {"ldgstore", IR_LDGSTORE},
+    {"i2ld", IR_I2LD},
+    {"ld2i", IR_LD2I},
+    {"d2ld", IR_D2LD},
+    {"ld2d", IR_LD2D},
+    {"ldret", IR_LDRET},
     {"gaddr", IR_GADDR},
     {"gload", IR_GLOAD},
     {"gload64", IR_GLOAD64},
@@ -1084,6 +1164,19 @@ static int lower_aggregate_assignment_arg(const Node *node, int agg_size, IrFunc
         return 1;
     }
 
+    if (node->op_enum == OP_CAST) {
+        lower_expr(node, fn, backend, arena);
+        int slot = fn->locals.size;
+        char tmp_name[64];
+        snprintf(tmp_name, sizeof(tmp_name), "$casttmp%d", slot);
+        hashmap_put(&fn->locals, arena_strdup(arena, tmp_name), nullptr, slot);
+        ir_push(fn, "const", "", 0);
+        ir_push(fn, "addr", "", slot);
+        ir_push(fn, "store_index", "", agg_size > target_scale ? target_scale : agg_size);
+        ir_push(fn, "addr", "", slot);
+        return 1;
+    }
+
     if (node->op_enum == OP_STORE_INDEX) {
         if (node->rhs->op_enum == OP_CALL) {
             lower_expr(node->rhs, fn, backend, arena);
@@ -1208,6 +1301,9 @@ static int get_expr_pointer_scale(const Node *node, const IrFunction *fn) {
         return 0;
     }
     if (node->op_enum == OP_CAST) {
+        if (node->pointee_size > 0) {
+            return node->pointee_size;
+        }
         if (strncmp(node->name, "ptr:", 4) == 0) {
             return atoi(node->name + 4);
         }
@@ -1232,6 +1328,9 @@ static int get_expr_pointer_scale(const Node *node, const IrFunction *fn) {
 }
 
 static int get_lvalue_store_size(const Node *node, const IrFunction *fn) {
+    if (node->op_enum == OP_VAR) {
+        return ir_get_var_type_size(node->name);
+    }
     int scale = get_expr_pointer_scale(node, fn);
     if (node->op_enum == OP_INDEX && strcmp(node->name, "byte_offset") == 0) {
         if (node->elem_size > 0) {
@@ -1305,6 +1404,8 @@ static int lvalue_is_unsigned(const Node *node) {
     return base_name && base_name[0] && ir_get_var_unsigned(base_name);
 }
 
+static int complex_elem_size(const Node *node);
+
 static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend, Arena *arena) {
     if (!node) return;
     if (node->line > 0) {
@@ -1312,6 +1413,26 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         ir_current_col = node->col;
     }
     int target_scale = backend->get_target_scale(backend);
+    if (node->op_enum == OP_COMPLEX_REAL || node->op_enum == OP_COMPLEX_IMAG) {
+        if (node->lhs && node->lhs->is_imaginary) {
+            if (node->op_enum == OP_COMPLEX_IMAG) lower_expr(node->lhs, fn, backend, arena);
+            else ir_push(fn, "fconst", "", 0);
+            return;
+        }
+        int elem_size = complex_elem_size(node->lhs);
+        int component_offset = node->op_enum == OP_COMPLEX_IMAG ? elem_size : 0;
+        lower_complex_addr(node->lhs, fn, backend, arena);
+        ir_push(fn, "const", "", component_offset);
+        ir_push(fn, "+", "", 0);
+        ir_push(fn, elem_size == 4 ? "fload_addr4" : "fload_addr8", "", 0);
+        return;
+    }
+    if (node->is_complex && (node->op_enum == OP_VAR || node->op_enum == OP_UNARY_MINUS ||
+                             node->op_enum == OP_ADD || node->op_enum == OP_SUB ||
+                             node->op_enum == OP_MUL || node->op_enum == OP_DIV)) {
+        lower_complex_addr(node, fn, backend, arena);
+        return;
+    }
     if (node->op_enum == OP_NUM) {
         ir_push(fn, ir_expr_is_i64(node, target_scale) ? "const64" : "const", "", node->value);
         return;
@@ -1319,8 +1440,11 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
     if (node->op_enum == OP_FNUM) {
         /* float literal: 4-byte literals are still materialised as the double
            bit pattern (compute-in-double model); the 4-byte storage type is
-           applied on store / in aggregates. */
-        ir_push(fn, "fconst", "", ir_double_to_bits(node->fvalue));
+           applied on store / in aggregates.  A long double literal (type_size
+           >= 12) seeds an x87 80-bit value from the same double bits — literal
+           precision is therefore double; x87 widens it exactly at runtime. */
+        ir_push(fn, node->type_size >= 12 ? "ldconst" : "fconst", "",
+                ir_double_to_bits(node->fvalue));
         return;
     }
     if (node->op_enum == OP_COMPOUND_LITERAL) {
@@ -1335,7 +1459,15 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         lower_expr(node->lhs, fn, backend, arena);
         int src_float = ir_expr_is_float(node->lhs);
         int dst_float = node->is_float;
-        if (dst_float && !src_float) {
+        int src_ld = ir_expr_is_ld(node->lhs);
+        int dst_ld = dst_float && node->type_size >= 12;
+        if (dst_ld) {                              /* -> long double */
+            if (!src_float) ir_push(fn, "i2ld", "", 0);
+            else if (!src_ld) ir_push(fn, "d2ld", "", 0);
+        } else if (src_ld) {                        /* long double -> ... */
+            if (!dst_float) ir_push(fn, "ld2i", "", node->value);
+            else { ir_push(fn, "ld2d", "", 0); if (node->value == 4) ir_push(fn, "d2f", "", 0); }
+        } else if (dst_float && !src_float) {
             ir_push(fn, "i2f", "", 0);            /* int -> double */
         } else if (!dst_float && src_float) {
             ir_push(fn, "f2i", "", node->value);  /* double -> int (truncate) */
@@ -1570,7 +1702,14 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
             int size = ir_get_var_type_size(node->name);
             int is_flt = ir_get_var_float(node->name);
             int is_agg = is_aggregate_var_name(fn, node->name);
-            if (is_agg) {
+            int rhs_is_call = node->lhs && node->lhs->op_enum == OP_CALL;
+            if (node->is_complex) {
+                if (rhs_is_call) lower_expr(node->lhs, fn, backend, arena);
+                else lower_complex_addr(node->lhs, fn, backend, arena);
+                ir_push(fn, "addr", "", loc_entry->val_int);
+                ir_push(fn, rhs_is_call ? "store_agg" : "copy", "", size);
+                ir_push(fn, "addr", "", loc_entry->val_int);
+            } else if (is_agg) {
                 char local_key[512];
                 snprintf(local_key, sizeof(local_key), "%s$%s", fn->name, node->name);
                 if (lower_comma_wrapped_aggregate_call(node->lhs, fn, backend, arena)) {
@@ -1601,6 +1740,13 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
                         ir_push(fn, "addr", "", loc_entry->val_int);
                     }
                 }
+            } else if (is_flt && size >= 12) {
+                /* long double local: store then reload the slot as the
+                 * assignment-expression result (avoids a 16-byte dup op). */
+                lower_expr(node->lhs, fn, backend, arena);
+                ir_promote_to_ld(fn, node->lhs);
+                ir_push(fn, "ldstore", "", loc_entry->val_int);
+                ir_push(fn, "ldload", "", loc_entry->val_int);
             } else if (is_flt) {
                 lower_expr(node->lhs, fn, backend, arena);
                 if (!ir_expr_is_float(node->lhs)) ir_push(fn, "i2f", "", 0);
@@ -1623,7 +1769,14 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
             int size = ir_get_var_type_size(node->name);
             int is_flt = ir_get_var_float(node->name);
             int is_agg = is_aggregate_var_name(fn, node->name);
-            if (is_agg) {
+            int rhs_is_call = node->lhs && node->lhs->op_enum == OP_CALL;
+            if (node->is_complex) {
+                if (rhs_is_call) lower_expr(node->lhs, fn, backend, arena);
+                else lower_complex_addr(node->lhs, fn, backend, arena);
+                ir_push(fn, "gaddr", node->name, 0);
+                ir_push(fn, rhs_is_call ? "store_agg" : "copy", "", size);
+                ir_push(fn, "gaddr", node->name, 0);
+            } else if (is_agg) {
                 if (lower_comma_wrapped_aggregate_call(node->lhs, fn, backend, arena)) {
                     ir_push(fn, "gaddr", node->name, 0);
                     ir_push(fn, "store_agg", "", size);
@@ -1636,6 +1789,11 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
                     ir_push(fn, "copy", "", size);
                     ir_push(fn, "gaddr", node->name, 0);
                 }
+            } else if (is_flt && size >= 12) {
+                lower_expr(node->lhs, fn, backend, arena);
+                ir_promote_to_ld(fn, node->lhs);
+                ir_push(fn, "ldgstore", node->name, 0);
+                ir_push(fn, "ldgload", node->name, 0);
             } else if (is_flt) {
                 lower_expr(node->lhs, fn, backend, arena);
                 if (!ir_expr_is_float(node->lhs)) ir_push(fn, "i2f", "", 0);
@@ -1661,7 +1819,8 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
     }
     if (node->op_enum == OP_VAR) {
         int is_flt = node->is_float;
-        const char *flop = (node->type_size == 4) ? "fload4" : "fload8";
+        const char *flop = (node->type_size >= 12) ? "ldload" :
+                           (node->type_size == 4) ? "fload4" : "fload8";
         HashMapEntry *loc_entry = hashmap_get(&fn->locals, node->name);
         if (loc_entry) {
             ir_push(fn, is_flt ? flop : (ir_expr_is_i64(node, target_scale) ? "load64" : "load"), "", loc_entry->val_int);
@@ -1678,7 +1837,8 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         } else if (hashmap_has(&ir_global_arrays, node->name)) {
             ir_push(fn, "gaddr", node->name, 0);
         } else if (hashmap_has(&ir_global_vars, node->name)) {
-            ir_push(fn, is_flt ? "fgload" : (ir_expr_is_i64(node, target_scale) ? "gload64" : "gload"), node->name, 0);
+            ir_push(fn, is_flt ? (node->type_size >= 12 ? "ldgload" : "fgload") :
+                    (ir_expr_is_i64(node, target_scale) ? "gload64" : "gload"), node->name, 0);
         } else {
             ir_push(fn, "gaddr", node->name, 0);
         }
@@ -1686,7 +1846,10 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
     }
     if (node->op_enum == OP_STR) {
         char label[128];
-        snprintf(label, sizeof(label), ".Lstr_%s_%d", fn->name, fn->strings.count);
+        /* Wide strings get a distinct label prefix so the backend emits a
+         * wchar_t (.long) array instead of a byte string (.asciz). */
+        snprintf(label, sizeof(label), "%s_%s_%d",
+                 node->is_wide ? ".Lwstr" : ".Lstr", fn->name, fn->strings.count);
         const char *label_dup = arena_strdup(arena, label);
         {
         StringPair sp;
@@ -1699,6 +1862,68 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
     }
     if (node->op_enum == OP_CALL) {
         const char *call_name = node->name;
+        const char *builtin_name = call_name;
+        if (node->lhs && node->lhs->op_enum == OP_VAR) builtin_name = node->lhs->name;
+        if (builtin_name &&
+            (strcmp(builtin_name, "__builtin_trap") == 0 ||
+             strcmp(builtin_name, "__builtin_unreachable") == 0)) {
+            ir_push(fn, "trap", "", 0);
+            return;
+        }
+        if (builtin_name && strcmp(builtin_name, "__builtin_frame_address") == 0) {
+            ir_push(fn, "frame_addr", "", 0);
+            return;
+        }
+        if (builtin_name && (strcmp(builtin_name, "__builtin_isnormal") == 0 ||
+                             strcmp(builtin_name, "__builtin_isnormalf") == 0)) {
+            ir_push(fn, "const", "", 1);
+            return;
+        }
+        if (builtin_name && (strcmp(builtin_name, "__builtin_fpclassify") == 0 ||
+                             strcmp(builtin_name, "__builtin_isnan") == 0 ||
+                             strcmp(builtin_name, "__builtin_signbit") == 0 ||
+                             strcmp(builtin_name, "__builtin_isfinite") == 0)) {
+            ir_push(fn, "const", "", 0);
+            return;
+        }
+        if (builtin_name && (strcmp(builtin_name, "__builtin_nanf") == 0 ||
+                             strcmp(builtin_name, "__builtin_inff") == 0)) {
+            ir_push(fn, "fconst", "", 0);
+            return;
+        }
+        if (builtin_name && node->body.count >= 2 &&
+            (strcmp(builtin_name, "__atomic_load_n") == 0 ||
+             strcmp(builtin_name, "__atomic_store_n") == 0 ||
+             strcmp(builtin_name, "__atomic_add_fetch") == 0 ||
+             strcmp(builtin_name, "__atomic_fetch_add") == 0 ||
+             strcmp(builtin_name, "__atomic_exchange_n") == 0)) {
+            int size = node->body.data[0]->type_size;
+            if (size != 1 && size != 2 && size != 4 && size != 8) size = 4;
+            lower_addr(node->body.data[0], fn, backend, arena);
+            if (strcmp(builtin_name, "__atomic_load_n") == 0) {
+                ir_push(fn, "atomic_load", "", size);
+            } else {
+                lower_expr(node->body.data[1], fn, backend, arena);
+                if (strcmp(builtin_name, "__atomic_store_n") == 0)
+                    ir_push(fn, "atomic_store", "", size);
+                else if (strcmp(builtin_name, "__atomic_add_fetch") == 0)
+                    ir_push(fn, "atomic_add", "", size);
+                else if (strcmp(builtin_name, "__atomic_fetch_add") == 0)
+                    ir_push(fn, "atomic_fetch_add", "", size);
+                else
+                    ir_push(fn, "atomic_exchange", "", size);
+            }
+            return;
+        }
+        if (builtin_name && strcmp(builtin_name, "__atomic_compare_exchange_n") == 0 &&
+            node->body.count >= 6) {
+            int size = node->body.data[0]->type_size;
+            if (size != 4 && size != 8) size = 4;
+            for (int k = 0; k < 6; ++k)
+                lower_expr(node->body.data[k], fn, backend, arena);
+            ir_push(fn, "atomic_cas", "", size);
+            return;
+        }
         int indirect = (!call_name[0]) || hashmap_has(&fn->locals, call_name);
         IntArray *param_floats = nullptr;
         if (node->lhs && node->lhs->op_enum == OP_VAR &&
@@ -1755,6 +1980,8 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
                         ir_push(fn, "store_index", "", agg_size);
                     }
                     ir_push(fn, "addr", "", addr_slot);
+                } else if (node->body.data[k]->is_complex) {
+                    lower_complex_addr(node->body.data[k], fn, backend, arena);
                 } else if (lower_aggregate_assignment_arg(node->body.data[k], agg_size, fn, backend, arena)) {
                     /* Assignment expressions yield the assigned aggregate; pass
                        the destination address after materializing the store. */
@@ -1764,7 +1991,9 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
             } else {
                 int param_float = (param_floats && k < param_floats->count) ? param_floats->data[k] : 0;
                 lower_expr(node->body.data[k], fn, backend, arena);
-                if (param_float && !ir_expr_is_float(node->body.data[k])) {
+                if (param_float >= 12) {
+                    ir_promote_to_ld(fn, node->body.data[k]);
+                } else if (param_float && !ir_expr_is_float(node->body.data[k])) {
                     ir_push(fn, "i2f", "", 0);
                 } else if (param_float == 4 && ir_expr_is_float(node->body.data[k])) {
                     ir_push(fn, "d2f", "", 0);
@@ -1974,6 +2203,17 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
     }
     if (node->is_float && (node->op_enum == OP_ADD || node->op_enum == OP_SUB ||
                            node->op_enum == OP_MUL || node->op_enum == OP_DIV)) {
+        if (ir_expr_is_ld(node)) {
+            lower_expr(node->lhs, fn, backend, arena);
+            ir_promote_to_ld(fn, node->lhs);
+            lower_expr(node->rhs, fn, backend, arena);
+            ir_promote_to_ld(fn, node->rhs);
+            const char *ldop = node->op_enum == OP_ADD ? "ldadd" :
+                               node->op_enum == OP_SUB ? "ldsub" :
+                               node->op_enum == OP_MUL ? "ldmul" : "lddiv";
+            ir_push(fn, ldop, "", 0);
+            return;
+        }
         lower_expr(node->lhs, fn, backend, arena);
         if (!ir_expr_is_float(node->lhs)) ir_push(fn, "i2f", "", 0);
         lower_expr(node->rhs, fn, backend, arena);
@@ -2034,6 +2274,16 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         (node->op_enum == OP_LT || node->op_enum == OP_GT ||
          node->op_enum == OP_LE || node->op_enum == OP_GE ||
          node->op_enum == OP_EQ || node->op_enum == OP_NE)) {
+        if (ir_expr_is_ld(node->lhs) || ir_expr_is_ld(node->rhs)) {
+            lower_expr(node->lhs, fn, backend, arena);
+            ir_promote_to_ld(fn, node->lhs);
+            lower_expr(node->rhs, fn, backend, arena);
+            ir_promote_to_ld(fn, node->rhs);
+            char ldcmp[8];
+            snprintf(ldcmp, sizeof(ldcmp), "ld%s", node->op);
+            ir_push(fn, arena_strdup(arena, ldcmp), "", 0);
+            return;
+        }
         lower_expr(node->lhs, fn, backend, arena);
         if (!ir_expr_is_float(node->lhs)) ir_push(fn, "i2f", "", 0);
         lower_expr(node->rhs, fn, backend, arena);
@@ -2285,6 +2535,144 @@ static void lower_addr(const Node *node, IrFunction *fn, TargetBackend *backend,
     }
 }
 
+static int complex_temp_slot(IrFunction *fn, Arena *arena) {
+    int slot = fn->locals.size;
+    char name[64];
+    snprintf(name, sizeof(name), "$complex%d", slot);
+    hashmap_put(&fn->locals, arena_strdup(arena, name), nullptr, slot);
+    return slot;
+}
+
+static int complex_elem_size(const Node *node) {
+    if (node && node->type_size == 8) return 4;
+    if (node && node->type_size >= 32) return 16;
+    return 8;
+}
+
+static void complex_load_component(const Node *node, int offset, IrFunction *fn, TargetBackend *backend, Arena *arena) {
+    if (node && node->is_imaginary) {
+        if (offset == 0) ir_push(fn, "fconst", "", 0);
+        else lower_expr(node, fn, backend, arena);
+        return;
+    }
+    int elem_size = complex_elem_size(node);
+    if (offset == 8 && elem_size != 8) offset = elem_size;
+    if (node && !node->is_complex) {
+        if (offset == 0) {
+            lower_expr(node, fn, backend, arena);
+            if (!ir_expr_is_float(node)) ir_push(fn, "i2f", "", 0);
+        } else {
+            ir_push(fn, "fconst", "", 0);
+        }
+        return;
+    }
+    lower_complex_addr(node, fn, backend, arena);
+    ir_push(fn, "const", "", offset);
+    ir_push(fn, "+", "", 0);
+    ir_push(fn, elem_size == 4 ? "fload_addr4" : "fload_addr8", "", 0);
+}
+
+static void complex_store_component(int slot, int offset, int elem_size, IrFunction *fn) {
+    if (offset == 8 && elem_size != 8) offset = elem_size;
+    if (elem_size == 4) ir_push(fn, "d2f", "", 0);
+    ir_push(fn, "addr", "", slot);
+    ir_push(fn, "const", "", offset);
+    ir_push(fn, "+", "", 0);
+    ir_push(fn, elem_size == 4 ? "fstore_addr4" : "fstore_addr8", "", 0);
+}
+
+static void lower_complex_addr(const Node *node, IrFunction *fn, TargetBackend *backend, Arena *arena) {
+    if (!node) return;
+    if (node->op_enum == OP_VAR) {
+        lower_addr(node, fn, backend, arena);
+        return;
+    }
+    if (node->op_enum == OP_FNUM && node->is_imaginary) {
+        int slot = complex_temp_slot(fn, arena);
+        ir_push(fn, "fconst", "", 0);
+        complex_store_component(slot, 0, complex_elem_size(node), fn);
+        lower_expr(node, fn, backend, arena);
+        complex_store_component(slot, 8, complex_elem_size(node), fn);
+        ir_push(fn, "addr", "", slot);
+        return;
+    }
+    if (node->op_enum == OP_UNARY_MINUS || node->op_enum == OP_ADD ||
+        node->op_enum == OP_SUB || node->op_enum == OP_MUL || node->op_enum == OP_DIV) {
+        int slot = complex_temp_slot(fn, arena);
+        if (node->op_enum == OP_UNARY_MINUS) {
+            complex_load_component(node->lhs, 0, fn, backend, arena);
+            ir_push(fn, "fneg", "", 0);
+            complex_store_component(slot, 0, complex_elem_size(node), fn);
+            complex_load_component(node->lhs, 8, fn, backend, arena);
+            ir_push(fn, "fneg", "", 0);
+            complex_store_component(slot, 8, complex_elem_size(node), fn);
+        } else if (node->op_enum == OP_ADD || node->op_enum == OP_SUB) {
+            complex_load_component(node->lhs, 0, fn, backend, arena);
+            complex_load_component(node->rhs, 0, fn, backend, arena);
+            ir_push(fn, node->op_enum == OP_ADD ? "fadd" : "fsub", "", 0);
+            complex_store_component(slot, 0, complex_elem_size(node), fn);
+            complex_load_component(node->lhs, 8, fn, backend, arena);
+            complex_load_component(node->rhs, 8, fn, backend, arena);
+            ir_push(fn, node->op_enum == OP_ADD ? "fadd" : "fsub", "", 0);
+            complex_store_component(slot, 8, complex_elem_size(node), fn);
+        } else if (node->op_enum == OP_MUL) {
+            complex_load_component(node->lhs, 0, fn, backend, arena);
+            complex_load_component(node->rhs, 0, fn, backend, arena);
+            ir_push(fn, "fmul", "", 0);
+            complex_load_component(node->lhs, 8, fn, backend, arena);
+            complex_load_component(node->rhs, 8, fn, backend, arena);
+            ir_push(fn, "fmul", "", 0);
+            ir_push(fn, "fsub", "", 0);
+            complex_store_component(slot, 0, complex_elem_size(node), fn);
+            complex_load_component(node->lhs, 0, fn, backend, arena);
+            complex_load_component(node->rhs, 8, fn, backend, arena);
+            ir_push(fn, "fmul", "", 0);
+            complex_load_component(node->lhs, 8, fn, backend, arena);
+            complex_load_component(node->rhs, 0, fn, backend, arena);
+            ir_push(fn, "fmul", "", 0);
+            ir_push(fn, "fadd", "", 0);
+            complex_store_component(slot, 8, complex_elem_size(node), fn);
+        } else {
+            /* (a+bi)/(c+di) = ((ac+bd) + (bc-ad)i)/(c*c+d*d). */
+            complex_load_component(node->lhs, 0, fn, backend, arena);
+            complex_load_component(node->rhs, 0, fn, backend, arena);
+            ir_push(fn, "fmul", "", 0);
+            complex_load_component(node->lhs, 8, fn, backend, arena);
+            complex_load_component(node->rhs, 8, fn, backend, arena);
+            ir_push(fn, "fmul", "", 0);
+            ir_push(fn, "fadd", "", 0);
+            complex_load_component(node->rhs, 0, fn, backend, arena);
+            complex_load_component(node->rhs, 0, fn, backend, arena);
+            ir_push(fn, "fmul", "", 0);
+            complex_load_component(node->rhs, 8, fn, backend, arena);
+            complex_load_component(node->rhs, 8, fn, backend, arena);
+            ir_push(fn, "fmul", "", 0);
+            ir_push(fn, "fadd", "", 0);
+            ir_push(fn, "fdiv", "", 0);
+            complex_store_component(slot, 0, complex_elem_size(node), fn);
+            complex_load_component(node->lhs, 8, fn, backend, arena);
+            complex_load_component(node->rhs, 0, fn, backend, arena);
+            ir_push(fn, "fmul", "", 0);
+            complex_load_component(node->lhs, 0, fn, backend, arena);
+            complex_load_component(node->rhs, 8, fn, backend, arena);
+            ir_push(fn, "fmul", "", 0);
+            ir_push(fn, "fsub", "", 0);
+            complex_load_component(node->rhs, 0, fn, backend, arena);
+            complex_load_component(node->rhs, 0, fn, backend, arena);
+            ir_push(fn, "fmul", "", 0);
+            complex_load_component(node->rhs, 8, fn, backend, arena);
+            complex_load_component(node->rhs, 8, fn, backend, arena);
+            ir_push(fn, "fmul", "", 0);
+            ir_push(fn, "fadd", "", 0);
+            ir_push(fn, "fdiv", "", 0);
+            complex_store_component(slot, 8, complex_elem_size(node), fn);
+        }
+        ir_push(fn, "addr", "", slot);
+        return;
+    }
+    lower_addr(node, fn, backend, arena);
+}
+
 static const char *clean_constraint(const char *c, Arena *arena) {
     if (c && c[0] == '"') {
         size_t len = strlen(c);
@@ -2380,18 +2768,24 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
         }
         if (stmt->lhs) {
             int rhs_is_call = (stmt->lhs->op_enum == OP_CALL);
-            if (stmt->type_size > 8 && !rhs_is_call) {
-                lower_addr(stmt->lhs, fn, backend, arena);
+            /* long double is 12/16 bytes but a scalar, not an aggregate. */
+            int is_ld_decl = stmt->is_float && !stmt->is_complex && stmt->type_size >= 12;
+            if (stmt->type_size > 8 && !rhs_is_call && !is_ld_decl) {
+                if (stmt->is_complex) lower_complex_addr(stmt->lhs, fn, backend, arena);
+                else lower_addr(stmt->lhs, fn, backend, arena);
                 ir_push(fn, "addr", "", slot);
                 ir_push(fn, "copy", "", stmt->type_size);
-            } else if (stmt->type_size > 8 && rhs_is_call) {
+            } else if (stmt->type_size > 8 && rhs_is_call && !is_ld_decl) {
                 lower_expr(stmt->lhs, fn, backend, arena);
                 ir_push(fn, "addr", "", slot);
                 ir_push(fn, "store_agg", "", stmt->type_size);
             } else {
                 lower_expr(stmt->lhs, fn, backend, arena);
             }
-            if (stmt->type_size > 8) {
+            if (is_ld_decl) {
+                ir_promote_to_ld(fn, stmt->lhs);
+                ir_push(fn, "ldstore", "", slot);
+            } else if (stmt->type_size > 8) {
                 /* Aggregate initializer handled above. */
             } else if (stmt->is_float) {
                 if (!ir_expr_is_float(stmt->lhs)) ir_push(fn, "i2f", "", 0);
@@ -2413,7 +2807,12 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
             int is_flt = ir_get_var_float(stmt->name);
             int is_agg = is_aggregate_var_name(fn, stmt->name);
             int rhs_is_call = (stmt->lhs->op_enum == OP_CALL);
-            if (is_agg && !rhs_is_call) {
+            if (stmt->is_complex) {
+                if (rhs_is_call) lower_expr(stmt->lhs, fn, backend, arena);
+                else lower_complex_addr(stmt->lhs, fn, backend, arena);
+                ir_push(fn, "addr", "", loc_entry->val_int);
+                ir_push(fn, rhs_is_call ? "store_agg" : "copy", "", size);
+            } else if (is_agg && !rhs_is_call) {
                 if (!lower_aggregate_assignment_arg(stmt->lhs, size, fn, backend, arena)) {
                     lower_addr(stmt->lhs, fn, backend, arena);
                 }
@@ -2425,6 +2824,10 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
                     ir_push(fn, "addr", "", loc_entry->val_int);
                 }
                 ir_push(fn, "copy", "", size);
+            } else if (is_flt && size >= 12) {
+                lower_expr(stmt->lhs, fn, backend, arena);
+                ir_promote_to_ld(fn, stmt->lhs);
+                ir_push(fn, "ldstore", "", loc_entry->val_int);
             } else if (is_flt) {
                 lower_expr(stmt->lhs, fn, backend, arena);
                 if (!ir_expr_is_float(stmt->lhs)) ir_push(fn, "i2f", "", 0);
@@ -2461,6 +2864,10 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
                 }
                 ir_push(fn, "gaddr", stmt->name, 0);
                 ir_push(fn, "copy", "", size);
+            } else if (is_flt && size >= 12) {
+                lower_expr(stmt->lhs, fn, backend, arena);
+                ir_promote_to_ld(fn, stmt->lhs);
+                ir_push(fn, "ldgstore", stmt->name, 0);
             } else if (is_flt) {
                 lower_expr(stmt->lhs, fn, backend, arena);
                 if (!ir_expr_is_float(stmt->lhs)) ir_push(fn, "i2f", "", 0);
@@ -2485,6 +2892,12 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
             diagnostics_error(stmt->line, stmt->col, msg);
         }
     } else if (stmt->op_enum == OP_RETURN) {
+        if (current_func_ret_is_void && stmt->lhs) {
+            diagnostics_error(stmt->line, stmt->col, "return with a value in void function");
+        }
+        if (!current_func_ret_is_void && current_func_ret_aggregate_size == 0 && !stmt->lhs) {
+            diagnostics_error(stmt->line, stmt->col, "return with no value in non-void function");
+        }
         if (current_func_ret_aggregate_size > 0) {
             if (stmt->lhs && stmt->lhs->op_enum == OP_CALL) {
                 lower_expr(stmt->lhs, fn, backend, arena);
@@ -2507,13 +2920,19 @@ static void lower_stmt(const Node *stmt, IrFunction *fn, TargetBackend *backend,
                 }
                 ir_push(fn, "addr", "", addr_slot);
             } else {
-                lower_addr(stmt->lhs, fn, backend, arena);
+                if (stmt->lhs && stmt->lhs->is_complex) lower_complex_addr(stmt->lhs, fn, backend, arena);
+                else lower_addr(stmt->lhs, fn, backend, arena);
             }
             ir_push(fn, "ret_agg", "", current_func_ret_aggregate_size);
             return;
         }
         if (stmt->lhs) {
             lower_expr(stmt->lhs, fn, backend, arena);
+        }
+        if (current_func_ret_is_float && current_func_ret_size >= 12) {
+            if (stmt->lhs) ir_promote_to_ld(fn, stmt->lhs);
+            ir_push(fn, "ldret", "", current_func_ret_size);
+            return;
         }
         if (current_func_ret_is_float) {
             if (stmt->lhs && !ir_expr_is_float(stmt->lhs)) {
@@ -2873,6 +3292,7 @@ static void lower_func(const Node *ast, TargetBackend *backend, Arena *arena, Ir
     current_func_ret_size = (int)ast->value;
     current_func_ret_aggregate_size = ast->aggregate_size;
     current_func_ret_is_float = ast->is_float;
+    current_func_ret_is_void = ast->is_void;
     current_func_ret_is_unsigned = ast->is_unsigned;
 
     fn->name = ast->name;
@@ -2898,6 +3318,8 @@ static void lower_func(const Node *ast, TargetBackend *backend, Arena *arena, Ir
     fn->has_call = 0;
     fn->label_id = 0;
     fn->is_static = ast->is_static;
+    fn->is_weak = ast->is_weak;
+    fn->section_name = ast->section_name;
     fn->return_aggregate_size = ast->aggregate_size;
     fn->return_aggregate_float_class = ast->aggregate_float_class;
     fn->max_align = 16;
@@ -2929,8 +3351,6 @@ IrFunctionArray ir_lower_program(const NodeArray *ast, const char *target, Arena
         backend = backend_create_arm64();
     } else if (strcmp(target, "x86_64-b1nix") == 0 || strcmp(target, "x86_64-elf") == 0 || strcmp(target, "x86_64-unknown-elf") == 0) {
         backend = backend_create_x86_64();
-    } else if (strcmp(target, "i386-b1nix") == 0 || strcmp(target, "x86-b1nix") == 0 || strcmp(target, "i686-elf") == 0 || strcmp(target, "i686-unknown-elf") == 0) {
-        backend = backend_create_i386();
     }
     int target_scale = backend->get_target_scale(backend);
     ir_current_target_scale = target_scale;

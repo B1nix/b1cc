@@ -81,6 +81,12 @@ static int exists(const char *path) {
     return access(path, R_OK) == 0;
 }
 
+/* b1cc is usually run from userspace/b1cc inside the B1NIX monorepo, but some
+ * standalone checkouts place the B1NIX tree beside the compiler checkout. */
+static const char *b1nix_path(const char *neighbor, const char *monorepo) {
+    return exists(neighbor) ? neighbor : monorepo;
+}
+
 static int has_suffix(const char *path, const char *suffix) {
     size_t plen = strlen(path);
     size_t slen = strlen(suffix);
@@ -263,6 +269,15 @@ int main(int argc, char **argv) {
     string_array_init(&preprocessor_driver_include_dirs);
     hashmap_init(&preprocessor_driver_macros, 64);
     define_object_macro(&arena, "__b1cc__", "1");
+    define_object_macro(&arena, "__STDC_IEC_559__", "1");
+    define_object_macro(&arena, "__STDC_VERSION__", "202311L");
+    define_object_macro(&arena, "__PRETTY_FUNCTION__", "\"\"");
+    define_object_macro(&arena, "__ATOMIC_RELAXED", "0");
+    define_object_macro(&arena, "__ATOMIC_CONSUME", "1");
+    define_object_macro(&arena, "__ATOMIC_ACQUIRE", "2");
+    define_object_macro(&arena, "__ATOMIC_RELEASE", "3");
+    define_object_macro(&arena, "__ATOMIC_ACQ_REL", "4");
+    define_object_macro(&arena, "__ATOMIC_SEQ_CST", "5");
 
     for (int i = 1; i < argc; ++i) {
         const char *arg = argv[i];
@@ -370,10 +385,27 @@ int main(int argc, char **argv) {
     if (builtin_inc_dir) {
         string_array_push(&preprocessor_driver_include_dirs, builtin_inc_dir);
     }
+    /* Keep the target runtime headers visible even when a self-hosted driver
+     * takes the freestanding branch above. */
+    string_array_push(&preprocessor_driver_include_dirs,
+                      b1nix_path("../b1nix/userspace/include", "../../userspace/include"));
 
-    string_array_push(&preprocessor_driver_include_dirs, "../b1nix/userspace/include");
-    string_array_push(&preprocessor_driver_include_dirs, "/usr/include");
-    string_array_push(&preprocessor_driver_include_dirs, "/usr/local/include");
+    /* A freestanding translation unit must not accidentally acquire headers
+     * from the host libc.  The bundled headers above are the profile's
+     * standard surface; the repository userspace headers are target runtime
+     * headers, not host headers. */
+    if (!freestanding) {
+        string_array_push(&preprocessor_driver_include_dirs,
+                          b1nix_path("../b1nix/userspace/include", "../../userspace/include"));
+        string_array_push(&preprocessor_driver_include_dirs, "/usr/include");
+        string_array_push(&preprocessor_driver_include_dirs, "/usr/local/include");
+    } else {
+        string_array_push(&preprocessor_driver_include_dirs,
+                          b1nix_path("../b1nix/userspace/include", "../../userspace/include"));
+        define_object_macro(&arena, "__STDC_HOSTED__", "0");
+    }
+    if (!freestanding)
+        define_object_macro(&arena, "__STDC_HOSTED__", "1");
 
     ir_pic_mode = pic_mode ? 1 : 0;
 
@@ -382,6 +414,7 @@ int main(int argc, char **argv) {
 
     if (strcmp(target, "arm64-darwin") == 0) {
         define_object_macro(&arena, "__aarch64__", "1");
+        define_object_macro(&arena, "__APPLE__", "1");
         define_object_macro(&arena, "B1NIX_U_SYSCALL_H", "1");
         define_object_macro(&arena, "SYS_GETCPU", "0");
         define_object_macro(&arena, "SYS_UMASK", "0");
@@ -390,31 +423,27 @@ int main(int argc, char **argv) {
         define_object_macro(&arena, "stderr", "__stderrp");
     } else if (strcmp(target, "x86_64-b1nix") == 0 || strcmp(target, "x86_64-elf") == 0 || strcmp(target, "x86_64-unknown-elf") == 0) {
         define_object_macro(&arena, "__x86_64__", "1");
-    } else if (strcmp(target, "i386-b1nix") == 0 || strcmp(target, "i686-elf") == 0 || strcmp(target, "i686-unknown-elf") == 0) {
-        define_object_macro(&arena, "__i386__", "1");
     }
 
     const char *cc = "cc";
     const char *cross_as = NULL;
     const char *prefix = "";
-    bool is_kernel_target = (strcmp(target, "x86_64-elf") == 0 || strcmp(target, "i686-elf") == 0 ||
-                             strcmp(target, "x86_64-unknown-elf") == 0 || strcmp(target, "i686-unknown-elf") == 0);
-    if (strcmp(target, "x86_64-b1nix") == 0 || strcmp(target, "i386-b1nix") == 0 || strcmp(target, "x86-b1nix") == 0 || is_kernel_target) {
+    bool is_kernel_target = (strcmp(target, "x86_64-elf") == 0 ||
+                             strcmp(target, "x86_64-unknown-elf") == 0);
+    if (strcmp(target, "x86_64-b1nix") == 0 || is_kernel_target) {
         const char *env_cc = getenv("B1NIX_CC");
-        cc = env_cc ? env_cc : "../b1nix/tools/toolchain/bin/b1nix-cc";
+        cc = env_cc ? env_cc : b1nix_path("../b1nix/tools/toolchain/bin/b1nix-cc",
+                                          "../../tools/toolchain/bin/b1nix-cc");
         /* Internal linking never shells out to b1nix-cc, so don't require it —
          * this is the on-device case where b1nix-cc/ld.lld don't exist. */
         if (!internal_link && !is_kernel_target && !preprocess_only && !emit_asm && !shared && !exists(cc))
-            diagnostics_fatal("set B1NIX_CC or run from next to ../b1nix");
+            diagnostics_fatal("set B1NIX_CC or run from a B1NIX checkout");
         
         /* Cross-assembler for .S files: use clang directly, not b1nix-cc
          * (b1nix-cc is a full driver that adds CRT0 + libc on link) */
         if (strcmp(target, "x86_64-b1nix") == 0 || strcmp(target, "x86_64-elf") == 0 || strcmp(target, "x86_64-unknown-elf") == 0) {
             prefix = is_kernel_target ? "" : "B1NIX_ARCH=x86_64 ";
             cross_as = "clang --target=x86_64-unknown-elf -c";
-        } else {
-            prefix = is_kernel_target ? "" : "B1NIX_ARCH=x86 ";
-            cross_as = "clang --target=i686-unknown-elf -c";
         }
     } else if (strcmp(target, "arm64-darwin") != 0) {
         char msg[256];
@@ -423,8 +452,7 @@ int main(int argc, char **argv) {
     }
 
     /* ELF targets whose shared libraries b1cc links with ld.lld directly. */
-    bool elf_target = (strcmp(target, "x86_64-b1nix") == 0 || strcmp(target, "i386-b1nix") == 0 ||
-                       strcmp(target, "x86-b1nix") == 0 || is_kernel_target);
+    bool elf_target = (strcmp(target, "x86_64-b1nix") == 0 || is_kernel_target);
     bool ld_emu_x86_64 = (strcmp(target, "x86_64-b1nix") == 0 || strcmp(target, "x86_64-elf") == 0 ||
                           strcmp(target, "x86_64-unknown-elf") == 0);
 
@@ -538,12 +566,8 @@ int main(int argc, char **argv) {
     if (compile_only) {
         /* Determine whether to use native ELF/Mach-O writer or host assembler */
         bool use_native_elf = (strcmp(target, "x86_64-b1nix") == 0 ||
-                               strcmp(target, "i386-b1nix")   == 0 ||
-                               strcmp(target, "x86-b1nix")    == 0 ||
                                strcmp(target, "x86_64-elf")   == 0 ||
-                               strcmp(target, "i686-elf")     == 0 ||
-                               strcmp(target, "x86_64-unknown-elf") == 0 ||
-                               strcmp(target, "i686-unknown-elf")   == 0);
+                               strcmp(target, "x86_64-unknown-elf") == 0);
         bool use_native_macho = (strcmp(target, "arm64-darwin") == 0);
 
         for (int idx = 0; idx < inputs.count; ++idx) {
@@ -573,6 +597,8 @@ int main(int argc, char **argv) {
                     sb_append(&cmd, shell_quote(cc, &arena));
                     sb_append(&cmd, " -c");
                 }
+                if (hashmap_has(&preprocessor_driver_macros, "B1NIX_DYNAMIC"))
+                    sb_append(&cmd, " -DB1NIX_DYNAMIC");
                 sb_append(&cmd, " ");
                 sb_append(&cmd, shell_quote(inp, &arena));
                 sb_append(&cmd, " -o ");
@@ -682,9 +708,14 @@ int main(int argc, char **argv) {
     }
 
     /* M33: -shared is handled by the internal linker in the single-input path
-     * below (for ELF targets). For non-ELF targets or multi-input, fall through
-     * to the general link loop (host cc -shared). */
-    if (inputs.count == 1 && !compile_only && !emit_asm && !preprocess_only) {
+     * below (for ELF targets) only when --internal-link is set. A plain
+     * `-shared` for an ELF target must fall through to the general link loop,
+     * which builds the object with b1cc's ELF writer and links it with
+     * `ld.lld -shared`; the single-input fast path would otherwise mislink it as
+     * an executable via cc (undefined `main`). Non-ELF (host) `-shared` still
+     * uses the fast path. */
+    if (inputs.count == 1 && !compile_only && !emit_asm && !preprocess_only &&
+        !(shared && elf_target && !internal_link)) {
         const char *inp = inputs.data[0];
         if (has_suffix(inp, ".o") || has_suffix(inp, ".a")) {
             const char *out_name = (!output || !output[0]) ? "a.out" : output;
@@ -735,6 +766,8 @@ int main(int argc, char **argv) {
                 sb_append(&cmd, shell_quote(cc, &arena));
                 sb_append(&cmd, " -c");
             }
+            if (hashmap_has(&preprocessor_driver_macros, "B1NIX_DYNAMIC"))
+                sb_append(&cmd, " -DB1NIX_DYNAMIC");
             sb_append(&cmd, " ");
             sb_append(&cmd, shell_quote(inp, &arena));
             sb_append(&cmd, " -o ");
@@ -792,14 +825,31 @@ int main(int argc, char **argv) {
                 const char *crt0 = env_crt0 ? env_crt0 : "/lib/b1cc/crt0.o";
                 const char *libc = env_libc ? env_libc : "/lib/b1cc/libb1nix.a";
 #else
-                const char *crt0 = env_crt0 ? env_crt0 : "../b1nix/userspace/build/x86_64/crt/crt0.o";
-                const char *libc = env_libc ? env_libc : "../b1nix/userspace/build/x86_64/libb1nix.a";
+                const char *crt0 = env_crt0 ? env_crt0 : b1nix_path("../b1nix/userspace/build/x86_64/crt/crt0.o", "../../userspace/build/x86_64/crt/crt0.o");
+                const char *libc = env_libc ? env_libc : b1nix_path("../b1nix/userspace/build/x86_64/libb1nix.a", "../../userspace/build/x86_64/libb1nix.a");
 #endif
+                const char *env_libm = getenv("B1CC_LIBM");
+#ifdef b1nix
+                const char *default_libm = "/lib/b1cc/libm.a";
+#else
+                const char *default_libm = b1nix_path(
+                    "../b1nix/build/openlibm-b1nix/x86_64-b1nix/install/lib/libm.a",
+                    "../../build/openlibm-b1nix/x86_64-b1nix/install/lib/libm.a");
+#endif
+                const char *libm = env_libm ? env_libm : default_libm;
+#ifdef b1nix
+                if (!env_libm && !exists(libm) && exists("/lib/libm.a")) {
+                    libm = "/lib/libm.a";
+                }
+#endif
+                int have_libm = exists(libm);
                 const char *inputs_arr[2] = { crt0, tmp_obj };
-                const char *arch_arr[1] = { libc };
+                const char **arch_arr = arena_alloc(&arena, sizeof(char *) * (have_libm ? 2 : 1));
+                arch_arr[0] = libc;
+                if (have_libm) arch_arr[1] = libm;
                 LinkRequest lr = {
                     .inputs = inputs_arr, .n_inputs = 2,
-                    .archives = arch_arr, .n_archives = 1,
+                    .archives = arch_arr, .n_archives = have_libm ? 2 : 1,
                     .out_path = out_name, .base_va = 0x2000000, .entry = "_start",
                 };
                 lrc = elf_link_static(&lr, &arena);
@@ -808,7 +858,7 @@ int main(int argc, char **argv) {
 #ifdef b1nix
                 const char *crt0dyn = env_crt0dyn ? env_crt0dyn : "/lib/b1cc/crt0-dynamic.o";
 #else
-                const char *crt0dyn = env_crt0dyn ? env_crt0dyn : "../b1nix/userspace/build/x86_64/crt/crt0-dynamic.o";
+                const char *crt0dyn = env_crt0dyn ? env_crt0dyn : b1nix_path("../b1nix/userspace/build/x86_64/crt/crt0-dynamic.o", "../../userspace/build/x86_64/crt/crt0-dynamic.o");
 #endif
                 /* DT_NEEDED = libc.so.1 (implicit) + any -l/--needed sonames */
                 int n_needed = 1 + (int)extra_needed.count;
@@ -852,6 +902,7 @@ int main(int argc, char **argv) {
         sb_init(&cmd);
         sb_append(&cmd, prefix);
         sb_append(&cmd, shell_quote(cc, &arena));
+        if (shared) sb_append(&cmd, " -shared");  /* host dylib: match the multi-input link path */
         sb_append(&cmd, " ");
         sb_append(&cmd, shell_quote(tmp_asm, &arena));
 
@@ -860,11 +911,14 @@ int main(int argc, char **argv) {
         string_array_init(&runtime_objs);
         if (freestanding && !nostdlib) {
             runtime_objs = compile_freestanding_runtime(target, mcmodel, &arena);
-            for (int k = 0; k < runtime_objs.count; ++k) {
-                sb_append(&cmd, " ");
-                sb_append(&cmd, shell_quote(runtime_objs.data[k], &arena));
-            }
+        for (int k = 0; k < runtime_objs.count; ++k) {
+            sb_append(&cmd, " ");
+            sb_append(&cmd, shell_quote(runtime_objs.data[k], &arena));
         }
+        }
+
+        if (!freestanding && strcmp(target, "x86_64-b1nix") == 0)
+            sb_append(&cmd, " -lm");
 
         for (int k = 0; k < link_flags.count; ++k) {
             sb_append(&cmd, " ");
@@ -1015,7 +1069,7 @@ int main(int argc, char **argv) {
              * linker script / soname / imported libs via ordinary link flags. */
             const char *ld = getenv("B1NIX_LD");
             sb_append(&link_cmd, shell_quote(ld ? ld : "ld.lld", &arena));
-            sb_append(&link_cmd, ld_emu_x86_64 ? " -m elf_x86_64" : " -m elf_i386");
+            sb_append(&link_cmd, " -m elf_x86_64");
             sb_append(&link_cmd, " -shared");
         } else {
             sb_append(&link_cmd, prefix);
@@ -1042,6 +1096,11 @@ int main(int argc, char **argv) {
             sb_append(&link_cmd, " ");
             sb_append(&link_cmd, shell_quote(link_flags.data[k], &arena));
         }
+        /* Hosted B1NIX programs use the separately ported openlibm archive
+         * for C99 <math.h>.  b1nix-cc does not add it implicitly, while the
+         * ordinary libc archive remains the default for non-math programs. */
+        if (!freestanding && !shared && strcmp(target, "x86_64-b1nix") == 0)
+            sb_append(&link_cmd, " -lm");
         sb_append(&link_cmd, " -o ");
         sb_append(&link_cmd, shell_quote(out_name, &arena));
 

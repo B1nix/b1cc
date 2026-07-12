@@ -173,6 +173,8 @@ static const char *arm64_emit_globals(TargetBackend *self, const IrGlobalVarArra
             } else {
                 sb_append(&out, ".section __DATA,__thread_data,thread_local_regular\n");
             }
+        } else if (g->section_name && g->section_name[0]) {
+            sb_appendf(&out, ".section %s\n", g->section_name);
         } else {
             sb_append(&out, ".data\n");
         }
@@ -258,8 +260,17 @@ static const char *arm64_emit_globals(TargetBackend *self, const IrGlobalVarArra
             const IrGlobalVar *g = &globals->data[i];
             for (int k = 0; k < g->strings.count; ++k) {
                 if (g->strings.data[k].second) {
-                    const char *escaped = escape_asm_string(g->strings.data[k].second, arena);
-                    sb_appendf(&out, "%s:\n    .asciz \"%s\"\n", g->strings.data[k].first, escaped);
+                    const char *lbl = g->strings.data[k].first;
+                    if (strncmp(lbl, ".Lwstr", 6) == 0) {
+                        /* wchar_t array: read-only data, 4-byte aligned. Switch
+                         * back to the cstring section for any following narrow
+                         * strings. */
+                        sb_appendf(&out, ".section __TEXT,__const\n    .p2align 2\n%s:\n    .long %s\n.section __TEXT,__cstring,cstring_literals\n",
+                                   lbl, wide_string_longs(g->strings.data[k].second, arena));
+                    } else {
+                        const char *escaped = escape_asm_string(g->strings.data[k].second, arena);
+                        sb_appendf(&out, "%s:\n    .asciz \"%s\"\n", lbl, escaped);
+                    }
                 }
             }
         }
@@ -324,7 +335,6 @@ static const char *substitute_asm_operands_arm64(const char *temp, int num_opera
 
 static const char *arm64_op_regs[] = {"x9", "x10", "x11", "x12", "x13", "x14", "x15"};
 static const char *arm64_dest_regs[] = {"x13", "x14", "x15"};
-
 /* Bounded access to the fixed scratch pool: an asm with more generic operands
  * than pooled registers (e.g. the syscall wrapper) must not index past the
  * array — see the x86_64 backend's get_operand_reg for the rationale. */
@@ -339,17 +349,29 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
     (void)self;
     StringBuilder out;
     sb_init(&out);
+    int div_label_id = 0;
 
     if (fn->strings.count > 0) {
-        sb_append(&out, ".cstring\n");
         for (int i = 0; i < fn->strings.count; ++i) {
-            const char *escaped = escape_asm_string(fn->strings.data[i].second, arena);
-            sb_appendf(&out, "%s:\n    .asciz \"%s\"\n", fn->strings.data[i].first, escaped);
+            const char *lbl = fn->strings.data[i].first;
+            if (strncmp(lbl, ".Lwstr", 6) == 0) {
+                sb_appendf(&out, ".section __TEXT,__const\n    .p2align 2\n%s:\n    .long %s\n",
+                           lbl, wide_string_longs(fn->strings.data[i].second, arena));
+            } else {
+                sb_append(&out, ".cstring\n");
+                const char *escaped = escape_asm_string(fn->strings.data[i].second, arena);
+                sb_appendf(&out, "%s:\n    .asciz \"%s\"\n", lbl, escaped);
+            }
         }
     }
-    sb_append(&out, ".text\n");
+    if (fn->section_name && fn->section_name[0]) {
+        sb_appendf(&out, ".section %s\n", fn->section_name);
+    } else {
+        sb_append(&out, ".text\n");
+    }
     if (!fn->is_static) {
         sb_appendf(&out, ".globl _%s\n", fn->name);
+        if (fn->is_weak) sb_appendf(&out, ".weak_definition _%s\n", fn->name);
     }
     sb_appendf(&out, ".p2align 2\n_%s:\n", fn->name);
 
@@ -363,6 +385,15 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
     local_slots += call_ret_slots;
 
     int has_custom_align = (fn->max_align > 16);
+    int is_vararg = (fn->params.count > 0 && strcmp(fn->params.data[fn->params.count - 1], "...") == 0);
+    int vararg_save_base = -1;
+    if (is_vararg) {
+        /* AAPCS64 variadic callees consume unnamed arguments from a general
+         * register save area. Reserve eight 64-bit GP slots (four 16-byte
+         * compiler slots) and spill x0-x7 on entry. */
+        vararg_save_base = local_slots + 3;
+        local_slots += 4;
+    }
     int save_rsp_slot = -1;
     if (has_custom_align) {
         save_rsp_slot = local_slots;
@@ -394,6 +425,13 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
         if (indirect_ret) {
             int off = -((fn->locals.size + 1) * 16);
             emit_store_fp(&out, 8, off);
+        }
+        if (is_vararg) {
+            int base_off = (vararg_save_base + 1) * 16;
+            sb_appendf(&out, "    stp x0, x1, [x29, #-%d]\n", base_off);
+            sb_appendf(&out, "    stp x2, x3, [x29, #-%d]\n", base_off - 16);
+            sb_appendf(&out, "    stp x4, x5, [x29, #-%d]\n", base_off - 32);
+            sb_appendf(&out, "    stp x6, x7, [x29, #-%d]\n", base_off - 48);
         }
         int abi_word = 0;
         int stack_word = 0;
@@ -648,7 +686,14 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                     }
                 }
             }
-            sb_appendf(&out, "    add x0, x29, #%d\n", 16 + stack_word * 8);
+            if (is_vararg) {
+                int save_off = (vararg_save_base + 1) * 16;
+                int fixed_gp_bytes = abi_word * 8;
+                sb_appendf(&out, "    sub x0, x29, #%d\n", save_off);
+                if (fixed_gp_bytes) sb_appendf(&out, "    add x0, x0, #%d\n", fixed_gp_bytes);
+            } else {
+                sb_appendf(&out, "    add x0, x29, #%d\n", 16 + stack_word * 8);
+            }
             emit_store_fp(&out, 0, -((inst->value + 1) * 16));
         } else if (inst->op == IR_STR) {
             sb_appendf(&out, "    adrp x0, %s@PAGE\n", ir_arg_str(inst->arg));
@@ -709,15 +754,37 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                 sb_append(&out, "    sub x0, x1, x0\n");
             else if (inst->op == IR_MUL)
                 sb_append(&out, "    mul x0, x1, x0\n");
-            else if (inst->op == IR_DIV)
+            else if (inst->op == IR_DIV) {
+                int id = div_label_id++;
+                sb_append(&out, "    cmp x0, #0\n");
+                sb_appendf(&out, "    b.ne .L%s_div_ok_%d\n", fn->name, id);
+                sb_append(&out, "    bl _abort\n");
+                sb_appendf(&out, ".L%s_div_ok_%d:\n", fn->name, id);
                 sb_append(&out, "    sdiv x0, x1, x0\n");
-            else if (inst->op == IR_UDIV)
+            }
+            else if (inst->op == IR_UDIV) {
+                int id = div_label_id++;
+                sb_append(&out, "    cmp x0, #0\n");
+                sb_appendf(&out, "    b.ne .L%s_udiv_ok_%d\n", fn->name, id);
+                sb_append(&out, "    bl _abort\n");
+                sb_appendf(&out, ".L%s_udiv_ok_%d:\n", fn->name, id);
                 sb_append(&out, "    udiv x0, x1, x0\n");
+            }
             else if (inst->op == IR_MOD) {
+                int id = div_label_id++;
+                sb_append(&out, "    cmp x0, #0\n");
+                sb_appendf(&out, "    b.ne .L%s_mod_ok_%d\n", fn->name, id);
+                sb_append(&out, "    bl _abort\n");
+                sb_appendf(&out, ".L%s_mod_ok_%d:\n", fn->name, id);
                 sb_append(&out, "    sdiv x2, x1, x0\n");
                 sb_append(&out, "    msub x0, x2, x0, x1\n");
             }
             else if (inst->op == IR_UMOD) {
+                int id = div_label_id++;
+                sb_append(&out, "    cmp x0, #0\n");
+                sb_appendf(&out, "    b.ne .L%s_umod_ok_%d\n", fn->name, id);
+                sb_append(&out, "    bl _abort\n");
+                sb_appendf(&out, ".L%s_umod_ok_%d:\n", fn->name, id);
                 sb_append(&out, "    udiv x2, x1, x0\n");
                 sb_append(&out, "    msub x0, x2, x0, x1\n");
             }
@@ -791,6 +858,10 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
             sb_appendf(&out, "    b %s\n", ir_arg_str(inst->arg));
         } else if (inst->op == IR_LABEL) {
             sb_appendf(&out, "%s:\n", ir_arg_str(inst->arg));
+        } else if (inst->op == IR_TRAP) {
+            sb_append(&out, "    brk #0\n");
+        } else if (inst->op == IR_FRAME_ADDR) {
+            sb_append(&out, "    mov x0, x29\n    str x0, [sp, #-16]!\n");
         } else if (inst->op == IR_CALL || inst->op == IR_ICALL) {
             long num_args = inst->value;
             /* Float-scalar call fast path (AAPCS64): float/double args -> V0-V7,
@@ -914,6 +985,14 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                 HashMapEntry *entry = hashmap_get(&ir_function_vararg_fixed_counts, ir_arg_str(inst->arg));
                 if (entry) vararg_fixed_count = entry->val_int;
             }
+            int local_vararg_call = vararg_fixed_count >= 0;
+            if (!local_vararg_call && vararg_fixed_count <= -2) {
+                /* Parser-only prototypes use -2-fixed_count.  Keep the
+                 * existing external-call lowering for platform libraries;
+                 * only a definition emitted by this compiler uses the
+                 * register save area consumed by its va_list builtins. */
+                vararg_fixed_count = -2 - vararg_fixed_count;
+            }
 
             int ret_agg_size = 0;
             int ret_agg_float = 0;
@@ -979,21 +1058,34 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
                     diagnostics_fatal("arm64 variadic calls with more than 8 fixed args are not supported");
                 }
                 long num_varargs = num_args - vararg_fixed_count;
-                long stack_bytes = ((num_varargs * 8 + 15) / 16) * 16;
-                if (stack_bytes > 0) {
-                    emit_sub_imm(&out, "sp", "sp", stack_bytes);
-                }
-                for (long i = 0; i < num_args; ++i) {
-                    long src_off = stack_bytes + (num_args - 1 - i) * 16;
-                    if (i < vararg_fixed_count) {
+                if (local_vararg_call && num_args <= 8) {
+                    /* Variadic AAPCS64 arguments are passed through the GP
+                     * register bank. The callee spills x0-x7 in va_start's
+                     * register save area, so preserve the raw bit patterns
+                     * for both integer and promoted floating arguments. */
+                    for (long i = 0; i < num_args; ++i) {
+                        long src_off = (num_args - 1 - i) * 16;
                         sb_appendf(&out, "    ldr x%ld, [sp, #%ld]\n", i, src_off);
-                    } else {
-                        sb_appendf(&out, "    ldr x9, [sp, #%ld]\n", src_off);
-                        sb_appendf(&out, "    str x9, [sp, #%ld]\n", (i - vararg_fixed_count) * 8);
                     }
+                    sb_appendf(&out, "    bl _%s\n", ir_arg_str(inst->arg));
+                    sb_appendf(&out, "    add sp, sp, #%ld\n", num_args * 16);
+                } else {
+                    long stack_bytes = ((num_varargs * 8 + 15) / 16) * 16;
+                    if (stack_bytes > 0) {
+                        emit_sub_imm(&out, "sp", "sp", stack_bytes);
+                    }
+                    for (long i = 0; i < num_args; ++i) {
+                        long src_off = stack_bytes + (num_args - 1 - i) * 16;
+                        if (i < vararg_fixed_count) {
+                            sb_appendf(&out, "    ldr x%ld, [sp, #%ld]\n", i, src_off);
+                        } else {
+                            sb_appendf(&out, "    ldr x9, [sp, #%ld]\n", src_off);
+                            sb_appendf(&out, "    str x9, [sp, #%ld]\n", (i - vararg_fixed_count) * 8);
+                        }
+                    }
+                    sb_appendf(&out, "    bl _%s\n", ir_arg_str(inst->arg));
+                    sb_appendf(&out, "    add sp, sp, #%ld\n", stack_bytes + num_args * 16);
                 }
-                sb_appendf(&out, "    bl _%s\n", ir_arg_str(inst->arg));
-                sb_appendf(&out, "    add sp, sp, #%ld\n", stack_bytes + num_args * 16);
             } else if (has_aggregate_arg || ret_agg_size > 0) {
                 int stack_bytes = ((stack_words * 8 + 15) / 16) * 16;
                 if (stack_bytes > 0) {

@@ -1,4 +1,4 @@
-/* tests/c11_generic.c — Test C11 _Generic selections */
+/* tests/m34_generic.c — Test M34 _Generic selections */
 struct A { int x; };
 struct B { int y; };
 
