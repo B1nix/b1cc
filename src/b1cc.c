@@ -380,6 +380,47 @@ int main(int argc, char **argv) {
     string_array_push(&preprocessor_driver_include_dirs, "userspace/include");
     string_array_push(&preprocessor_driver_include_dirs, "include");
 
+    /* An explicit sysroot always wins over the cwd-relative guesses below.
+     * Those guesses ("userspace/include", "../b1nix/userspace/include", ...)
+     * only resolve when b1cc is invoked from the repository root or a sibling
+     * of it; from any other directory they silently miss and the bundled
+     * freestanding headers take over, so a program using sigset_t fails to
+     * parse depending on the caller's cwd. B1CC_SYSROOT_INCLUDE is a
+     * colon-separated list, like a compiler's -isystem chain. */
+    {
+        const char *sysroot_inc = getenv("B1CC_SYSROOT_INCLUDE");
+        if (sysroot_inc && sysroot_inc[0]) {
+            const char *start = sysroot_inc;
+            for (;;) {
+                const char *sep = strchr(start, ':');
+                size_t len = sep ? (size_t)(sep - start) : strlen(start);
+                if (len) {
+                    char *dir = (char *)arena_alloc(&arena, len + 1);
+                    memcpy(dir, start, len);
+                    dir[len] = '\0';
+                    string_array_push(&preprocessor_driver_include_dirs, dir);
+                }
+                if (!sep) break;
+                start = sep + 1;
+            }
+        }
+    }
+
+    /* Running natively on b1nix, a hosted compile must see the target's real
+     * headers before the bundled freestanding set. The bundled headers are a
+     * minimal profile — their <signal.h>, for instance, has no sigset_t — so
+     * letting them shadow the installed musl headers turns a valid program into
+     * a parse error. Cross builds keep the old order: there the repository's
+     * userspace/include (pushed above, relative) is the target surface, and the
+     * bundled set stands in for a libc that is not on the build host. */
+#ifdef b1nix
+    if (!freestanding) {
+        string_array_push(&preprocessor_driver_include_dirs, "/include");
+        string_array_push(&preprocessor_driver_include_dirs, "/usr/include");
+        string_array_push(&preprocessor_driver_include_dirs, "/usr/local/include");
+    }
+#endif
+
     /* Write bundled freestanding headers to a temp dir and add to include path */
     const char *builtin_inc_dir = builtin_headers_write_temp_dir();
     if (builtin_inc_dir) {

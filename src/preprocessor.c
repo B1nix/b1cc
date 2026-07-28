@@ -1036,10 +1036,20 @@ const char *preprocessor_preprocess(const char *raw_src, const char *filepath, S
                     preprocessor_error(msg);
                 }
 
+                /* Headers belonging to the *build host* are skipped: their
+                 * declarations describe the wrong target, and b1cc supplies its
+                 * own. When b1cc runs natively on b1nix, though, /usr/include is
+                 * not a foreign host tree — it is this target's own sysroot, and
+                 * skipping it silently drops every typedef the program needs
+                 * (a program using sigset_t then fails to parse, not to link). */
+#ifdef b1nix
+                int is_host_system = 0;
+#else
                 int is_host_system = (strncmp(inc_path, "/usr/include", 12) == 0 ||
                                       strncmp(inc_path, "/Library", 8) == 0 ||
                                       strncmp(inc_path, "/System", 7) == 0 ||
                                       strncmp(inc_path, "/Applications", 13) == 0);
+#endif
 
                 if (!is_host_system && !hashmap_has(included_files, inc_path)) {
                     FILE *in = fopen(inc_path, "r");
