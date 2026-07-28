@@ -5437,10 +5437,33 @@ static Node *function(ParserState *p, int is_static) {
     take(p, ")");
     if (wrapped_pointer_return) {
         take(p, ")");
-        while (strcmp(peek(p), "[") == 0) {
-            take(p, "[");
-            if (strcmp(peek(p), "]") != 0) (void)expr(p);
-            take(p, "]");
+        /* The declarator can continue past the wrapper: the returned pointer may
+         * point to a function -- `T (*f(args))(sig)` -- or to an array --
+         * `T (*f(args))[N]`. Only the array form was consumed here, so the
+         * function form stopped the parse at the '(' of the trailing signature.
+         * musl declares signal() in exactly that form, which made every
+         * translation unit including <signal.h> fail to parse.
+         *
+         * The trailing signature only describes what the returned pointer points
+         * to; the returned value is pointer-sized either way, which ret_size
+         * already reflects. So the tokens are consumed as a balanced group
+         * rather than modelled further. */
+        while (strcmp(peek(p), "(") == 0 || strcmp(peek(p), "[") == 0) {
+            if (strcmp(peek(p), "(") == 0) {
+                int depth = 0;
+                for (;;) {
+                    const char *t = peek(p);
+                    if (t[0] == '\0' || strcmp(t, "EOF") == 0) break;
+                    if (strcmp(t, "(") == 0) depth++;
+                    else if (strcmp(t, ")") == 0) depth--;
+                    p->pos++;
+                    if (depth == 0) break;
+                }
+            } else {
+                take(p, "[");
+                if (strcmp(peek(p), "]") != 0) (void)expr(p);
+                take(p, "]");
+            }
         }
     }
 
