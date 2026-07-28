@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <unistd.h>
 
 // --- Arena Allocator ---
 
@@ -494,4 +495,24 @@ void f64_to_x87_extended(double d, unsigned char out[10]) {
     for (int i = 0; i < 8; i++) out[i] = (unsigned char)(mant64 >> (8 * i));
     out[8] = (unsigned char)(se & 0xff);
     out[9] = (unsigned char)(se >> 8);
+}
+
+const char *get_tmp_dir(void) {
+    const char *d = getenv("TMPDIR");
+    if (d && d[0] != '\0') return d;
+    return "/tmp";
+}
+
+int create_temp_file(const char *suffix, char *out_path, size_t out_size) {
+    const char *tmp = get_tmp_dir();
+    snprintf(out_path, out_size, "%s/b1cc-XXXXXX%s", tmp, suffix ? suffix : "");
+    int suffix_len = suffix ? (int)strlen(suffix) : 0;
+    int fd = mkstemps(out_path, suffix_len);
+    return fd;
+}
+
+char *create_temp_dir(char *out_path, size_t out_size) {
+    const char *tmp = get_tmp_dir();
+    snprintf(out_path, out_size, "%s/b1cc-rt-XXXXXX", tmp);
+    return mkdtemp(out_path);
 }

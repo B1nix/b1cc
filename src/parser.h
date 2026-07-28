@@ -42,6 +42,10 @@ typedef struct {
     int last_type_thread_local;
     int pending_weak;
     const char *pending_section;
+    const char *pending_alias;
+    const char *pending_visibility;
+    const char *pending_cleanup;
+    int pending_always_inline;
 
     HashMap global_typedefs;
     HashMap global_typedef_sizes;

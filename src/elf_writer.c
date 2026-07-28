@@ -2101,6 +2101,9 @@ static void write_elf64_object(AsmModel *m, ByteBuf *out) {
     int shidx_symtab = next_shidx++;
     int shidx_debug_line = (m->loc_count > 0) ? next_shidx++ : -1;
     int shidx_rela_debug = (m->loc_count > 0) ? next_shidx++ : -1;
+    int shidx_debug_info = (m->loc_count > 0) ? next_shidx++ : -1;
+    int shidx_debug_abbrev = (m->loc_count > 0) ? next_shidx++ : -1;
+    int shidx_debug_frame = (m->loc_count > 0) ? next_shidx++ : -1;
     int shidx_strtab = next_shidx++;
     int shidx_shstr  = next_shidx++;
     int num_sections  = next_shidx;
@@ -2282,6 +2285,72 @@ static void write_elf64_object(AsmModel *m, ByteBuf *out) {
         }
     }
 
+    ByteBuf debug_abbrev_buf;
+    bb_init(&debug_abbrev_buf);
+    ByteBuf debug_info_buf;
+    bb_init(&debug_info_buf);
+    ByteBuf debug_frame_buf;
+    bb_init(&debug_frame_buf);
+
+    if (shidx_debug_info >= 0) {
+        /* .debug_abbrev */
+        bb_write8(&debug_abbrev_buf, 1);    /* Abbrev 1 */
+        bb_write8(&debug_abbrev_buf, 0x11); /* DW_TAG_compile_unit */
+        bb_write8(&debug_abbrev_buf, 0x00); /* DW_CHILDREN_no */
+        bb_write8(&debug_abbrev_buf, 0x03); bb_write8(&debug_abbrev_buf, 0x08); /* DW_AT_name -> string */
+        bb_write8(&debug_abbrev_buf, 0x25); bb_write8(&debug_abbrev_buf, 0x08); /* DW_AT_producer -> string */
+        bb_write8(&debug_abbrev_buf, 0x10); bb_write8(&debug_abbrev_buf, 0x17); /* DW_AT_stmt_list -> sec_offset */
+        bb_write8(&debug_abbrev_buf, 0x11); bb_write8(&debug_abbrev_buf, 0x01); /* DW_AT_low_pc -> addr */
+        bb_write8(&debug_abbrev_buf, 0x12); bb_write8(&debug_abbrev_buf, 0x01); /* DW_AT_high_pc -> addr */
+        bb_write8(&debug_abbrev_buf, 0); bb_write8(&debug_abbrev_buf, 0);
+        bb_write8(&debug_abbrev_buf, 0);
+
+        /* .debug_info */
+        size_t di_start = debug_info_buf.size;
+        bb_write32le(&debug_info_buf, 0);
+        bb_write16le(&debug_info_buf, 4);
+        bb_write32le(&debug_info_buf, 0);
+        bb_write8(&debug_info_buf, 8);
+        bb_write8(&debug_info_buf, 1);
+        const char *fn = "main.c";
+        bb_writebytes(&debug_info_buf, (const uint8_t*)fn, (int)strlen(fn) + 1);
+        const char *prod = "b1cc";
+        bb_writebytes(&debug_info_buf, (const uint8_t*)prod, (int)strlen(prod) + 1);
+        bb_write32le(&debug_info_buf, 0);
+        bb_write64le(&debug_info_buf, 0);
+        bb_write64le(&debug_info_buf, (uint64_t)m->text.size);
+        uint32_t di_len = (uint32_t)(debug_info_buf.size - di_start - 4);
+        memcpy(debug_info_buf.data + di_start, &di_len, 4);
+
+        /* .debug_frame */
+        size_t cie_start = debug_frame_buf.size;
+        bb_write32le(&debug_frame_buf, 0);
+        bb_write32le(&debug_frame_buf, 0xffffffff);
+        bb_write8(&debug_frame_buf, 1);
+        bb_write8(&debug_frame_buf, 0);
+        bb_write8(&debug_frame_buf, 1);
+        bb_write8(&debug_frame_buf, 0x78);
+        bb_write8(&debug_frame_buf, 16);
+        bb_write8(&debug_frame_buf, 0x0c); bb_write8(&debug_frame_buf, 7); bb_write8(&debug_frame_buf, 8);
+        bb_write8(&debug_frame_buf, 0x80 + 16); bb_write8(&debug_frame_buf, 1);
+        while ((debug_frame_buf.size - cie_start - 4) % 8 != 0) {
+            bb_write8(&debug_frame_buf, 0);
+        }
+        uint32_t cie_len = (uint32_t)(debug_frame_buf.size - cie_start - 4);
+        memcpy(debug_frame_buf.data + cie_start, &cie_len, 4);
+
+        size_t fde_start = debug_frame_buf.size;
+        bb_write32le(&debug_frame_buf, 0);
+        bb_write32le(&debug_frame_buf, (uint32_t)cie_start);
+        bb_write64le(&debug_frame_buf, 0);
+        bb_write64le(&debug_frame_buf, (uint64_t)m->text.size);
+        while ((debug_frame_buf.size - fde_start - 4) % 8 != 0) {
+            bb_write8(&debug_frame_buf, 0);
+        }
+        uint32_t fde_len = (uint32_t)(debug_frame_buf.size - fde_start - 4);
+        memcpy(debug_frame_buf.data + fde_start, &fde_len, 4);
+    }
+
     /* ---- Section name string table (.shstrtab) ---- */
     Strtab shstrtab;
     strtab_init(&shstrtab);
@@ -2292,6 +2361,9 @@ static void write_elf64_object(AsmModel *m, ByteBuf *out) {
     uint32_t sh_rela_name   = (shidx_rela   >= 0) ? strtab_add(&shstrtab, ".rela.text") : 0;
     uint32_t sh_debug_line_name = (shidx_debug_line >= 0) ? strtab_add(&shstrtab, ".debug_line") : 0;
     uint32_t sh_rela_debug_name = (shidx_rela_debug >= 0) ? strtab_add(&shstrtab, ".rela.debug_line") : 0;
+    uint32_t sh_debug_info_name = (shidx_debug_info >= 0) ? strtab_add(&shstrtab, ".debug_info") : 0;
+    uint32_t sh_debug_abbrev_name = (shidx_debug_abbrev >= 0) ? strtab_add(&shstrtab, ".debug_abbrev") : 0;
+    uint32_t sh_debug_frame_name = (shidx_debug_frame >= 0) ? strtab_add(&shstrtab, ".debug_frame") : 0;
     uint32_t sh_symtab_name = strtab_add(&shstrtab, ".symtab");
     uint32_t sh_strtab_name = strtab_add(&shstrtab, ".strtab");
     uint32_t sh_shstr_name  = strtab_add(&shstrtab, ".shstrtab");
@@ -2313,6 +2385,12 @@ static void write_elf64_object(AsmModel *m, ByteBuf *out) {
     size_t debug_line_off = off; if (shidx_debug_line >= 0) off += debug_line_buf.size;
     off = (off + 7) & ~(size_t)7;
     size_t rela_debug_off = off; if (shidx_rela_debug >= 0) off += rela_debug_buf.size;
+    off = (off + 7) & ~(size_t)7;
+    size_t debug_info_off = off; if (shidx_debug_info >= 0) off += debug_info_buf.size;
+    off = (off + 7) & ~(size_t)7;
+    size_t debug_abbrev_off = off; if (shidx_debug_abbrev >= 0) off += debug_abbrev_buf.size;
+    off = (off + 7) & ~(size_t)7;
+    size_t debug_frame_off = off; if (shidx_debug_frame >= 0) off += debug_frame_buf.size;
     size_t symtab_off = off;   off += symtab_buf.size;
     size_t strtab_off = off;   off += strtab.buf.size;
     size_t shstr_off  = off;   off += shstrtab.buf.size;
@@ -2356,6 +2434,12 @@ static void write_elf64_object(AsmModel *m, ByteBuf *out) {
     if (shidx_debug_line >= 0) bb_writebytes(out, debug_line_buf.data, debug_line_buf.size);
     while (out->size < rela_debug_off) bb_write8(out, 0);
     if (shidx_rela_debug >= 0) bb_writebytes(out, rela_debug_buf.data, rela_debug_buf.size);
+    while (out->size < debug_info_off) bb_write8(out, 0);
+    if (shidx_debug_info >= 0) bb_writebytes(out, debug_info_buf.data, debug_info_buf.size);
+    while (out->size < debug_abbrev_off) bb_write8(out, 0);
+    if (shidx_debug_abbrev >= 0) bb_writebytes(out, debug_abbrev_buf.data, debug_abbrev_buf.size);
+    while (out->size < debug_frame_off) bb_write8(out, 0);
+    if (shidx_debug_frame >= 0) bb_writebytes(out, debug_frame_buf.data, debug_frame_buf.size);
     bb_writebytes(out, symtab_buf.data, symtab_buf.size);
     bb_writebytes(out, strtab.buf.data, strtab.buf.size);
     bb_writebytes(out, shstrtab.buf.data, shstrtab.buf.size);
@@ -2410,6 +2494,24 @@ static void write_elf64_object(AsmModel *m, ByteBuf *out) {
                0, 0,
                (uint64_t)rela_debug_off, (uint64_t)rela_debug_buf.size,
                (uint32_t)shidx_symtab, (uint32_t)shidx_debug_line, 8, 24);
+    /* .debug_info */
+    if (shidx_debug_info >= 0)
+        elf_write_shdr64(out, sh_debug_info_name, SHT_PROGBITS,
+               0, 0,
+               (uint64_t)debug_info_off, (uint64_t)debug_info_buf.size,
+               0, 0, 1, 0);
+    /* .debug_abbrev */
+    if (shidx_debug_abbrev >= 0)
+        elf_write_shdr64(out, sh_debug_abbrev_name, SHT_PROGBITS,
+               0, 0,
+               (uint64_t)debug_abbrev_off, (uint64_t)debug_abbrev_buf.size,
+               0, 0, 1, 0);
+    /* .debug_frame */
+    if (shidx_debug_frame >= 0)
+        elf_write_shdr64(out, sh_debug_frame_name, SHT_PROGBITS,
+               0, 0,
+               (uint64_t)debug_frame_off, (uint64_t)debug_frame_buf.size,
+               0, 0, 8, 0);
     /* .strtab */
     elf_write_shdr64(out, sh_strtab_name, SHT_STRTAB,
            0, 0,
@@ -2430,6 +2532,9 @@ static void write_elf64_object(AsmModel *m, ByteBuf *out) {
         bb_free(&rela_debug_buf);
         free(debug_line_relocs.data);
     }
+    if (shidx_debug_info >= 0)  bb_free(&debug_info_buf);
+    if (shidx_debug_abbrev >= 0) bb_free(&debug_abbrev_buf);
+    if (shidx_debug_frame >= 0)  bb_free(&debug_frame_buf);
     strtab_free(&strtab);
     strtab_free(&shstrtab);
 

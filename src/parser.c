@@ -601,8 +601,43 @@ static void skip_attribute(ParserState *p) {
                     take(p, ")");
                     continue;
                 }
+                if (strcmp(peek(p), "alias") == 0 && p->pos + 2 < p->tokens.count &&
+                    strcmp(p->tokens.data[p->pos + 1].text, "(") == 0) {
+                    take(p, "alias");
+                    take(p, "(");
+                    const char *raw = take(p, nullptr);
+                    size_t n = strlen(raw);
+                    if (n >= 2 && raw[0] == '"' && raw[n - 1] == '"') {
+                        p->pending_alias = arena_strndup(p->arena, raw + 1, n - 2);
+                    }
+                    take(p, ")");
+                    continue;
+                }
+                if (strcmp(peek(p), "visibility") == 0 && p->pos + 2 < p->tokens.count &&
+                    strcmp(p->tokens.data[p->pos + 1].text, "(") == 0) {
+                    take(p, "visibility");
+                    take(p, "(");
+                    const char *raw = take(p, nullptr);
+                    size_t n = strlen(raw);
+                    if (n >= 2 && raw[0] == '"' && raw[n - 1] == '"') {
+                        p->pending_visibility = arena_strndup(p->arena, raw + 1, n - 2);
+                    }
+                    take(p, ")");
+                    continue;
+                }
+                if (strcmp(peek(p), "cleanup") == 0 && p->pos + 2 < p->tokens.count &&
+                    strcmp(p->tokens.data[p->pos + 1].text, "(") == 0) {
+                    take(p, "cleanup");
+                    take(p, "(");
+                    p->pending_cleanup = take(p, nullptr);
+                    take(p, ")");
+                    continue;
+                }
                 if (strcmp(peek(p), "weak") == 0 || strcmp(peek(p), "weak_import") == 0) {
                     p->pending_weak = 1;
+                }
+                if (strcmp(peek(p), "always_inline") == 0 || strcmp(peek(p), "__always_inline__") == 0) {
+                    p->pending_always_inline = 1;
                 }
                 if (strcmp(peek(p), "(") == 0) depth++;
                 else if (strcmp(peek(p), ")") == 0) depth--;
@@ -5412,6 +5447,13 @@ static Node *function(ParserState *p, int is_static) {
     skip_attribute_and_asm(p);
     fn_node->is_weak = p->pending_weak;
     fn_node->section_name = p->pending_section ? p->pending_section : "";
+    if (p->pending_alias) {
+        char buf[512];
+        const char *pfx = (p->ld_size == 8) ? "_" : "";
+        snprintf(buf, sizeof(buf), ".globl %s%s\n.set %s%s, %s%s\n", pfx, name, pfx, name, pfx, p->pending_alias);
+        ir_add_global_asm(arena_strdup(p->arena, buf));
+        p->pending_alias = nullptr;
+    }
     p->pending_weak = 0;
     p->pending_section = nullptr;
 

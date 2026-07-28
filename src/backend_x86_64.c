@@ -764,6 +764,16 @@ static const char *x86_64_emit_function(TargetBackend *self, const IrFunction *f
             sb_append(&out, "    ud2\n");
         } else if (inst->op == IR_FRAME_ADDR) {
             sb_append(&out, "    movq %rbp, %rax\n    pushq %rax\n");
+        } else if (inst->op == IR_CLZ) {
+            static int clz_id = 0; clz_id++;
+            sb_appendf(&out, "    popq %%rax\n    testl %%eax, %%eax\n    jz .Lclz_zero_%d\n    bsrl %%eax, %%ecx\n    movl $31, %%eax\n    subl %%ecx, %%eax\n    jmp .Lclz_done_%d\n.Lclz_zero_%d:\n    movl $32, %%eax\n.Lclz_done_%d:\n    pushq %%rax\n", clz_id, clz_id, clz_id, clz_id);
+        } else if (inst->op == IR_CTZ) {
+            static int ctz_id = 0; ctz_id++;
+            sb_appendf(&out, "    popq %%rax\n    testl %%eax, %%eax\n    jz .Lctz_zero_%d\n    bsfl %%eax, %%eax\n    jmp .Lctz_done_%d\n.Lctz_zero_%d:\n    movl $32, %%eax\n.Lctz_done_%d:\n    pushq %%rax\n", ctz_id, ctz_id, ctz_id, ctz_id);
+        } else if (inst->op == IR_POPCOUNT) {
+            sb_append(&out, "    popq %rax\n    popcntl %eax, %eax\n    pushq %rax\n");
+        } else if (inst->op == IR_ADD_OVERFLOW) {
+            sb_append(&out, "    popq %rcx\n    popq %rbx\n    popq %rax\n    addl %ebx, %eax\n    movl %eax, (%rcx)\n    seto %al\n    movzbl %al, %eax\n    pushq %rax\n");
         } else if (inst->op == IR_ATOMIC_LOAD) {
             sb_append(&out, "    popq %rcx\n");
             if (inst->value == 1) sb_append(&out, "    movzbl (%rcx), %eax\n");

@@ -334,7 +334,7 @@ static const char *substitute_asm_operands_arm64(const char *temp, int num_opera
 }
 
 static const char *arm64_op_regs[] = {"x9", "x10", "x11", "x12", "x13", "x14", "x15"};
-static const char *arm64_dest_regs[] = {"x13", "x14", "x15"};
+static const char *arm64_dest_regs[] = {"x16", "x17", "x20", "x21", "x22"};
 /* Bounded access to the fixed scratch pool: an asm with more generic operands
  * than pooled registers (e.g. the syscall wrapper) must not index past the
  * array — see the x86_64 backend's get_operand_reg for the rationale. */
@@ -862,6 +862,14 @@ static const char *arm64_emit_function(TargetBackend *self, const IrFunction *fn
             sb_append(&out, "    brk #0\n");
         } else if (inst->op == IR_FRAME_ADDR) {
             sb_append(&out, "    mov x0, x29\n    str x0, [sp, #-16]!\n");
+        } else if (inst->op == IR_CLZ) {
+            sb_append(&out, "    ldr w0, [sp], #16\n    clz w0, w0\n    str x0, [sp, #-16]!\n");
+        } else if (inst->op == IR_CTZ) {
+            sb_append(&out, "    ldr w0, [sp], #16\n    rbit w0, w0\n    clz w0, w0\n    str x0, [sp, #-16]!\n");
+        } else if (inst->op == IR_POPCOUNT) {
+            sb_append(&out, "    ldr x0, [sp], #16\n    fmov d0, x0\n    cnt v0.8b, v0.8b\n    addv b0, v0.8b\n    fmov w0, s0\n    str x0, [sp, #-16]!\n");
+        } else if (inst->op == IR_ADD_OVERFLOW) {
+            sb_append(&out, "    ldr x2, [sp], #16\n    ldr w1, [sp], #16\n    ldr w0, [sp], #16\n    adds w3, w0, w1\n    str w3, [x2]\n    cset w0, vs\n    str x0, [sp, #-16]!\n");
         } else if (inst->op == IR_CALL || inst->op == IR_ICALL) {
             long num_args = inst->value;
             /* Float-scalar call fast path (AAPCS64): float/double args -> V0-V7,

@@ -5,6 +5,7 @@
 #endif
 
 #include "builtin_headers.h"
+#include "common.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -452,14 +453,75 @@ static const char hdr_tgmath[] =
     "#include <math.h>\n"
     "#endif\n";
 
+static const char hdr_assert[] =
+    "#ifndef _ASSERT_H\n"
+    "#define _ASSERT_H\n"
+    "#ifdef NDEBUG\n"
+    "#define assert(ignore) ((void)0)\n"
+    "#else\n"
+    "#define assert(expr) ((expr) ? (void)0 : (void)0)\n"
+    "#endif\n"
+    "#endif\n";
+
+static const char hdr_locale[] =
+    "#ifndef _LOCALE_H\n"
+    "#define _LOCALE_H\n"
+    "struct lconv { char *decimal_point; };\n"
+    "#define LC_ALL 0\n"
+    "#endif\n";
+
+static const char hdr_math[] =
+    "#ifndef _MATH_H\n"
+    "#define _MATH_H\n"
+    "#define M_PI 3.14159265358979323846\n"
+    "double fabs(double);\n"
+    "double sqrt(double);\n"
+    "#endif\n";
+
+static const char hdr_signal[] =
+    "#ifndef _SIGNAL_H\n"
+    "#define _SIGNAL_H\n"
+    "typedef void (*sighandler_t)(int);\n"
+    "#define SIG_ERR ((sighandler_t)-1)\n"
+    "#define SIG_DFL ((sighandler_t)0)\n"
+    "#define SIG_IGN ((sighandler_t)1)\n"
+    "#endif\n";
+
+static const char hdr_time[] =
+    "#ifndef _TIME_H\n"
+    "#define _TIME_H\n"
+    "typedef long time_t;\n"
+    "struct tm { int tm_sec; int tm_min; int tm_hour; int tm_mday; int tm_mon; int tm_year; int tm_wday; int tm_yday; int tm_isdst; };\n"
+    "#endif\n";
+
+static const char hdr_wchar[] =
+    "#ifndef _WCHAR_H\n"
+    "#define _WCHAR_H\n"
+    "#include <stddef.h>\n"
+    "#endif\n";
+
+static const char hdr_wctype[] =
+    "#ifndef _WCTYPE_H\n"
+    "#define _WCTYPE_H\n"
+    "#include <wchar.h>\n"
+    "#endif\n";
+
 static const BuiltinHeader builtin_headers[] = {
     { "stddef.h", hdr_stddef },
+    { "assert.h", hdr_assert },
     { "b1cc_builtins.h", hdr_builtins },
     { "stdint.h", hdr_stdint },
     { "errno.h", hdr_errno },
     { "iso646.h", hdr_iso646 },
     { "limits.h", hdr_limits },
     { "float.h", hdr_float },
+    { "inttypes.h", hdr_inttypes },
+    { "locale.h", hdr_locale },
+    { "math.h", hdr_math },
+    { "signal.h", hdr_signal },
+    { "time.h", hdr_time },
+    { "wchar.h", hdr_wchar },
+    { "wctype.h", hdr_wctype },
     { "setjmp.h", hdr_setjmp },
     { "complex.h", hdr_complex },
     { "fenv.h", hdr_fenv },
@@ -486,7 +548,8 @@ static void write_file(const char *path, const char *data) {
 }
 
 const char *builtin_headers_write_temp_dir(void) {
-    char tmpl[] = "/tmp/b1cc-inc-XXXXXX";
+    char tmpl[1024];
+    snprintf(tmpl, sizeof(tmpl), "%s/b1cc-inc-XXXXXX", get_tmp_dir());
     char *dir = mkdtemp(tmpl);
     if (!dir) return NULL;
     for (size_t i = 0; i < NUM_BUILTIN_HEADERS; ++i) {

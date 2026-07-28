@@ -20,15 +20,15 @@ int main(int argc, char **argv) {
     /* atexit registration */
     if (atexit(on_exit_cb) != 0) return 4;
     /* file I/O round-trip */
-    FILE *f = fopen("/tmp/m34_runtime.tmp", "w");
+    FILE *f = fopen("build/m34_runtime.tmp", "w");
     if (f == 0) return 5;
     fputs("hi", f);
     fclose(f);
-    f = fopen("/tmp/m34_runtime.tmp", "r");
+    f = fopen("build/m34_runtime.tmp", "r");
     if (f == 0) return 6;
     if (fgetc(f) != 'h') { fclose(f); return 7; }
     fclose(f);
-    remove("/tmp/m34_runtime.tmp");
+    remove("build/m34_runtime.tmp");
     /* errno set on a failed open */
     errno = 0;
     if (fopen("/no/such/dir/file", "r") != 0 || errno == 0) return 8;

@@ -927,6 +927,10 @@ static const struct { const char *str; IrOp op; } ir_op_table[] = {
     {"atomic_exchange", IR_ATOMIC_EXCHANGE},
     {"atomic_cas", IR_ATOMIC_CAS},
     {"frame_addr", IR_FRAME_ADDR},
+    {"clz", IR_CLZ},
+    {"ctz", IR_CTZ},
+    {"popcount", IR_POPCOUNT},
+    {"add_overflow", IR_ADD_OVERFLOW},
     {"!", IR_NOT},
     {"!=", IR_NOTEQ},
     {"!=64", IR_NOTEQ64},
@@ -1878,6 +1882,42 @@ static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend,
         }
         if (builtin_name && strcmp(builtin_name, "__builtin_frame_address") == 0) {
             ir_push(fn, "frame_addr", "", 0);
+            return;
+        }
+        if (builtin_name && (strcmp(builtin_name, "__builtin_clz") == 0 ||
+                             strcmp(builtin_name, "__builtin_clzl") == 0 ||
+                             strcmp(builtin_name, "__builtin_clzll") == 0)) {
+            if (node->body.count >= 1) lower_expr(node->body.data[0], fn, backend, arena);
+            ir_push(fn, "clz", "", 4);
+            return;
+        }
+        if (builtin_name && (strcmp(builtin_name, "__builtin_ctz") == 0 ||
+                             strcmp(builtin_name, "__builtin_ctzl") == 0 ||
+                             strcmp(builtin_name, "__builtin_ctzll") == 0)) {
+            if (node->body.count >= 1) lower_expr(node->body.data[0], fn, backend, arena);
+            ir_push(fn, "ctz", "", 4);
+            return;
+        }
+        if (builtin_name && (strcmp(builtin_name, "__builtin_popcount") == 0 ||
+                             strcmp(builtin_name, "__builtin_popcountl") == 0 ||
+                             strcmp(builtin_name, "__builtin_popcountll") == 0)) {
+            if (node->body.count >= 1) lower_expr(node->body.data[0], fn, backend, arena);
+            ir_push(fn, "popcount", "", 4);
+            return;
+        }
+        if (builtin_name && strcmp(builtin_name, "__builtin_expect") == 0) {
+            if (node->body.count >= 1) lower_expr(node->body.data[0], fn, backend, arena);
+            return;
+        }
+        if (builtin_name && strcmp(builtin_name, "__builtin_add_overflow") == 0) {
+            if (node->body.count >= 3) {
+                lower_expr(node->body.data[0], fn, backend, arena);
+                lower_expr(node->body.data[1], fn, backend, arena);
+                lower_addr(node->body.data[2], fn, backend, arena);
+                ir_push(fn, "add_overflow", "", 4);
+            } else {
+                ir_push(fn, "const", "", 0);
+            }
             return;
         }
         if (builtin_name && (strcmp(builtin_name, "__builtin_isnormal") == 0 ||

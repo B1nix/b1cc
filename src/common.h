@@ -120,4 +120,8 @@ void long_array_init(LongArray *arr);
 void long_array_push(LongArray *arr, long val);
 void long_array_free(LongArray *arr);
 
+const char *get_tmp_dir(void);
+int create_temp_file(const char *suffix, char *out_path, size_t out_size);
+char *create_temp_dir(char *out_path, size_t out_size);
+
 #endif // COMMON_H

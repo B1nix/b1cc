@@ -1,5 +1,6 @@
 #include "backend.h"
 #include "backend_target.h"
+#include "ir_opt.h"
 #include "lexer.h"
 #include "parser.h"
 #include "preprocessor.h"
@@ -186,6 +187,7 @@ const char *backend_compile_asm(const char *src, const char *target, const char 
     }
 
     IrFunctionArray ir_functions = ir_lower_program(&ast, target, arena);
+    ir_optimize_module(&ir_functions, arena);
     // free AST nodes array (since they are in arena we don't free individual nodes)
     node_array_free(&ast);
 

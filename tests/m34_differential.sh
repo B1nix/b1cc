@@ -77,7 +77,8 @@ if command -v objdump >/dev/null 2>&1 && "$REF" --version >/dev/null 2>&1; then
   obj_b1="$tmp/object_b1.o"; obj_b1_repeat="$tmp/object_b1_repeat.o"; obj_ref="$tmp/object_ref.o"
   if "$B1CC" --target=x86_64-b1nix -c tests/return_42.c -o "$obj_b1" >/dev/null 2>&1 \
       && "$B1CC" --target=x86_64-b1nix -c tests/return_42.c -o "$obj_b1_repeat" >/dev/null 2>&1 \
-      && "$REF" --target=x86_64-unknown-elf -ffreestanding -c tests/return_42.c -o "$obj_ref" >/dev/null 2>&1; then
+      && "$REF" --target=x86_64-unknown-elf -ffreestanding -c tests/return_42.c -o "$obj_ref" >/dev/null 2>&1 \
+      && objdump -h "$obj_b1" >/dev/null 2>&1; then
     objdump -s -j .text "$obj_b1" | sed -n '/^[[:space:]]*[0-9a-f]/p' >"$tmp/object_b1.bytes"
     objdump -s -j .text "$obj_b1_repeat" | sed -n '/^[[:space:]]*[0-9a-f]/p' >"$tmp/object_b1_repeat.bytes"
     # Code size is intentionally not compared: different valid instruction

@@ -39,7 +39,7 @@ trap 'rm -rf "$TMP"' EXIT
 if [ ! -x "$B1CC" ]; then echo "SKIP: build/b1cc missing (run make)"; exit 0; fi
 if [ ! -f "$CRT0" ] || [ ! -f "$LIBC" ]; then echo "SKIP: B1NIX x86_64 build tree not found at $USR"; exit 0; fi
 if ! command -v clang >/dev/null 2>&1 || ! command -v ld.lld >/dev/null 2>&1; then echo "SKIP: clang/ld.lld unavailable"; exit 0; fi
-[ -n "$B1NIX_CC_BIN" ] || { echo "SKIP: b1nix-cc unavailable"; exit 0; }
+[ -n "$B1NIX_CC_BIN" ] && [ -x "$B1NIX_CC_BIN" ] || { echo "SKIP: b1nix-cc unavailable"; exit 0; }
 
 export B1CC_CRT0="$CRT0" B1CC_LIBC="$LIBC" B1NIX_CC="$B1NIX_CC_BIN"
 

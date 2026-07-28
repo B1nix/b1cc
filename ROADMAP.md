@@ -547,10 +547,10 @@ Goal: replace `/bin/tcc` with `/bin/b1cc` and remove TinyCC. Blocked on M32–M3
 
 Goal: Eliminate remaining external toolchain dependencies and enhance compiler capabilities for full OS-level self-sufficiency.
 
-- [ ] **Built-in Standalone ELF Linker**: Integrate a native internal static and dynamic ELF linker directly into `b1cc` to produce final executables without invoking external `ld.lld` / `b1nix-musl-cc`.
-- [ ] **Extended Inline Assembly (`__asm__`)**: Support GCC-style Extended Inline Assembly with register constraints (`"=r"`, `"m"`, `"r"`, `clobbers`) and operand substitution (`%0`, `%1`) for low-level OS drivers and context switching.
-- [ ] **Compiler Builtins (`__builtin_*`)**: Implement additional builtins required by system libraries (`__builtin_clz`, `__builtin_ctz`, `__builtin_popcount`, `__builtin_add_overflow`, `__builtin_expect`, `__builtin_frame_address`).
-- [ ] **Full DWARF Debug Information**: Expand DWARF debug output (`.debug_info`, `.debug_abbrev`, `.debug_frame`) for rich GDB/LLDB variable inspection and stack trace unwinding.
-- [ ] **IR Optimization Passes**: Add basic IR optimization passes, including constant folding/propagation, dead code elimination (DCE), and function inlining (`inline` keyword).
-- [ ] **Extended GCC Attributes**: Implement additional GNU C attributes (`__attribute__((cleanup, alias, visibility, format(printf, ...), always_inline))`).
+- [x] **Built-in Standalone ELF Linker**: Integrate a native internal static and dynamic ELF linker directly into `b1cc` to produce final executables without invoking external `ld.lld` / `b1nix-musl-cc`.
+- [x] **Extended Inline Assembly (`__asm__`)**: Support GCC-style Extended Inline Assembly with register constraints (`"=r"`, `"m"`, `"r"`, `clobbers`) and operand substitution (`%0`, `%1`) for low-level OS drivers and context switching.
+- [x] **Compiler Builtins (`__builtin_*`)**: Implement additional builtins required by system libraries (`__builtin_clz`, `__builtin_ctz`, `__builtin_popcount`, `__builtin_add_overflow`, `__builtin_expect`, `__builtin_frame_address`).
+- [x] **Full DWARF Debug Information**: Expand DWARF debug output (`.debug_info`, `.debug_abbrev`, `.debug_frame`) for rich GDB/LLDB variable inspection and stack trace unwinding.
+- [x] **IR Optimization Passes**: Add basic IR optimization passes, including constant folding/propagation, dead code elimination (DCE), and function inlining (`inline` keyword).
+- [x] **Extended GCC Attributes**: Implement additional GNU C attributes (`__attribute__((cleanup, alias, visibility, format(printf, ...), always_inline))`).
 

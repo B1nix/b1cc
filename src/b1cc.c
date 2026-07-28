@@ -145,8 +145,8 @@ static StringArray compile_freestanding_runtime(const char *target, const char *
     };
     int num_files = sizeof(runtime_files) / sizeof(runtime_files[0]);
 
-    char tmpdir[] = "/tmp/b1cc-rt-XXXXXX";
-    char *dir = mkdtemp(tmpdir);
+    char tmpdir[1024];
+    char *dir = create_temp_dir(tmpdir, sizeof(tmpdir));
     if (!dir) return runtime_objects;
 
     for (int i = 0; i < num_files; ++i) {
@@ -445,7 +445,7 @@ int main(int argc, char **argv) {
         }
         /* Internal linking never shells out to b1nix-cc, so don't require it —
          * this is the on-device case where b1nix-cc/ld.lld don't exist. */
-        if (!internal_link && !is_kernel_target && !preprocess_only && !emit_asm && !shared && !exists(cc))
+        if (!internal_link && !compile_only && !is_kernel_target && !preprocess_only && !emit_asm && !shared && !exists(cc))
             diagnostics_fatal("set B1NIX_CC or run from a B1NIX checkout");
         
         /* Cross-assembler for .S files: use clang directly, not b1nix-cc
@@ -668,8 +668,8 @@ int main(int argc, char **argv) {
                 fclose(of);
             } else {
                 /* Host assembler path */
-                char tmp_asm[] = "/tmp/b1cc-XXXXXX.s";
-                int fd = mkstemps(tmp_asm, 2);
+                char tmp_asm[1024];
+                int fd = create_temp_file(".s", tmp_asm, sizeof(tmp_asm));
                 if (fd < 0) diagnostics_fatal("cannot create temporary file");
                 close(fd);
                 write_file(tmp_asm, asm_text);
@@ -816,8 +816,8 @@ int main(int argc, char **argv) {
             ElfObject obj = elf_write_object(asm_text, target, inp, &arena);
             if (!obj.data || obj.size == 0)
                 diagnostics_fatal("elf_write_object: failed to produce ELF object");
-            char tmp_obj[] = "/tmp/b1cc-XXXXXX.o";
-            int ofd = mkstemps(tmp_obj, 2);
+            char tmp_obj[1024];
+            int ofd = create_temp_file(".o", tmp_obj, sizeof(tmp_obj));
             if (ofd < 0) diagnostics_fatal("cannot create temporary object");
             close(ofd);
             FILE *tf = fopen(tmp_obj, "wb");
@@ -900,8 +900,8 @@ int main(int argc, char **argv) {
             return lrc == 0 ? 0 : 1;
         }
 
-        char tmp_asm[] = "/tmp/b1cc-XXXXXX.s";
-        int fd = mkstemps(tmp_asm, 2);
+        char tmp_asm[1024];
+        int fd = create_temp_file(".s", tmp_asm, sizeof(tmp_asm));
         if (fd < 0) diagnostics_fatal("cannot create temporary file");
         close(fd);
         write_file(tmp_asm, asm_text);
@@ -979,8 +979,8 @@ int main(int argc, char **argv) {
         }
         /* .S assembly files: assemble with the system/cross assembler */
         if (has_suffix(inp, ".S") || has_suffix(inp, ".s")) {
-            char tmp_obj[] = "/tmp/b1cc-XXXXXX.o";
-            int fd_obj = mkstemps(tmp_obj, 2);
+            char tmp_obj[1024];
+            int fd_obj = create_temp_file(".o", tmp_obj, sizeof(tmp_obj));
             if (fd_obj < 0) diagnostics_fatal("cannot create temporary file");
             close(fd_obj);
 
@@ -1013,14 +1013,14 @@ int main(int argc, char **argv) {
         diagnostics_filepath = inp;
         const char *asm_text = backend_compile_asm(read_file(inp, &arena), target, mcmodel, dump_ast, dump_ir, &arena);
         
-        char tmp_asm[] = "/tmp/b1cc-XXXXXX.s";
-        int fd_asm = mkstemps(tmp_asm, 2);
+        char tmp_asm[1024];
+        int fd_asm = create_temp_file(".s", tmp_asm, sizeof(tmp_asm));
         if (fd_asm < 0) diagnostics_fatal("cannot create temporary file");
         close(fd_asm);
         write_file(tmp_asm, asm_text);
 
-        char tmp_obj[] = "/tmp/b1cc-XXXXXX.o";
-        int fd_obj = mkstemps(tmp_obj, 2);
+        char tmp_obj[1024];
+        int fd_obj = create_temp_file(".o", tmp_obj, sizeof(tmp_obj));
         if (fd_obj < 0) diagnostics_fatal("cannot create temporary file");
         close(fd_obj);
 

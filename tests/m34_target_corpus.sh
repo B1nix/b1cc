@@ -4,6 +4,27 @@
 # B1NIX/QEMU harness and must not be represented by a host-side link result.
 set -u
 
+if [ -n "${B1NIX_CC:-}" ] && "$B1NIX_CC" --version >/dev/null 2>&1; then
+  B1NIX_CC_BIN="$B1NIX_CC"
+else
+  B1NIX_CC_BIN=""
+  if [ -x "../b1nix/tools/toolchain/bin/b1nix-cc" ]; then
+    B1NIX_CC_BIN="../b1nix/tools/toolchain/bin/b1nix-cc"
+  elif [ -x "../../tools/toolchain/bin/b1nix-cc" ]; then
+    B1NIX_CC_BIN="../../tools/toolchain/bin/b1nix-cc"
+  elif [ -x "../tools/b1nix-musl-cc" ] && "../tools/b1nix-musl-cc" --version >/dev/null 2>&1; then
+    B1NIX_CC_BIN="../tools/b1nix-musl-cc"
+  elif [ -x "../../tools/b1nix-musl-cc" ] && "../../tools/b1nix-musl-cc" --version >/dev/null 2>&1; then
+    B1NIX_CC_BIN="../../tools/b1nix-musl-cc"
+  fi
+fi
+
+if [ -z "$B1NIX_CC_BIN" ] || ! "$B1NIX_CC_BIN" --version >/dev/null 2>&1; then
+  echo "SKIP: b1nix-cc unavailable for target corpus"
+  exit 0
+fi
+export B1NIX_CC="$B1NIX_CC_BIN"
+
 B1CC="${B1CC:-./build/b1cc}"
 tmp="${TMPDIR:-/tmp}/b1cc-c11-target-corpus"
 rm -rf "$tmp"
