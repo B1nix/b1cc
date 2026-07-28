@@ -314,6 +314,12 @@ typedef struct {
 } RegEntry;
 
 static const RegEntry x64_regs[] = {
+    /* SSE registers. Listed first so a lookup of "%xmm1" cannot be shadowed by
+     * a prefix match against a GPR name. */
+    {"%xmm0",0},{"%xmm1",1},{"%xmm2",2},{"%xmm3",3},
+    {"%xmm4",4},{"%xmm5",5},{"%xmm6",6},{"%xmm7",7},
+    {"%xmm8",8},{"%xmm9",9},{"%xmm10",10},{"%xmm11",11},
+    {"%xmm12",12},{"%xmm13",13},{"%xmm14",14},{"%xmm15",15},
     /* 64-bit GPR */
     {"%rax",0},{"%rcx",1},{"%rdx",2},{"%rbx",3},
     {"%rsp",4},{"%rbp",5},{"%rsi",6},{"%rdi",7},
@@ -393,6 +399,7 @@ typedef enum {
     OT_REG32,   /* %eax, %r11d, etc. */
     OT_REG16,   /* %ax, %r11w */
     OT_REG8,    /* %al, %cl, %r11b */
+    OT_REGXMM,  /* %xmm0..%xmm15 */
     OT_IMM,     /* $42 */
     OT_MEM_RIP, /* sym(%rip) */
     OT_MEM_BASE,/* N(%rbp) / N(%rsp) etc. */
@@ -417,6 +424,7 @@ typedef struct {
 
 /* Determine operand size class from register name */
 static OpType reg_optype(const char *s) {
+    if (strncmp(s, "%xmm", 4) == 0) return OT_REGXMM;
     if (s[1] == 'r') return OT_REG64;          /* %rax, %r8.. */
     if (s[1] == 'e') return OT_REG32;
     /* 8-bit low byte regs (%al %cl %dl %bl) end in 'l' — MUST be tested before
@@ -607,6 +615,95 @@ static Operand parse_operand_x64(const char **pp) {
 }
 
 /* Encode a 64-bit REX+opcode+ModRM for reg-to-reg instruction */
+/* ---------------------------------------------------------------------------
+ * SSE encoding
+ *
+ * Every scalar floating-point instruction b1cc's x86_64 backend emits has the
+ * shape <mandatory prefix> [REX] 0F <opcode> /r. Before this existed the whole
+ * family fell through to the unknown-mnemonic path and was assembled as `nop`,
+ * so a natively assembled program silently computed garbage for any double:
+ * the value was never loaded and comparisons ran on stale flags.
+ *
+ * `reg` goes in ModRM.reg; `rm` is the register-or-memory operand. RIP-relative
+ * operands emit the same PC32 relocation the GP paths use.
+ * ------------------------------------------------------------------------- */
+static void enc_modrm_operand(ByteBuf *text, RelocArr *relocs, int reg, const Operand *rm);
+
+static void enc_sse(ByteBuf *text, RelocArr *relocs, uint8_t pfx, uint8_t opcode,
+                    int reg, const Operand *rm, int rexW) {
+    if (pfx) bb_write8(text, pfx);
+
+    int rm_reg = (rm->type == OT_REGXMM || rm->type == OT_REG64 ||
+                  rm->type == OT_REG32 || rm->type == OT_REG16 ||
+                  rm->type == OT_REG8) ? rm->reg
+               : (rm->type == OT_MEM_RIP) ? 0 : rm->base;
+    int idx = (rm->type == OT_MEM_IDX) ? rm->idx : 0;
+    if (rexW || reg >= 8 || rm_reg >= 8 || idx >= 8) {
+        bb_write8(text, (uint8_t)(0x40 | (rexW ? 8 : 0) | ((reg >= 8) ? 4 : 0) |
+                                  ((idx >= 8) ? 2 : 0) | ((rm_reg >= 8) ? 1 : 0)));
+    }
+    bb_write8(text, 0x0F);
+    bb_write8(text, opcode);
+    enc_modrm_operand(text, relocs, reg, rm);
+}
+
+/* Emit the ModRM byte (plus SIB / displacement / RIP relocation) for `rm`,
+ * with `reg` occupying the ModRM.reg field — either a register number or a
+ * /digit opcode extension. */
+static void enc_modrm_operand(ByteBuf *text, RelocArr *relocs, int reg, const Operand *rm) {
+    switch (rm->type) {
+    case OT_REGXMM:
+    case OT_REG64:
+    case OT_REG32:
+    case OT_REG16:
+    case OT_REG8:
+        bb_write8(text, modrm_rr(reg, rm->reg));
+        return;
+    case OT_MEM_RIP: {
+        bb_write8(text, modrm_r0(reg, 5));
+        ElfReloc rel = {0};
+        strncpy(rel.sym_name, rm->sym, 255);
+        rel.offset = text->size;
+        rel.addend = -4;
+        rel.type   = R_X86_64_PC32;
+        relocarr_push(relocs, &rel);
+        bb_write32le(text, 0);
+        return;
+    }
+    case OT_MEM_IDX: {
+        int scale_log2 = (rm->scale == 2) ? 1 : (rm->scale == 4) ? 2 : (rm->scale == 8) ? 3 : 0;
+        int32_t disp = (int32_t)rm->imm;
+        /* A SIB base of %rbp/%r13 has no mod=00 encoding — that slot means
+         * "no base, disp32" — so such a base forces an explicit disp8 of 0. */
+        int mod;
+        if (disp == 0 && (rm->base & 7) != 5) mod = 0;
+        else if (disp >= -128 && disp <= 127) mod = 1;
+        else mod = 2;
+        bb_write8(text, (uint8_t)((mod << 6) | ((reg & 7) << 3) | 4));
+        bb_write8(text, sib_byte(scale_log2, rm->idx, rm->base));
+        if (mod == 1) bb_write8(text, (uint8_t)(disp & 0xff));
+        else if (mod == 2) bb_write32le(text, (uint32_t)disp);
+        return;
+    }
+    default: {
+        /* base + displacement. %rsp/%r12 need a SIB byte to express "no index",
+         * and %rbp/%r13 have no disp-less form, so they force a disp8 of 0. */
+        int base = rm->base;
+        int32_t disp = (rm->type == OT_MEM_INDIR) ? 0 : (int32_t)rm->imm;
+        int need_sib = ((base & 7) == 4);
+        int mod;
+        if (disp == 0 && (base & 7) != 5) mod = 0;
+        else if (disp >= -128 && disp <= 127) mod = 1;
+        else mod = 2;
+        bb_write8(text, (uint8_t)((mod << 6) | ((reg & 7) << 3) | (need_sib ? 4 : (base & 7))));
+        if (need_sib) bb_write8(text, sib_byte(0, 4, base));
+        if (mod == 1) bb_write8(text, (uint8_t)(disp & 0xff));
+        else if (mod == 2) bb_write32le(text, (uint32_t)disp);
+        return;
+    }
+    }
+}
+
 static void enc_rr64(ByteBuf *out, uint8_t op, int dst, int src) {
     bb_write8(out, rex(1, src, dst));
     bb_write8(out, op);
@@ -791,6 +888,172 @@ static int x64_encode_line(const char *line, ByteBuf *text, EncCtx *ctx,
     if (strcmp(mnem, "leave") == 0) {
         bb_write8(text, 0xC9);
         return 1;
+    }
+
+    /* ---- x87 ----
+     * long double lives on the x87 stack, and the backend also routes a few
+     * int64<->double conversions through it. Memory forms use a /digit opcode
+     * extension in the ModRM.reg field. */
+    {
+        static const struct { const char *m; uint8_t op; int digit; } fmem[] = {
+            {"fldl",   0xDD, 0},  /* load  m64fp  */
+            {"fstpl",  0xDD, 3},  /* store m64fp, pop */
+            {"fldt",   0xDB, 5},  /* load  m80fp  */
+            {"fstpt",  0xDB, 7},  /* store m80fp, pop */
+            {"fildq",  0xDF, 5},  /* load  m64int */
+            {"fisttpq",0xDD, 1},  /* truncating store m64int, pop */
+            {"fldd",   0xDD, 0},
+            {"flds",   0xD9, 0},
+            {"fstps",  0xD9, 3},
+            {NULL,0,0}
+        };
+        for (int i = 0; fmem[i].m; i++) {
+            if (strcmp(mnem, fmem[i].m) != 0) continue;
+            Operand mem = parse_operand_x64(&p);
+            /* An extended base register still needs REX.B. */
+            int base = (mem.type == OT_MEM_RIP) ? 0 : mem.base;
+            if (base >= 8) bb_write8(text, (uint8_t)(0x40 | 1));
+            bb_write8(text, fmem[i].op);
+            enc_modrm_operand(text, relocs, fmem[i].digit, &mem);
+            return 1;
+        }
+    }
+    if (strcmp(mnem, "fchs") == 0) {   /* negate st(0) */
+        bb_write8(text, 0xD9); bb_write8(text, 0xE0);
+        return 1;
+    }
+    if (strcmp(mnem, "fabs") == 0) {
+        bb_write8(text, 0xD9); bb_write8(text, 0xE1);
+        return 1;
+    }
+    /* `%st(N)` is not a name the general operand parser knows, so read the
+     * stack index straight out of the text; a bare `%st` means %st(0). */
+    if (strcmp(mnem, "fstp") == 0 || strcmp(mnem, "fucomip") == 0 ||
+        strcmp(mnem, "fcomip") == 0 || strcmp(mnem, "fxch") == 0) {
+        const char *q = skip_ws(p);
+        int i = 0;
+        if (q[0] == '%' && q[1] == 's' && q[2] == 't') {
+            q += 3;
+            if (*q == '(') i = (int)strtol(q + 1, NULL, 10);
+        }
+        if (strcmp(mnem, "fstp") == 0) {
+            bb_write8(text, 0xDD); bb_write8(text, (uint8_t)(0xD8 + (i & 7)));
+        } else if (strcmp(mnem, "fxch") == 0) {
+            bb_write8(text, 0xD9); bb_write8(text, (uint8_t)(0xC8 + (i & 7)));
+        } else {
+            bb_write8(text, 0xDF);
+            bb_write8(text, (uint8_t)((strcmp(mnem, "fucomip") == 0 ? 0xE8 : 0xF0) + (i & 7)));
+        }
+        return 1;
+    }
+
+    /* ---- SSE scalar floating point ----
+     * The backend routes every double through this family, so until these
+     * encodings existed each one fell through to the unknown-mnemonic path and
+     * assembled to `nop`: the value was never loaded and comparisons ran on
+     * whatever flags happened to be live. Operands are parsed only after the
+     * mnemonic matches, since parsing advances the cursor. */
+    {
+        static const struct { const char *m; uint8_t pfx; uint8_t op; } fbin[] = {
+            {"addsd",0xF2,0x58},{"subsd",0xF2,0x5C},{"mulsd",0xF2,0x59},{"divsd",0xF2,0x5E},
+            {"addss",0xF3,0x58},{"subss",0xF3,0x5C},{"mulss",0xF3,0x59},{"divss",0xF3,0x5E},
+            {"sqrtsd",0xF2,0x51},{"sqrtss",0xF3,0x51},
+            {"cvtsd2ss",0xF2,0x5A},{"cvtss2sd",0xF3,0x5A},
+            {"ucomisd",0x66,0x2E},{"comisd",0x66,0x2F},
+            {"ucomiss",0x00,0x2E},{"comiss",0x00,0x2F},
+            {"xorpd",0x66,0x57},{"xorps",0x00,0x57},{"pxor",0x66,0xEF},
+            {"andpd",0x66,0x54},{"andps",0x00,0x54},
+            {"movapd",0x66,0x28},{"movaps",0x00,0x28},
+            {NULL,0,0}
+        };
+        for (int i = 0; fbin[i].m; i++) {
+            if (strcmp(mnem, fbin[i].m) != 0) continue;
+            Operand src = parse_operand_x64(&p);
+            if (*p == ',') p++;
+            Operand dst = parse_operand_x64(&p);
+            /* AT&T order: source first; the destination is ModRM.reg. */
+            enc_sse(text, relocs, fbin[i].pfx, fbin[i].op, dst.reg, &src, 0);
+            return 1;
+        }
+    }
+
+    /* movsd/movss: 0x10 loads into an xmm register, 0x11 stores out of one. */
+    if (strcmp(mnem, "movsd") == 0 || strcmp(mnem, "movss") == 0) {
+        uint8_t pfx = (mnem[4] == 'd') ? 0xF2 : 0xF3;   /* movsD / movsS */
+        Operand src = parse_operand_x64(&p);
+        if (*p == ',') p++;
+        Operand dst = parse_operand_x64(&p);
+        if (src.type == OT_REGXMM && dst.type != OT_REGXMM) {
+            enc_sse(text, relocs, pfx, 0x11, src.reg, &dst, 0);
+            return 1;
+        }
+        if (dst.type == OT_REGXMM) {
+            enc_sse(text, relocs, pfx, 0x10, dst.reg, &src, 0);
+            return 1;
+        }
+        return 0;
+    }
+
+    /* movq/movd moving a value between an xmm and a general register. Checked
+     * ahead of the general-purpose movq below, which would otherwise claim it
+     * and encode a GP move using the xmm number as a GPR. */
+    if (strcmp(mnem, "movq") == 0 || strcmp(mnem, "movd") == 0) {
+        const char *save = p;
+        Operand src = parse_operand_x64(&p);
+        if (*p == ',') p++;
+        Operand dst = parse_operand_x64(&p);
+        int w = (strcmp(mnem, "movq") == 0);
+        if (src.type == OT_REGXMM && dst.type == OT_REGXMM) {
+            enc_sse(text, relocs, 0xF3, 0x7E, dst.reg, &src, 0);
+            return 1;
+        }
+        if (src.type == OT_REGXMM) {
+            enc_sse(text, relocs, 0x66, 0x7E, src.reg, &dst, w);
+            return 1;
+        }
+        if (dst.type == OT_REGXMM) {
+            enc_sse(text, relocs, 0x66, 0x6E, dst.reg, &src, w);
+            return 1;
+        }
+        p = save; /* not an SSE form — let the GP encoder handle it */
+    }
+
+    /* Integer <-> floating conversions. A 'q' suffix, or a 64-bit register
+     * operand, selects REX.W. */
+    if (strncmp(mnem, "cvtsi2sd", 8) == 0 || strncmp(mnem, "cvtsi2ss", 8) == 0 ||
+        strncmp(mnem, "cvttsd2si", 9) == 0 || strncmp(mnem, "cvttss2si", 9) == 0 ||
+        strncmp(mnem, "cvtsd2si", 8) == 0 || strncmp(mnem, "cvtss2si", 8) == 0) {
+        Operand src = parse_operand_x64(&p);
+        if (*p == ',') p++;
+        Operand dst = parse_operand_x64(&p);
+        size_t mlen = strlen(mnem);
+        int w = (mnem[mlen - 1] == 'q') || src.type == OT_REG64 || dst.type == OT_REG64;
+        uint8_t pfx;
+        uint8_t opcode;
+        if (strncmp(mnem, "cvtsi2", 6) == 0) {
+            pfx = strstr(mnem, "2sd") ? 0xF2 : 0xF3;
+            opcode = 0x2A;
+        } else {
+            pfx = strstr(mnem, "sd2si") ? 0xF2 : 0xF3;
+            opcode = (mnem[3] == 't') ? 0x2C : 0x2D; /* truncating vs rounding */
+        }
+        enc_sse(text, relocs, pfx, opcode, dst.reg, &src, w);
+        return 1;
+    }
+
+    /* movabs $imm64, %reg — the only way to materialize a full 64-bit constant,
+     * which is how every double literal reaches the instruction stream. */
+    if (strcmp(mnem, "movabsq") == 0 || strcmp(mnem, "movabs") == 0) {
+        Operand src = parse_operand_x64(&p);
+        if (*p == ',') p++;
+        Operand dst = parse_operand_x64(&p);
+        if (src.type == OT_IMM && dst.type == OT_REG64) {
+            bb_write8(text, rex(1, 0, dst.reg));
+            bb_write8(text, (uint8_t)(0xB8 + (dst.reg & 7)));
+            bb_write64le(text, (uint64_t)src.imm);
+            return 1;
+        }
+        return 0;
     }
 
     /* ---- nop ---- */
@@ -1272,6 +1535,38 @@ static int x64_encode_line(const char *line, ByteBuf *text, EncCtx *ctx,
     }
 
     /* ---- movzbq %al, %rax ---- (zero-extend byte to 64-bit) */
+    /* ---- sign/zero-extending loads ----
+     * Register and base+displacement forms were handled below, but the indexed
+     * form assembled to `nop`. That silently broke every byte load through a
+     * pointer -- `*s` on a char* compiles to movsbq (%rax,%rcx,1), %rax -- so
+     * the destination kept whatever it already held instead of the character.
+     * One handler now covers register, base+disp, indexed and RIP sources. */
+    if (strcmp(mnem, "movsbq") == 0 || strcmp(mnem, "movswq") == 0 ||
+        strcmp(mnem, "movzbq") == 0 || strcmp(mnem, "movzwq") == 0 ||
+        strcmp(mnem, "movslq") == 0) {
+        Operand src = parse_operand_x64(&p);
+        if (*p == ',') p++;
+        Operand dst = parse_operand_x64(&p);
+        if (strcmp(mnem, "movslq") == 0) {
+            /* MOVSXD is a one-byte opcode with no 0F escape, so it cannot go
+             * through the shared 0F encoder. */
+            int rm_reg = (src.type == OT_MEM_RIP) ? 0 :
+                         (src.type == OT_MEM_BASE || src.type == OT_MEM_INDIR ||
+                          src.type == OT_MEM_IDX) ? src.base : src.reg;
+            int idx = (src.type == OT_MEM_IDX) ? src.idx : 0;
+            bb_write8(text, (uint8_t)(0x48 | ((dst.reg >= 8) ? 4 : 0) |
+                                      ((idx >= 8) ? 2 : 0) | ((rm_reg >= 8) ? 1 : 0)));
+            bb_write8(text, 0x63);
+            enc_modrm_operand(text, relocs, dst.reg, &src);
+            return 1;
+        }
+        uint8_t opcode = (strcmp(mnem, "movsbq") == 0) ? 0xBE :
+                         (strcmp(mnem, "movswq") == 0) ? 0xBF :
+                         (strcmp(mnem, "movzbq") == 0) ? 0xB6 : 0xB7;
+        enc_sse(text, relocs, 0x00, opcode, dst.reg, &src, 1);
+        return 1;
+    }
+
     if (strcmp(mnem, "movzbq") == 0) {
         Operand src = parse_operand_x64(&p);
         if (*p == ',') p++;
@@ -1443,12 +1738,6 @@ static int x64_encode_line(const char *line, ByteBuf *text, EncCtx *ctx,
         return 1;
     }
 
-    /* ---- movsbq indexed: movsbq (%rax,%rcx,1), %rax ---- */
-    if (strcmp(mnem, "movsbq") == 0 || strcmp(mnem, "movswq") == 0 || strcmp(mnem, "movslq") == 0) {
-        /* Already handled above for most cases; this catches indexed forms */
-        bb_write8(text, 0x90);
-        return 1;
-    }
 
     /* ---- leaq sym(%rip) / sym@GOTPCREL(%rip), %rax ---- */
     if (strcmp(mnem, "leaq") == 0) {
@@ -1538,9 +1827,19 @@ static int x64_encode_line(const char *line, ByteBuf *text, EncCtx *ctx,
         return 1;
     }
 
-    /* Unknown: emit nop to keep offsets consistent */
-    bb_write8(text, 0x90);
-    return 1;
+    /* Unknown mnemonic. This used to emit a nop "to keep offsets consistent",
+     * which silently produced wrong code: the whole SSE family was unencodable,
+     * so every floating-point program compiled cleanly and then computed
+     * garbage, with no diagnostic anywhere. Failing loudly is the only safe
+     * behaviour for an assembler — a missing encoding is a compiler bug, and it
+     * should surface as one instead of as a mysterious runtime result. */
+    {
+        char msg[160];
+        snprintf(msg, sizeof(msg),
+                 "elf_writer: no encoding for instruction '%s' (internal assembler)", mnem);
+        diagnostics_fatal(msg);
+    }
+    return 0;
 }
 
 /* =========================================================================
