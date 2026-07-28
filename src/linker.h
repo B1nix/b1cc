@@ -40,7 +40,7 @@ typedef struct {
     uint64_t     base_va;  /* load base (0x2000000 static; 0 for PIE/shared) */
     const char  *entry;    /* entry symbol name, e.g. "_start" */
     LinkMode     mode;
-    const char **needed;   /* DT_NEEDED shared libs (PIE), e.g. {"libc.so.1"} */
+    const char **needed;   /* DT_NEEDED shared libs (PIE), e.g. {"libc.so"} */
     int          n_needed;
     const char  *soname;   /* DT_SONAME for LINK_SHARED */
     const char  *interp;   /* PT_INTERP path for LINK_PIE (NULL = no interpreter).

@@ -49,6 +49,9 @@
 #define PT_LOAD       1
 #define PT_DYNAMIC    2
 #define PT_INTERP     3
+#define PT_PHDR       6
+/* Bytes reserved at the head of a PIE image for the ELF header + phdrs. */
+#define PIE_HDR_RESERVE 0x1000
 #define PT_GNU_STACK  0x6474e551
 #define PF_X 1
 #define PF_W 2
@@ -664,7 +667,13 @@ int elf_link(const LinkRequest *req, Arena *arena) {
         [OUT_INIT_ARRAY] = 8, [OUT_BSS] = 0x1000,
     };
     uint64_t out_va[OUT_COUNT], out_size[OUT_COUNT];
-    uint64_t va = req->base_va; /* 0 */
+    /* Start one page in and map file offset == vaddr, so the ELF header and the
+     * program headers themselves fall inside the first PT_LOAD. They have to:
+     * the kernel derives AT_PHDR by finding the PT_LOAD that contains e_phoff,
+     * and a dynamic executable whose phdrs are in no segment makes ld.so read
+     * whatever happens to be mapped there instead. musl then never finds
+     * PT_DYNAMIC, leaves the app's dynv NULL, and faults dereferencing it. */
+    uint64_t va = req->base_va + PIE_HDR_RESERVE;
     for (int slot = 0; slot < OUT_COUNT; slot++) {
         uint64_t al = out_align[slot];
         va = (va + al - 1) & ~(al - 1);
@@ -1006,7 +1015,7 @@ int elf_link(const LinkRequest *req, Arena *arena) {
 
     /* program headers: RX, R, RW(file part), DYNAMIC, (bss folded into RW memsz) */
     Buf out; memset(&out, 0, sizeof(out));
-    int phnum = 5 + (want_interp ? 1 : 0); /* RX, R, RW, DYNAMIC, GNU_STACK [, INTERP] */
+    int phnum = 6 + (want_interp ? 1 : 0); /* PHDR, RX, R, RW, DYNAMIC, GNU_STACK [, INTERP] */
 
     uint8_t ident[16] = {0x7f,'E','L','F',2,1,1,0,0,0,0,0,0,0,0,0};
     buf_put(&out, ident, 16);
@@ -1039,18 +1048,21 @@ int elf_link(const LinkRequest *req, Arena *arena) {
     uint64_t rw_start = r_end > out_va[OUT_DATA] ? r_end : out_va[OUT_DATA];
     rw_start = (rw_start + 0xfff) & ~0xfffull;  /* page-align */
     uint64_t rw_file_end = rw_end;                     /* dynamic sits last, file-backed */
-    PH(PT_LOAD, PF_R | PF_X, 0x1000 + rx_start, rx_start, rx_end - rx_start, rx_end - rx_start, 0x1000);
-    PH(PT_LOAD, PF_R,        0x1000 + r_start,  r_start,  r_end - r_start,   r_end - r_start,   0x1000);
-    PH(PT_LOAD, PF_R | PF_W, 0x1000 + rw_start, rw_start, rw_file_end - rw_start, (bss_va + bss_memsz > rw_file_end ? bss_va + bss_memsz : rw_file_end) - rw_start, 0x1000);
-    PH(PT_DYNAMIC, PF_R | PF_W, 0x1000 + dynamic_va, dynamic_va, dynamic_sz, dynamic_sz, 8);
+    /* The executable segment starts at file offset 0 so that it also covers the
+     * ELF header and the phdr table living in the reserved first page. */
+    PH(PT_PHDR, PF_R, 64, 64, (uint64_t)phnum * 56, (uint64_t)phnum * 56, 8);
+    PH(PT_LOAD, PF_R | PF_X, 0, 0, rx_end, rx_end, 0x1000);
+    PH(PT_LOAD, PF_R,        r_start,  r_start,  r_end - r_start,   r_end - r_start,   0x1000);
+    PH(PT_LOAD, PF_R | PF_W, rw_start, rw_start, rw_file_end - rw_start, (bss_va + bss_memsz > rw_file_end ? bss_va + bss_memsz : rw_file_end) - rw_start, 0x1000);
+    PH(PT_DYNAMIC, PF_R | PF_W, dynamic_va, dynamic_va, dynamic_sz, dynamic_sz, 8);
     PH(PT_GNU_STACK, PF_R | PF_W, 0, 0, 0, 0, 0);
     if (want_interp) {
         uint64_t interp_va = dynstr_va + interp_stroff;
-        PH(PT_INTERP, PF_R, 0x1000 + interp_va, interp_va, interp_sz, interp_sz, 1);
+        PH(PT_INTERP, PF_R, interp_va, interp_va, interp_sz, interp_sz, 1);
     }
 
     /* helper: write bytes at file offset 0x1000 + vaddr (forward-only) */
-    #define EMIT_AT(vaddr, ptr, nbytes) do { long _o = (long)(0x1000 + (vaddr)); if (out.len < _o) buf_zero(&out, _o - out.len); buf_put(&out, (ptr), (long)(nbytes)); } while (0)
+    #define EMIT_AT(vaddr, ptr, nbytes) do { long _o = (long)(vaddr); if (out.len < _o) buf_zero(&out, _o - out.len); buf_put(&out, (ptr), (long)(nbytes)); } while (0)
 
     /* Collect all emit targets, sort by VA, emit in order to avoid
      * forward-only EMIT_AT clobbering.  Input sections + synthesized. */
