@@ -2030,11 +2030,15 @@ static int is_lvalue_node(const Node *n) {
     if (n->op_enum == OP_VAR || n->op_enum == OP_INDEX || n->op_enum == OP_UNARY_DEREF) {
         return 1;
     }
+    if (n->op_enum == OP_CAST) {
+        return is_lvalue_node(n->lhs);
+    }
     if (n->op_enum == OP_COMMA) {
         return is_lvalue_node(n->rhs);
     }
     return 0;
 }
+
 
 static Node *factor(ParserState *p) {
     int tok_line = 1, tok_col = 1;
@@ -2159,6 +2163,9 @@ static Node *factor(ParserState *p) {
             field_key[0] = '\0';
             if (lhs_tag && lhs_tag[0]) {
                 snprintf(field_key, sizeof(field_key), "%s.%s", lhs_tag, field_name);
+                if (!hashmap_has(&p->global_struct_field_offsets_by_tag, field_key) && strncmp(lhs_tag, "struct ", 7) != 0) {
+                    snprintf(field_key, sizeof(field_key), "struct %s.%s", lhs_tag, field_name);
+                }
             }
             
             if (field_key[0] && hashmap_has(&p->global_struct_field_offsets_by_tag, field_key)) {
@@ -2233,6 +2240,7 @@ static Node *factor(ParserState *p) {
         } else if (strcmp(peek(p), "++") == 0 || strcmp(peek(p), "--") == 0) {
             const char *op = take(p, nullptr);
             if (!is_lvalue_node(n)) {
+                fprintf(stderr, "DEBUG: postfix %s on node op_enum=%d name=%s line=%d col=%d\n", op, n ? n->op_enum : -1, n && n->name ? n->name : "null", tok_line, tok_col);
                 diagnostics_error(tok_line, tok_col, "lvalue required as increment operand");
             } else if (n->is_const) {
                 diagnostics_error(tok_line, tok_col, "increment of read-only (const-qualified) lvalue");
@@ -3418,7 +3426,8 @@ static void parse_aggregate_init_internal(ParserState *p, long base_offset, cons
     }
 }
 
-static void fill_aggregate_zero(ParserState *p, long base_offset, const char *struct_tag, const LongArray *array_dims, size_t dim_idx, int base_type_size, InitElementArray *inits) {
+static void fill_aggregate_zero_depth(ParserState *p, long base_offset, const char *struct_tag, const LongArray *array_dims, size_t dim_idx, int base_type_size, InitElementArray *inits, int depth) {
+    if (depth > 16) return;
     if (struct_tag && struct_tag[0]) {
         HashMapEntry *entry = hashmap_get(&p->global_structs, struct_tag);
         if (entry) {
@@ -3438,8 +3447,8 @@ static void fill_aggregate_zero(ParserState *p, long base_offset, const char *st
                     const char *sub_tag = sub_tag_entry ? (const char *)sub_tag_entry->val_ptr : "";
                     HashMapEntry *ptr_entry = hashmap_get(&p->global_struct_field_is_pointer_by_tag, key);
                     int field_is_pointer = ptr_entry && ptr_entry->val_int;
-                    if ((sub_dims && sub_dims->count > 0) || (sub_tag && sub_tag[0] && !field_is_pointer)) {
-                        fill_aggregate_zero(p, base_offset + field_offset, sub_tag, sub_dims, 0, field_size, inits);
+                    if ((sub_dims && sub_dims->count > 0) || (sub_tag && sub_tag[0] && !field_is_pointer && strcmp(sub_tag, struct_tag) != 0)) {
+                        fill_aggregate_zero_depth(p, base_offset + field_offset, sub_tag, sub_dims, 0, field_size, inits, depth + 1);
                     } else {
                         Node *zero = create_node(p, "num", 1, 1);
                         zero->value = 0;
@@ -3462,7 +3471,7 @@ static void fill_aggregate_zero(ParserState *p, long base_offset, const char *st
         for (long idx = 0; idx < limit; ++idx) {
             long elem_offset = idx * elem_total_size;
             if (dim_idx + 1 < (size_t)array_dims->count) {
-                fill_aggregate_zero(p, base_offset + elem_offset, struct_tag, array_dims, dim_idx + 1, base_type_size, inits);
+                fill_aggregate_zero_depth(p, base_offset + elem_offset, struct_tag, array_dims, dim_idx + 1, base_type_size, inits, depth + 1);
             } else {
                 Node *zero = create_node(p, "num", 1, 1);
                 zero->value = 0;
@@ -3476,6 +3485,11 @@ static void fill_aggregate_zero(ParserState *p, long base_offset, const char *st
         }
     }
 }
+
+static void fill_aggregate_zero(ParserState *p, long base_offset, const char *struct_tag, const LongArray *array_dims, size_t dim_idx, int base_type_size, InitElementArray *inits) {
+    fill_aggregate_zero_depth(p, base_offset, struct_tag, array_dims, dim_idx, base_type_size, inits, 0);
+}
+
 
 static void parse_aggregate_init(ParserState *p, long base_offset, const char *struct_tag, const LongArray *array_dims, size_t dim_idx, int base_type_size, InitElementArray *inits) {
     if (strcmp(peek(p), "{") == 0) {

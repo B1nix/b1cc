@@ -8,9 +8,12 @@ mkdir -p "$tmp"
 B1NIX_ROOT="$(cd ../.. && pwd)"
 B1NIX_USR="$B1NIX_ROOT/userspace"
 B1NIX_CC_BIN="$B1NIX_ROOT/tools/toolchain/bin/b1nix-cc"
-B1NIX_CRT0_S="$B1NIX_USR/crt/crt0.S"
+B1NIX_MUSL_CC="$B1NIX_ROOT/tools/b1nix-musl-cc"
+B1NIX_CRT0_S="$B1NIX_USR/bin/native_smoke.S"
 if [ -x "$B1NIX_CC_BIN" ]; then
   export B1NIX_CC="$B1NIX_CC_BIN"
+elif [ -x "$B1NIX_MUSL_CC" ]; then
+  export B1NIX_CC="$B1NIX_MUSL_CC"
 fi
 
 make build/b1cc >/dev/null

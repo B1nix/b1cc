@@ -197,6 +197,23 @@ static const char hdr_unistd[] =
     "int mkdir(const char *, int);\n"
     "#endif\n";
 
+static const char hdr_errno[] =
+    "#ifndef _ERRNO_H\n"
+    "#define _ERRNO_H\n"
+    "#ifdef __APPLE__\n"
+    "extern int *__error(void);\n"
+    "#define errno (*__error())\n"
+    "#else\n"
+    "extern int *__errno_location(void);\n"
+    "#define errno (*__errno_location())\n"
+    "#endif\n"
+    "#define EPERM 1\n"
+    "#define ENOENT 2\n"
+    "#define ESRCH 3\n"
+    "#define EINTR 4\n"
+    "#define EIO 5\n"
+    "#endif\n";
+
 /* struct dirent / struct stat must match the *host libc* ABI, because the real
  * opendir/readdir/lstat run at runtime and fill these layouts. A too-small or
  * wrongly-offset stub means a field read at the wrong offset (garbage) and, for
@@ -439,6 +456,7 @@ static const BuiltinHeader builtin_headers[] = {
     { "stddef.h", hdr_stddef },
     { "b1cc_builtins.h", hdr_builtins },
     { "stdint.h", hdr_stdint },
+    { "errno.h", hdr_errno },
     { "iso646.h", hdr_iso646 },
     { "limits.h", hdr_limits },
     { "float.h", hdr_float },

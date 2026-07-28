@@ -1321,6 +1321,9 @@ static int get_expr_pointer_scale(const Node *node, const IrFunction *fn) {
         if (left > 0) return left;
         return get_expr_pointer_scale(node->body.data[1], fn);
     }
+    if (node->op_enum == OP_CALL && node->pointee_size > 0) {
+        return node->pointee_size;
+    }
     if (node->op_enum == OP_COMMA) {
         return get_expr_pointer_scale(node->rhs, fn);
     }
@@ -1335,6 +1338,8 @@ static int get_lvalue_store_size(const Node *node, const IrFunction *fn) {
     if (node->op_enum == OP_INDEX && strcmp(node->name, "byte_offset") == 0) {
         if (node->elem_size > 0) {
             scale = node->elem_size;
+        } else if (node->type_size > 0) {
+            scale = node->type_size;
         }
     } else if (node->op_enum == OP_INDEX) {
         if (node->elem_size > 0) {
@@ -1405,6 +1410,7 @@ static int lvalue_is_unsigned(const Node *node) {
 }
 
 static int complex_elem_size(const Node *node);
+static void lower_addr(const Node *node, IrFunction *fn, TargetBackend *backend, Arena *arena);
 
 static void lower_expr(const Node *node, IrFunction *fn, TargetBackend *backend, Arena *arena) {
     if (!node) return;
@@ -2490,7 +2496,16 @@ static void lower_addr(const Node *node, IrFunction *fn, TargetBackend *backend,
         }
     } else if (node->op_enum == OP_VAR) {
         HashMapEntry *entry = hashmap_get(&fn->locals, node->name);
+        if (!entry) {
+            char scoped[256];
+            for (int d = 16; d >= 0; --d) {
+                snprintf(scoped, sizeof(scoped), "%s$%d", node->name, d);
+                entry = hashmap_get(&fn->locals, scoped);
+                if (entry) break;
+            }
+        }
         if (entry) {
+
             char local_key[512];
             snprintf(local_key, sizeof(local_key), "%s$%s", fn->name, node->name);
             if (hashmap_has(&ir_local_array_dims, local_key)) {
@@ -2522,6 +2537,13 @@ static void lower_addr(const Node *node, IrFunction *fn, TargetBackend *backend,
         } else {
             ir_push(fn, "gaddr", node->name, 0);
         }
+    } else if (node->op_enum == OP_COMMA) {
+        lower_expr(node->lhs, fn, backend, arena);
+        lower_addr(node->rhs, fn, backend, arena);
+    } else if (node->op_enum == OP_CAST) {
+        lower_addr(node->lhs, fn, backend, arena);
+    } else if (node->op_enum == OP_UNARY_MINUS || node->op_enum == OP_UNARY_TILDE || node->op_enum == OP_UNARY_NOT) {
+        lower_addr(node->lhs, fn, backend, arena);
     } else {
         if (node->op_enum == OP_TERNARY) {
             ir_push(fn, "const", "", 0);
@@ -2534,6 +2556,9 @@ static void lower_addr(const Node *node, IrFunction *fn, TargetBackend *backend,
         diagnostics_error(node->line, node->col, "lvalue required");
     }
 }
+
+
+
 
 static int complex_temp_slot(IrFunction *fn, Arena *arena) {
     int slot = fn->locals.size;

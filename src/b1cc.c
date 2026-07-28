@@ -432,8 +432,17 @@ int main(int argc, char **argv) {
                              strcmp(target, "x86_64-unknown-elf") == 0);
     if (strcmp(target, "x86_64-b1nix") == 0 || is_kernel_target) {
         const char *env_cc = getenv("B1NIX_CC");
-        cc = env_cc ? env_cc : b1nix_path("../b1nix/tools/toolchain/bin/b1nix-cc",
-                                          "../../tools/toolchain/bin/b1nix-cc");
+        if (env_cc) {
+            cc = env_cc;
+        } else {
+            const char *musl_cc = b1nix_path("tools/b1nix-musl-cc", "../tools/b1nix-musl-cc");
+            if (exists(musl_cc)) {
+                cc = musl_cc;
+            } else {
+                cc = b1nix_path("../b1nix/tools/toolchain/bin/b1nix-cc",
+                                "../../tools/toolchain/bin/b1nix-cc");
+            }
+        }
         /* Internal linking never shells out to b1nix-cc, so don't require it —
          * this is the on-device case where b1nix-cc/ld.lld don't exist. */
         if (!internal_link && !is_kernel_target && !preprocess_only && !emit_asm && !shared && !exists(cc))

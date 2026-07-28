@@ -17,7 +17,10 @@ build/%.o: src/%.c
 test: build/b1cc
 	./test.sh
 
+test-b1cc: test
+
 clean:
 	rm -rf build
 
-.PHONY: all test clean
+.PHONY: all test test-b1cc clean
+
