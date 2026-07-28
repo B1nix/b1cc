@@ -869,18 +869,28 @@ int main(int argc, char **argv) {
 #else
                 const char *crt0dyn = env_crt0dyn ? env_crt0dyn : b1nix_path("../b1nix/userspace/build/x86_64/crt/crt0-dynamic.o", "../../userspace/build/x86_64/crt/crt0-dynamic.o");
 #endif
-                /* DT_NEEDED = libc.so.1 (implicit) + any -l/--needed sonames */
+                /* DT_NEEDED = the C library (implicit) + any -l/--needed sonames.
+                 * The default is "libc.so": that is the name musl's shared libc
+                 * records as its own, and the name the loader resolves. It stays
+                 * overridable for trees that install a versioned soname. */
+                const char *env_libc_soname = getenv("B1CC_LIBC_SONAME");
                 int n_needed = 1 + (int)extra_needed.count;
                 const char **needed_arr = (const char **)arena_alloc(&arena, sizeof(char *) * n_needed);
-                needed_arr[0] = "libc.so.1";
+                needed_arr[0] = env_libc_soname ? env_libc_soname : "libc.so";
                 for (int k = 0; k < (int)extra_needed.count; k++)
                     needed_arr[1 + k] = extra_needed.data[k];
                 const char *inputs_arr[2] = { crt0dyn, tmp_obj };
+                /* Without PT_INTERP the kernel never hands the image to ld.so,
+                 * so every libc import stays unresolved and the process dies on
+                 * its first call. Default to musl's loader; B1CC_INTERP overrides. */
+                const char *env_interp = getenv("B1CC_INTERP");
+                const char *interp = env_interp ? env_interp : "/lib/ld-musl-x86_64.so.1";
                 LinkRequest lr = {
                     .inputs = inputs_arr, .n_inputs = 2,
                     .out_path = out_name, .base_va = 0, .entry = "_start",
                     .mode = LINK_PIE,
                     .needed = needed_arr, .n_needed = n_needed,
+                    .interp = interp,
                 };
                 lrc = elf_link(&lr, &arena);
             } else {

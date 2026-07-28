@@ -43,6 +43,9 @@ typedef struct {
     const char **needed;   /* DT_NEEDED shared libs (PIE), e.g. {"libc.so.1"} */
     int          n_needed;
     const char  *soname;   /* DT_SONAME for LINK_SHARED */
+    const char  *interp;   /* PT_INTERP path for LINK_PIE (NULL = no interpreter).
+                            * A dynamic executable without one is never handed to
+                            * ld.so, so its libc imports stay unresolved. */
 } LinkRequest;
 
 /* Returns 0 on success; nonzero after emitting a diagnostic on failure.

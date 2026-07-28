@@ -48,6 +48,7 @@
 #define ET_DYN        3
 #define PT_LOAD       1
 #define PT_DYNAMIC    2
+#define PT_INTERP     3
 #define PT_GNU_STACK  0x6474e551
 #define PF_X 1
 #define PF_W 2
@@ -839,6 +840,17 @@ int elf_link(const LinkRequest *req, Arena *arena) {
     for (int i = 0; i < nneeded; i++) { needed_stroff[i] = (uint32_t)dynstr.len; buf_put(&dynstr, req->needed[i], (long)strlen(req->needed[i]) + 1); }
     uint32_t soname_stroff = 0;
     if (req->mode == LINK_SHARED && req->soname) { soname_stroff = (uint32_t)dynstr.len; buf_put(&dynstr, req->soname, (long)strlen(req->soname) + 1); }
+    /* PT_INTERP has to point at a NUL-terminated path inside a loaded segment.
+     * dynstr already lives in the read-only segment, so park the interpreter
+     * path at its tail rather than synthesizing a separate .interp section. */
+    int want_interp = (req->mode == LINK_PIE && req->interp && req->interp[0]);
+    uint32_t interp_stroff = 0;
+    uint64_t interp_sz = 0;
+    if (want_interp) {
+        interp_stroff = (uint32_t)dynstr.len;
+        interp_sz = (uint64_t)strlen(req->interp) + 1;
+        buf_put(&dynstr, req->interp, (long)interp_sz);
+    }
     uint64_t dynstr_sz = (uint64_t)dynstr.len;
     uint64_t reladyn_va = (dynstr_va + dynstr_sz + 7) & ~7ull;
     uint64_t reladyn_sz = (uint64_t)nrdyn * 24;
@@ -994,7 +1006,7 @@ int elf_link(const LinkRequest *req, Arena *arena) {
 
     /* program headers: RX, R, RW(file part), DYNAMIC, (bss folded into RW memsz) */
     Buf out; memset(&out, 0, sizeof(out));
-    int phnum = 5; /* RX, R, RW, DYNAMIC, GNU_STACK */
+    int phnum = 5 + (want_interp ? 1 : 0); /* RX, R, RW, DYNAMIC, GNU_STACK [, INTERP] */
 
     uint8_t ident[16] = {0x7f,'E','L','F',2,1,1,0,0,0,0,0,0,0,0,0};
     buf_put(&out, ident, 16);
@@ -1032,6 +1044,10 @@ int elf_link(const LinkRequest *req, Arena *arena) {
     PH(PT_LOAD, PF_R | PF_W, 0x1000 + rw_start, rw_start, rw_file_end - rw_start, (bss_va + bss_memsz > rw_file_end ? bss_va + bss_memsz : rw_file_end) - rw_start, 0x1000);
     PH(PT_DYNAMIC, PF_R | PF_W, 0x1000 + dynamic_va, dynamic_va, dynamic_sz, dynamic_sz, 8);
     PH(PT_GNU_STACK, PF_R | PF_W, 0, 0, 0, 0, 0);
+    if (want_interp) {
+        uint64_t interp_va = dynstr_va + interp_stroff;
+        PH(PT_INTERP, PF_R, 0x1000 + interp_va, interp_va, interp_sz, interp_sz, 1);
+    }
 
     /* helper: write bytes at file offset 0x1000 + vaddr (forward-only) */
     #define EMIT_AT(vaddr, ptr, nbytes) do { long _o = (long)(0x1000 + (vaddr)); if (out.len < _o) buf_zero(&out, _o - out.len); buf_put(&out, (ptr), (long)(nbytes)); } while (0)
